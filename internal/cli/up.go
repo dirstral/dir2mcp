@@ -638,13 +638,41 @@ func (a *App) probeEmbedProvider(emb model.Embedder, prof provider.Profile) erro
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := emb.Embed(ctx, prof.EmbedTextModel, model.EmbedDocument, []string{"dir2mcp preflight probe"}); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || store.IsTransientError(err) {
-			// Fail-open: a transient failure is not a credential/config problem.
-			return nil
+		if !probeErrorIsTransient(err) {
+			return err
 		}
-		return err
+		// Fail-open: a transient failure is not a credential/config problem.
+		// It is still worth one line, because the usual cause on a first run is
+		// a local server that is not started yet, and "indexing stalls" is a
+		// much worse way to find that out.
+		if a.stderr != nil {
+			where := strings.TrimSpace(prof.BaseURL)
+			if where == "" {
+				where = "its endpoint"
+			}
+			// The adapter's own message ("request failed") hides the useful
+			// part; the wrapped cause says "connection refused" or names the
+			// timeout.
+			detail := model.ProviderErrorDetail(err)
+			writef(a.stderr, "WARNING: embedding provider %q is not reachable at %s (%s). The server starts anyway and indexing retries; if this is a local server, check that it is running.\n",
+				prof.Name, where, detail)
+		}
+		return nil
 	}
 	return nil
+}
+
+// probeErrorIsTransient reports whether a preflight embed failure is
+// transient: a cancelled or expired context, a store-classified transient
+// error, or a provider error the adapter itself marked retryable (a refused
+// connection, a timeout, a 429 or 5xx). The last case was missing, so a
+// local OpenAI-compatible server that was simply not running failed startup
+// with "request failed" and advice to set an API key.
+func probeErrorIsTransient(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || store.IsTransientError(err) {
+		return true
+	}
+	return model.IsRetryableProviderError(err)
 }
 
 // reportEmbedPreflightError emits the §2.5 preflight failure in the

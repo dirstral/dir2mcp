@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -51,6 +54,29 @@ func TestProbeEmbedProvider(t *testing.T) {
 		emb := &probeStubEmbedder{err: errors.New("503 service unavailable")}
 		if err := a.probeEmbedProvider(emb, prof); err != nil {
 			t.Fatalf("transient error blocked preflight: %v; want fail-open (nil)", err)
+		}
+	})
+
+	t.Run("an unreachable local server fails open with a warning", func(t *testing.T) {
+		// What the OpenAI-compatible adapter returns when nothing listens on
+		// base_url: a retryable provider error wrapping ECONNREFUSED. It used
+		// to block startup with advice to set an API key.
+		var stderr bytes.Buffer
+		aw := &App{stderr: &stderr}
+		local := provider.Profile{Name: "local", BaseURL: "http://127.0.0.1:11434/v1", EmbedTextModel: "nomic-embed-text"}
+		emb := &probeStubEmbedder{err: &model.ProviderError{Code: "OPENAI_FAILED", Message: "request failed", Retryable: true, Cause: syscall.ECONNREFUSED}}
+		if err := aw.probeEmbedProvider(emb, local); err != nil {
+			t.Fatalf("an unreachable local server blocked startup: %v", err)
+		}
+		if !strings.Contains(stderr.String(), "http://127.0.0.1:11434/v1") || !strings.Contains(stderr.String(), "is running") || !strings.Contains(stderr.String(), "connection refused") {
+			t.Errorf("warning must name the endpoint and suggest checking the server, got %q", stderr.String())
+		}
+	})
+
+	t.Run("a non-retryable provider error still blocks", func(t *testing.T) {
+		emb := &probeStubEmbedder{err: &model.ProviderError{Code: "OPENAI_AUTH", Message: "invalid api key", Retryable: false, StatusCode: 401}}
+		if err := a.probeEmbedProvider(emb, prof); err == nil {
+			t.Fatal("a 401 passed preflight")
 		}
 	})
 
