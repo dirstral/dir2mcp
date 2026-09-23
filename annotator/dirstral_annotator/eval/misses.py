@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from ..model import Annotation
 from ..roster import Roster
 from .align import Alignment
-from .score import TOLERANCE_S, Scorecard
+from .score import Scorecard
 
 #: How far the diagnosis looks for the "real pitch this cue meant" before it
 #: calls a cue invented, or a pitch uncovered. Wider than the bug is ever off
@@ -82,6 +82,7 @@ class FalsePositive:
 @dataclass
 class MissReport:
     tolerance_s: float
+    near_s: float = NEAR_S
     misses: list[Miss] = field(default_factory=list)
     false_positives: list[FalsePositive] = field(default_factory=list)
 
@@ -110,8 +111,12 @@ def _signed_distance(t: float, ann: Annotation) -> float:
 
 
 def diagnose(card: Scorecard, alignment: Alignment, roster: Roster,
-             tolerance_s: float = TOLERANCE_S, near_s: float = NEAR_S) -> MissReport:
-    rep = MissReport(tolerance_s=tolerance_s)
+             tolerance_s: float | None = None, near_s: float = NEAR_S) -> MissReport:
+    # Default to the tolerance the scorecard was matched with: a different one
+    # would label an unmatched pair "consumed" or "taken".
+    if tolerance_s is None:
+        tolerance_s = card.tolerance_s
+    rep = MissReport(tolerance_s=tolerance_s, near_s=near_s)
     anns = card.pitch_anns
     matched_anns = set(card.matched.values())
     pitch_times = [(alignment.to_video(ev.epoch_s), pitcher.id, k)
@@ -189,7 +194,7 @@ def render(card: Scorecard, alignment: Alignment, roster: Roster, rep: MissRepor
         "## Why pitches were missed, and what the false positives were",
         "",
         f"Read off the scorecard's own matching (tolerance ±{rep.tolerance_s:.1f}s, "
-        f"nearest-pitch search ±{NEAR_S:.0f}s). `count` is a cue from the bug's pitch "
+        f"nearest-pitch search ±{rep.near_s:.0f}s). `count` is a cue from the bug's pitch "
         "counter, `graphic` one from the speed graphic.",
         "",
         "| Uncredited pitches, by cause/kind | n |",

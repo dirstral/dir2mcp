@@ -57,6 +57,8 @@ class Scorecard:
     # module docstring before reading an absent source as a weak one.
     per_source_found: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     total_events: int = 0
+    #: The tolerance the matching used, so a diagnosis of it uses the same.
+    tolerance_s: float = TOLERANCE_S
     #: The matching itself, so a diagnosis (misses.py) can say WHY a pitch went
     #: uncredited instead of re-deriving the greedy pairing and drifting from
     #: it. `scored` is every (event, pitcher) the metric looked at, in feed
@@ -74,7 +76,7 @@ def score(
     roster: Roster,
     tolerance_s: float = TOLERANCE_S,
 ) -> Scorecard:
-    card = Scorecard()
+    card = Scorecard(tolerance_s=tolerance_s)
     pitch_anns = [a for a in annotations if a.event == SCORED_EVENT]
     matched_anns: set[int] = set()
 

@@ -63,3 +63,17 @@ def test_scorecard_matching_is_recorded():
     card = score.score(anns, events, Alignment(0.0, 0.0, 1), roster)
     assert card.matched == {0: 0}
     assert len(card.scored) == 1 and len(card.pitch_anns) == 1
+
+
+def test_diagnosis_uses_the_scorecard_tolerance_and_reports_its_search():
+    roster = _roster()
+    events = [_pitch(100, 1)]
+    anns = [_ann(103, 104, "player:lee-jordan")]
+    card = score.score(anns, events, Alignment(0.0, 0.0, 1), roster, tolerance_s=1.0)
+    assert card.tolerance_s == 1.0 and card.overall.fn == 1
+    rep = misses.diagnose(card, Alignment(0.0, 0.0, 1), roster, near_s=10.0)
+    assert rep.tolerance_s == 1.0
+    assert [m.cause for m in rep.misses] == ["late"], "a 1 s scorecard must not call this consumed"
+    assert [f.cause for f in rep.false_positives] == ["late"]
+    text = "\n".join(misses.render(card, Alignment(0.0, 0.0, 1), roster, rep))
+    assert "±10s" in text and "±1.0s" in text

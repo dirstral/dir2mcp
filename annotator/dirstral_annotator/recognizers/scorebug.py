@@ -687,6 +687,13 @@ COUNT_PITCH_DEDUPE_S = 5.0
 #: recall 90.7 / 91.3 / 91.0% at bounds 3 / 5 / 8, precision 99.7% for all.
 COUNT_MAX_JUMP = 5
 
+#: Length of a chain of rejected stable reads, each a plausible step from the
+#: one before and with the committed count unseen in between, after which the
+#: committed count is taken to be the misread and the chain's last value
+#: becomes the new baseline. Above 2 so that two stable misreads in a row
+#: ("12", "13" for 87) still cannot move a good baseline.
+COUNT_REBASELINE_READS = 3
+
 
 def _plausible_count_step(current: int, candidate: int) -> bool:
     """Whether a stable new read of a pitcher's count may replace the one
@@ -767,6 +774,14 @@ def _count_pitch_cues(
     #: count later commits past it, the glimpse is exactly the boundary that
     #: splits a jump into its pitches (#1025).
     glimpsed: dict[str, dict[int, tuple[float, float]]] = {}
+    #: The chain of stable reads rejected since the committed count was last
+    #: seen: (last rejected value, chain length). A misread can also be the
+    #: FIRST commit ("265" for 26), and then every real count after it is
+    #: rejected. Real counts climb in plausible steps (27, 28, 29), scattered
+    #: misreads do not, so only a chain of COUNT_REBASELINE_READS rejected
+    #: reads that each follow the previous one plausibly moves the baseline,
+    #: without emitting a cue.
+    rejected: dict[str, tuple[int, int]] = {}
 
     def emit(pid: str, count: int, lo: float | None, first_t: float) -> None:
         # The interval the pitch is known to lie in. `lo` is absent only
@@ -799,6 +814,11 @@ def _count_pitch_cues(
         if current is not None and count == current:
             pending.pop(pid, None)  # the count simply has not moved
             last_seen[pid] = t
+            # The committed count is back, so any higher value glimpsed since
+            # was a misread: a count cannot go down. Keeping it would give a
+            # later step a bound from before this sighting.
+            glimpsed.pop(pid, None)
+            rejected.pop(pid, None)
             continue
         g = glimpsed.setdefault(pid, {})
         lo_hi = g.get(count)
@@ -816,8 +836,20 @@ def _count_pitch_cues(
             # past COUNT_MAX_JUMP is not pitches missed between two frames:
             # both are a misread digit ("29" read "2", "26" read "265"), and
             # committing one would turn the next real +1 into a jump that
-            # emits nothing (#1025). The committed count stands.
+            # emits nothing (#1025). The committed count stands, unless it
+            # has not been seen for COUNT_REBASELINE_READS rejections: then it
+            # was the misread, and the candidate is adopted without a cue.
+            last_rej, chain = rejected.get(pid, (None, 0))
+            chain = chain + 1 if last_rej is not None and _plausible_count_step(last_rej, candidate) else 1
+            rejected[pid] = (candidate, chain)
+            if chain < COUNT_REBASELINE_READS:
+                continue
+            committed[pid] = candidate
+            last_seen[pid] = t
+            glimpsed.pop(pid, None)
+            rejected.pop(pid, None)
             continue
+        rejected.pop(pid, None)
         previous = current
         seen_at = last_seen.get(pid)
         committed[pid] = candidate

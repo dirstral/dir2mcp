@@ -481,6 +481,33 @@ def test_a_jump_through_glimpsed_counts_emits_one_cue_per_pitch(roster, fake_fra
     assert pitches[0].end_s <= pitches[1].end_s
 
 
+def test_a_misread_first_commit_is_rebaselined(roster, fake_frames):
+    """The first stable read can itself be the misread ("265" for 26). Every
+    real count after it is then a decrease; after COUNT_REBASELINE_READS of
+    them the baseline moves, without a cue, and counting resumes."""
+    ocr = fake_frames(["RAY P: 265", "RAY P: 265",
+                       "RAY P: 27", "RAY P: 27",
+                       "RAY P: 28", "RAY P: 28",
+                       "RAY P: 29", "RAY P: 29",
+                       "RAY P: 30", "RAY P: 30"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
+    assert [c.text for c in cues if c.event == "pitch"] == ["Pitch 30 by Robbie Ray"]
+
+
+def test_a_stale_glimpse_does_not_bound_a_later_pitch(roster, fake_frames):
+    """88 misread on one frame, then 87 seen again: the glimpse was a misread
+    and must not survive to give the real 88 a bound from before the 87s."""
+    ocr = fake_frames(["RAY P: 87", "RAY P: 87",
+                       "RAY P: 88",
+                       "RAY P: 87", "RAY P: 87",
+                       "RAY P: 88",
+                       "RAY P: 89", "RAY P: 89"])
+    cues = ScorebugRecognizer(roster, ocr=ocr, crop=WHOLE, count_pitch_cues=True).recognize(MEDIA)
+    pitches = sorted((c for c in cues if c.event == "pitch"), key=lambda c: c.start_s)
+    assert [c.text for c in pitches] == ["Pitch 88 by Robbie Ray", "Pitch 89 by Robbie Ray"]
+    assert pitches[0].start_s >= 3 * 2.0 - 1e-6, "88's cue reached back before the second 87"
+
+
 def test_a_jump_with_an_unseen_count_still_emits_nothing(roster, fake_frames):
     """42 to 44 with 43 never shown: two pitches happened, WHEN is unknown."""
     ocr = fake_frames(["RAY P: 42", "RAY P: 42",
