@@ -492,7 +492,7 @@ func resolveProcessExitCode(ctxErr error, code int, serverGracefulStop bool) int
 // RunWithContext parses global flags and dispatches the remaining command
 // under ctx, printing usage when no command is given.
 func (a *App) RunWithContext(ctx context.Context, args []string) int {
-	if len(args) == 0 {
+	if len(args) == 0 || argsRequestHelp(args) {
 		a.printUsage()
 		return exitSuccess
 	}
@@ -1120,6 +1120,24 @@ func isJSONFlagEnabled(arg string) bool {
 
 // argsContainJSONFlag reports whether any arg enables JSON output, used to
 // format early errors before full flag parsing.
+// argsRequestHelp reports whether args ask for help (-h, -help or --help)
+// before any "--" terminator. The check runs before any flag set parses, so
+// help works the same way on every command and on the bare binary: the usage
+// goes to stdout and the exit code is 0. Without it each command's flag set
+// returned flag.ErrHelp as an invalid-flags error. An argument after "--" is
+// an operand, so `dir2mcp ask -- --help` still asks the literal question.
+func argsRequestHelp(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "--":
+			return false
+		case "-h", "-help", "--help":
+			return true
+		}
+	}
+	return false
+}
+
 func argsContainJSONFlag(args []string) bool {
 	for _, arg := range args {
 		if isJSONFlagEnabled(arg) {
