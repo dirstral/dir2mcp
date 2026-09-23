@@ -292,9 +292,30 @@ func (st *windowLanguageState) recordDecoded(ranges []CoverageRange, entries []m
 // slice of one. Repetition, gibberish and the script mismatch stay on: those
 // are the shapes a hallucinating decoder produces on audio it cannot cover.
 func windowGateConfig() quality.Config {
-	cfg := quality.DefaultConfig()
+	return windowGateConfigFrom(quality.DefaultConfig())
+}
+
+// windowGateConfigFrom derives the per-window detector set from an installed
+// gate's configuration: the same detectors and thresholds, minus empty and
+// density. A caller that disabled a detector keeps it disabled per window, so
+// a window is never refused by a check the caller's own gate would pass.
+func windowGateConfigFrom(base quality.Config) quality.Config {
+	cfg := base
 	cfg.Empty.Enabled = false
 	cfg.Density.Enabled = false
+	return cfg
+}
+
+// windowDocGateConfigFrom is the document-level gate for a transcript whose
+// windows were already gated (SPEC §8.2.2): only the empty and density
+// detectors. Repetition, gibberish and script mismatch ran on every window, and
+// a window that passed them must not fail the document through the merged text,
+// which the spec fails only when every window fails.
+func windowDocGateConfigFrom(base quality.Config) quality.Config {
+	cfg := base
+	cfg.Repetition.Enabled = false
+	cfg.Gibberish.Enabled = false
+	cfg.Language.Enabled = false
 	return cfg
 }
 

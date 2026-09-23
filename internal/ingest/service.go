@@ -166,6 +166,9 @@ type Service struct {
 	// window is a fraction of the recording the density floor was tuned for. Nil
 	// when quality gates are off, in which case no window is refused for quality.
 	windowGate *quality.Gate
+	// windowDocGate is the document-level gate for a transcript whose windows
+	// windowGate already screened: empty and density only (SPEC §8.2.2).
+	windowDocGate *quality.Gate
 
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
@@ -1048,6 +1051,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	if cfg.QualityGatesEnabled {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
 		svc.windowGate = quality.New(windowGateConfig())
+		svc.windowDocGate = quality.New(windowDocGateConfigFrom(quality.DefaultConfig()))
 	}
 	svc.resolveTranscriptIdentityFields()
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
@@ -1847,8 +1851,10 @@ func (s *Service) SetQualityGate(gate *quality.Gate) {
 	// only: the window set is a fixed subset tuned for a window's length.
 	if gate == nil {
 		s.windowGate = nil
+		s.windowDocGate = nil
 	} else {
-		s.windowGate = quality.New(windowGateConfig())
+		s.windowGate = quality.New(windowGateConfigFrom(gate.Config()))
+		s.windowDocGate = quality.New(windowDocGateConfigFrom(gate.Config()))
 	}
 	s.qualityGate = gate
 }
@@ -5304,10 +5310,27 @@ func qualityGateFailureCode(kind string) string {
 // the chunk-level quarantine values. kind selects the canonical code and the
 // diagnostic label; doc identifies the document to mark.
 func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
-	if s.qualityGate == nil {
+	return s.screenOutputQualityWith(s.qualityGate, ctx, doc, kind, text, qctx)
+}
+
+// transcriptDocGate picks the document-level gate for a transcript: the
+// reduced windowDocGate when its windows were already screened one by one (a
+// window-scoped decode records coverage.languages, SPEC §8.2.2), else the
+// full gate. A recording that fell back to one unscoped request never met the
+// per-window gate, so it keeps every check.
+func (s *Service) transcriptDocGate(coverage *TranscriptCoverage) *quality.Gate {
+	if s.qualityGate != nil && s.windowGate != nil && s.windowDocGate != nil && coverage != nil && coverage.Languages != nil {
+		return s.windowDocGate
+	}
+	return s.qualityGate
+}
+
+// screenOutputQualityWith is screenOutputQuality with an explicit gate.
+func (s *Service) screenOutputQualityWith(gate *quality.Gate, ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
+	if gate == nil {
 		return quarantineDecision{}
 	}
-	verdict := s.qualityGate.Evaluate(text, qctx)
+	verdict := gate.Evaluate(text, qctx)
 	if verdict.OK() {
 		return quarantineDecision{}
 	}
@@ -5668,7 +5691,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
 		duration = d
 	}
-	decision := s.screenOutputQuality(ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
+	decision := s.screenOutputQualityWith(s.transcriptDocGate(coverage), ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
 		Duration:         duration,
@@ -5820,6 +5843,12 @@ func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, 
 		}
 		s.logTrackDropped(doc, tc, fmt.Sprintf(
 			"every decode window was refused by the per-window quality gate (first reason %s; SPEC §8.2.2, §8.6.6)", reason))
+		// An earlier run's transcript of this track is retired, exactly as the
+		// language refusal above does: otherwise another track's success would
+		// finish the document with this track's stale chunks still searchable.
+		if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
+			return "", false, fmt.Errorf("quality-gate refusal for %s: %w", doc.RelPath, err)
+		}
 		if !s.deferGateDocError {
 			s.recordQualityGateDocError(ctx, doc, qualityKindTranscript, reason)
 		}

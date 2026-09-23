@@ -267,3 +267,106 @@ func TestWindowQuality_MixedTracksAreALanguageSkip(t *testing.T) {
 		t.Fatalf("dub.m4a: status=%q skip_reason=%q error=%q, want skipped/%s", doc.Status, doc.SkipReason, doc.ErrorMessage, model.SkipReasonLanguageUncovered)
 	}
 }
+
+// TestWindowQuality_ACustomGateIsHonouredPerWindow: a caller whose own gate
+// disables the repetition detector must not see a window refused for
+// repetition. The per-window gate is derived from the installed gate.
+func TestWindowQuality_ACustomGateIsHonouredPerWindow(t *testing.T) {
+	t.Parallel()
+	tr := &langWindowTranscriber{
+		def: langReply{lang: "ru", conf: 0.9, text: ruText},
+		// Cyrillic, so the script check passes and repetition is the only
+		// detector that could refuse it.
+		script: map[int]langReply{3: {lang: "ru", conf: 0.9, text: "[00:00] спасибо спасибо спасибо спасибо спасибо спасибо спасибо спасибо спасибо"}},
+	}
+	h, content := newScopedHarness(t, tr, scopeTotalMS)
+	cfg := quality.DefaultConfig()
+	cfg.Repetition.Enabled = false
+	h.svc.SetQualityGate(quality.New(cfg))
+
+	meta := runScoped(t, h, "talks/custom.m4a", content)
+	if len(meta.Coverage.Refused) != 0 {
+		t.Errorf("refused = %+v, want none: the installed gate has repetition off", meta.Coverage.Refused)
+	}
+}
+
+// TestWindowQuality_PassingWindowsDoNotFailTheMergedTranscript: each window is
+// too short for the repetition detector (it needs 24 runes) and passes, but
+// the merged transcript is a long loop. The document-level gate under window
+// scope keeps only empty and density, so the recording is indexed, not failed
+// through checks its windows already passed.
+func TestWindowQuality_PassingWindowsDoNotFailTheMergedTranscript(t *testing.T) {
+	t.Parallel()
+	tr := &langWindowTranscriber{def: langReply{lang: "en", conf: 0.9, text: "[00:00] ok ok ok ok ok"}}
+	h, content := newScopedHarness(t, tr, scopeTotalMS)
+	cfg := quality.DefaultConfig()
+	cfg.Density.Enabled = false // isolate the detectors the windows already ran
+	h.svc.SetQualityGate(quality.New(cfg))
+
+	meta := runScoped(t, h, "talks/short-loops.m4a", content)
+	if len(meta.Coverage.Refused) != 0 || meta.Coverage.WindowsDecoded != 4 {
+		t.Fatalf("coverage = %+v, want every window decoded and none refused", meta.Coverage)
+	}
+	if strings.Contains(h.logs.String(), "quality gate quarantined transcript") {
+		t.Errorf("the merged transcript was quarantined by a detector its windows already passed:\n%s", h.logs.String())
+	}
+}
+
+// TestWindowQuality_ARefusedTrackRetiresItsOldTranscript: a two-track document
+// whose second track's windows are all refused by the gate on a later run must
+// not keep that track's earlier transcript searchable.
+func TestWindowQuality_ARefusedTrackRetiresItsOldTranscript(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	body := "fake-audio"
+	writeFile(t, filepath.Join(root, "dub.m4a"), body)
+	st := newRealStore(t)
+	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off", MediaSTTTracks: []string{"0", "1"}}
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+	tr := &langWindowTranscriber{def: langReply{lang: "ru", conf: 0.9, text: ruText}}
+	svc.SetTranscriber(tr)
+	svc.SetSTTIdentity("whisper", "large-v3")
+	svc.SetLanguageScope("window")
+	svc.SetQualityGate(quality.New(quality.DefaultConfig()))
+	svc.ProbeMediaInfoFunc = threeTrackProbe()
+	track1 := "track-1-audio-run-1"
+	svc.ExtractAudioTrackIndexFunc = func(_ context.Context, _ string, audioIndex int) ([]byte, error) {
+		if audioIndex == 1 {
+			return []byte(track1), nil
+		}
+		return []byte(trackAudioBytes(audioIndex)), nil
+	}
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) {
+		return time.Duration(scopeTotalMS) * time.Millisecond, nil
+	}
+	svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+		return make([]byte, 10*(endMS-startMS)/scopeTotalMS+1), nil
+	}
+	f := ingest.DiscoveredFile{RelPath: "dub.m4a", SizeBytes: int64(len(body)), MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if types := repTypesFor(t, st, "dub.m4a"); !types["transcript"] || !types["transcript@t1"] {
+		t.Fatalf("run 1 must produce both tracks, got %v", types)
+	}
+
+	// Run 2: track 1's audio changed and now decodes to a loop in every window;
+	// track 0 is unchanged.
+	track1 = "track-1-audio-run-2"
+	calls := tr.callCount()
+	tr.mu.Lock()
+	tr.script = map[int]langReply{}
+	for i := calls + 1; i <= calls+16; i++ {
+		tr.script[i] = langReply{lang: "ru", conf: 0.9, text: loopText}
+	}
+	tr.mu.Unlock()
+	if err := svc.ProcessDocument(ctx, f, nil, true); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	types := repTypesFor(t, st, "dub.m4a")
+	if types["transcript@t1"] {
+		t.Errorf("the refused track's old transcript is still live: %v", types)
+	}
+}
