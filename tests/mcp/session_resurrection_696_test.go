@@ -141,8 +141,11 @@ func TestExpiredSessionIsNotResurrectedByARacingTouch_696(t *testing.T) {
 	paused := newPausingSessionStore(st)
 
 	// A short absolute lifetime makes the expiry fire deterministically off the
-	// session's creation time, with no dependency on the idle clock.
-	const maxLifetime = 150 * time.Millisecond
+	// session's creation time, with no dependency on the idle clock. One second,
+	// not 150 ms: the initialize handshake and request A's touch must both land
+	// INSIDE the lifetime, and under -race on a shared CI runner the handshake
+	// alone overran 150 ms (notifications/initialized answered 404, 2026-09-23).
+	const maxLifetime = time.Second
 	cfg := config.Config{MCPPath: "/mcp", AuthMode: "none", StateDir: dir, SessionMaxLifetime: maxLifetime}
 	url, stop := startSessionRaceServer(t, cfg, paused)
 	defer stop()
