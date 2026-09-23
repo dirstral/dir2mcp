@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in dir2mcp does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security problem, do not use this form. Follow SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `dir2mcp version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and install method
+      description: For example "macOS 15 arm64, Homebrew dir2mcp-full" or "Linux amd64, built from source".
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: The commands you ran, in order.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual result
+      description: What you expected, and what happened. Paste the exact error text.
+    validations:
+      required: true
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Support bundle
+      description: |
+        Run `dir2mcp support-bundle` and attach the tar.gz. It redacts credentials.
+        Read "What a support bundle discloses" in the README before you attach it.

@@ -1463,7 +1463,7 @@ Operator guides (in-repo):
 ## Development
 
 ```bash
-make check        # fmt + vet + lint + cyclo + test + build
+make check        # fmt-check + vet + lint + cyclo + test + annotator suite + build (never rewrites the tree)
 make cyclo        # gocyclo -over 15 ./internal/ (install: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0)
 make build        # build dir2mcp binary
 make build-elevenlabs-bridge  # build ElevenLabs bridge wrapper binary
