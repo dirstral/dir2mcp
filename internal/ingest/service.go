@@ -2364,6 +2364,13 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if existingDoc.Status == "error" {
 		return true
 	}
+	// The classification changed on unchanged bytes: a classifier upgrade (an
+	// unknown extension now sniffed as text, SPEC §7.3) must reach a file that
+	// was stored as a binary skip. Without this the row was relabelled
+	// status=ok with no representation generated: indexed but unsearchable.
+	if existingDoc.DocType != "" && existingDoc.DocType != doc.DocType {
+		return true
+	}
 	if doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath) {
 		return true
 	}
@@ -3313,7 +3320,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// per-document secret scope (#681) even though the members of one archive run
 	// under a single processDocument entry.
 	s.beginDocumentSecretScope(secretPatterns)
-	docType := ClassifyDocType(relPath)
+	docType := SniffTextDocType(ClassifyDocType(relPath), relPath, content)
 	// Never ingest binary or ignored artifacts from inside archives.
 	if docType == "binary_ignored" || docType == "ignore" {
 		return nil
@@ -3414,6 +3421,10 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 	sidecarFP := s.sidecarFingerprint(ctx, f.RelPath, docType)
 	doc.SidecarFingerprint = sidecarFP
 	doc.ContentHash = mediaContentHash(content, sidecarFP)
+	// SPEC §7.3: an unknown extension is sniffed, so a text file the extension
+	// table does not list is indexed rather than skipped as binary.
+	docType = SniffTextDocType(docType, f.RelPath, content)
+	doc.DocType = docType
 
 	// certain document types we don't want to ingest at all.
 	// "archive" and "binary_ignored" were already skipped.
