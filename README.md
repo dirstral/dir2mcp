@@ -12,10 +12,74 @@
 
 # dir2mcp
 
-Deploy any local directory as an MCP knowledge server with indexing, retrieval, and citations. It works out of the box with one API key, and every capability can be rebound to a different provider without changing how the corpus is indexed or cited. Optional layers include ElevenLabs voice output via a dedicated bridge binary and x402 request gating (payment/request-gating protocol).
+Point it at a folder. Ask questions about what is inside, and get answers that
+cite the exact file and lines, or the exact seconds of a recording.
 
-## Why dir2mcp
+dir2mcp indexes a directory (code, Markdown, PDFs and office documents, audio
+and video) and serves it over [MCP](https://modelcontextprotocol.io), the
+protocol Claude, Cursor and other AI clients use to reach tools and data. It is
+one Go binary with its state in `.dir2mcp/` next to your files. It runs fully
+local if you want: embeddings and answers can come from Ollama or any
+OpenAI-compatible server, and `dir2mcp doctor` verifies that nothing leaves the
+machine.
 
+## Try it in two minutes
+
+```bash
+brew tap dirstral/tap && brew trust dirstral/tap
+brew install dirstral/tap/dir2mcp
+cd ~/notes                      # any folder you want to ask about
+```
+
+**Fully local, no account** (with [Ollama](https://ollama.com)):
+
+```bash
+ollama pull nomic-embed-text && ollama pull qwen2.5:7b
+cat > .dir2mcp.yaml <<'EOF'
+providers:
+  local:
+    kind: openai
+    base_url: http://127.0.0.1:11434/v1
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: qwen2.5:7b
+model:
+  embed: {provider: local}
+  chat: {provider: local}
+EOF
+dir2mcp up
+```
+
+**Or with one cloud key** (Mistral is the default; OpenAI and Gemini work too):
+
+```bash
+export MISTRAL_API_KEY=...
+dir2mcp up
+```
+
+Then ask from the terminal, or hand the folder to Claude Desktop:
+
+```console
+$ dir2mcp ask "When is the budget meeting?"
+The quarterly budget meeting is on Thursday. [notes.md:L1-L3]
+
+  Citations
+  [1] notes.md  chunk=2 span=L1-L3
+
+$ dir2mcp install claude        # restart Claude Desktop, then ask it about the folder
+```
+
+`dir2mcp status` shows what was indexed, and names every file it skipped with
+the reason. `dir2mcp down` stops the server; `up` resumes incrementally.
+
+## What makes it different
+
+- Answers cite spans, not files: a line range for text and code, a page for
+  PDFs, a time range for audio and video, and `open_file` returns exactly the
+  cited span.
+- Coverage is honest: a file it could not read, a passage in a language the
+  configured speech model does not cover, or a window of degenerate
+  transcription is recorded with its reason instead of silently dropped.
 - Provider-agnostic by capability. Embedding, extraction/OCR, transcription,
   generation and reranking are bound independently, so you can mix providers or
   move one capability without touching the rest:
@@ -42,7 +106,8 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
   filterable annotations (`event`, `entities`), each naming the recognizer that
   produced it. An answer cites a moment, and the client can play exactly that moment
 - Citation-aware retrieval and RAG-style answering
-- Optional facilitator-backed x402 payment gating for `tools/call`
+- Optional layers: ElevenLabs voice output through a bridge binary, and
+  facilitator-backed x402 request gating for `tools/call`
 - Repo layout with two binaries:
   - `dir2mcp`: MCP server and indexing/runtime host
   - `elevenlabs-bridge`: HTTP helper for ElevenLabs webhook tools
@@ -174,14 +239,15 @@ Pick the row that matches how you run `dir2mcp`:
 | Public MCP via ngrok | Local MCP requirements + `ngrok` installed + verified ngrok account + authtoken |
 | x402-gated MCP | Public MCP requirements + facilitator URL + facilitator token + full x402 route policy fields |
 
-## Quickstart
+## Build from source
 
-**Build prerequisites (source build only):** Go 1.25+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
+The [two-minute path](#try-it-in-two-minutes) uses the Homebrew build. To build
+it yourself you need Go 1.25+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
 
 ```bash
 git clone https://github.com/Dirstral/dir2mcp
 cd dir2mcp
-cp .env.example .env        # add your API keys
+cp .env.example .env        # optional: provider keys (or use a local .dir2mcp.yaml)
 # optional: create `.env.local` for local overrides
 # (it takes precedence over `.env`)
 # cp .env.example .env.local
@@ -1417,34 +1483,13 @@ See [dirstral-spec/docs/x402-payment-adapter-spec.md](dirstral-spec/docs/x402-pa
 
 Core server, ingestion pipeline, retrieval, citations, and x402 gating are implemented. See [open issues](https://github.com/Dirstral/dir2mcp/issues) for in-progress work.
 
-## Ecosystem Split Status
+## Related repositories
 
-Issue [#113](https://github.com/Dirstral/dir2mcp/issues/113) tracks the repo split.
-
-- `dir2mcp` (this repo): MCP server implementation + bridge binary
-- `dirstral-spec`: canonical specs/schemas/versioning
-- `dirstral-conformance`: black-box conformance harness
-- `dirstral-cli`: client/orchestrator UX
-- `landfall`: code-navigation MCP server product stub
-
-Pre-split audit summary:
-- Cross-product imports: none in `dir2mcp` implementation (composition boundary is MCP).
-- CLI boundary: `internal/cli` here is server/bootstrap CLI; client UX belongs to `dirstral-cli`.
-- Landfall source: product scope comes from issue [#112](https://github.com/Dirstral/dir2mcp/issues/112), now represented by a separate stub repo.
-- Docs destination mapping:
-  - `docs/SPEC.md` -> `dirstral-spec/docs/SPEC.md`
-  - `docs/ECOSYSTEM.md` -> `dirstral-spec/docs/ECOSYSTEM.md`
-  - `docs/x402-payment-adapter-spec.md` -> `dirstral-spec/docs/x402-payment-adapter-spec.md`
-
-CLI ownership/disposition matrix:
-
-| Path group | Ownership | Disposition |
-|---|---|---|
-| `internal/cli/up.go`, `internal/cli/reindex.go`, `internal/cli/status.go` | `dir2mcp` | keep |
-| `internal/cli/config_cmd.go`, `internal/cli/bridge.go` | `dir2mcp` | keep |
-| `internal/cli/ask.go`, `internal/cli/remote_commands.go` | `dirstral-cli` UX concern | keep as protocol-facing compatibility shims (legacy) |
-| `tests/cli/*` for server/bootstrap commands | `dir2mcp` | keep |
-| `tests/cli/*` for legacy remote/client-style commands | transition coverage | keep until full extraction is complete |
+- [`dirstral-spec`](https://github.com/dirstral/dirstral-spec): the normative
+  specification and tool schemas this server implements.
+- [`dirstral-conformance`](https://github.com/dirstral/dirstral-conformance): a
+  black-box conformance suite for any server that claims the spec.
+- [`dirstral-cli`](https://github.com/dirstral/dirstral-cli): a terminal client.
 
 ## Documentation
 
