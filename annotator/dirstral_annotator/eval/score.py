@@ -21,7 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from ..model import Annotation
-from ..roster import Roster
+from ..roster import Player, Roster
 from .align import Alignment
 from .ground_truth import PitchEvent
 
@@ -57,6 +57,16 @@ class Scorecard:
     # module docstring before reading an absent source as a weak one.
     per_source_found: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     total_events: int = 0
+    #: The tolerance the matching used, so a diagnosis of it uses the same.
+    tolerance_s: float = TOLERANCE_S
+    #: The matching itself, so a diagnosis (misses.py) can say WHY a pitch went
+    #: uncredited instead of re-deriving the greedy pairing and drifting from
+    #: it. `scored` is every (event, pitcher) the metric looked at, in feed
+    #: order; `matched` maps its index to the index into the `pitch`
+    #: annotations (`pitch_anns`) it was credited to.
+    scored: list[tuple[PitchEvent, Player]] = field(default_factory=list)
+    pitch_anns: list[Annotation] = field(default_factory=list)
+    matched: dict[int, int] = field(default_factory=dict)
 
 
 def score(
@@ -66,7 +76,7 @@ def score(
     roster: Roster,
     tolerance_s: float = TOLERANCE_S,
 ) -> Scorecard:
-    card = Scorecard()
+    card = Scorecard(tolerance_s=tolerance_s)
     pitch_anns = [a for a in annotations if a.event == SCORED_EVENT]
     matched_anns: set[int] = set()
 
@@ -78,8 +88,10 @@ def score(
             continue  # not on the pilot roster; out of scope for the metric
         scored_events.append((ev, pitcher))
     card.total_events = len(scored_events)
+    card.scored = scored_events
+    card.pitch_anns = pitch_anns
 
-    for ev, pitcher in scored_events:
+    for k, (ev, pitcher) in enumerate(scored_events):
         t = alignment.to_video(ev.epoch_s)
         found = False
         for i, ann in enumerate(pitch_anns):
@@ -90,6 +102,7 @@ def score(
             if ann.start_s - tolerance_s <= t <= ann.end_s + tolerance_s:
                 found = True
                 matched_anns.add(i)
+                card.matched[k] = i
                 for src in ann.sources:
                     card.per_source_found[src] += 1
                 break
