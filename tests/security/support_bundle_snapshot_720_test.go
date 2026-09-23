@@ -206,7 +206,7 @@ func TestSupportBundleDefaultKeepsDiagnosticSettings(t *testing.T) {
 		"index_backend: memory",
 		"retrieval_hybrid_enabled: true",
 		"chunking_max_tokens: 0",
-		"stt_provider: mistral",
+		"stt_provider: auto",
 		"source_kind: s3",
 		"public: false",
 	} {

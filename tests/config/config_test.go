@@ -738,7 +738,7 @@ func assertDefaultIngest(t *testing.T, cfg config.Config) {
 
 func assertDefaultSTT(t *testing.T, cfg config.Config) {
 	t.Helper()
-	if cfg.STTProvider != "mistral" || cfg.STTMistralModel == "" || cfg.STTElevenLabsModel == "" {
+	if cfg.STTProvider != "auto" || cfg.STTMistralModel == "" || cfg.STTElevenLabsModel == "" {
 		t.Fatalf("unexpected stt defaults: provider=%q mistral=%q eleven=%q", cfg.STTProvider, cfg.STTMistralModel, cfg.STTElevenLabsModel)
 	}
 	if cfg.STTElevenLabsModel != "scribe_v1" {
