@@ -276,6 +276,12 @@ type Service struct {
 	// so the previous per-index split (chunkByIndex) held a redundant second copy
 	// of every SearchHit; it was collapsed into this one map (issue #429 F4/D1).
 	chunkByLabel map[uint64]model.SearchHit
+	// axisByLabel records which index axis ("text" or "code") each registered
+	// chunk belongs to, and axisChunks counts them, so index=auto can tell a
+	// mixed corpus from a text-only or code-only one (SPEC §9.1, 0.73.0).
+	// Guarded by metaMu. A chunk registered without an axis is not counted.
+	axisByLabel map[uint64]string
+	axisChunks  map[string]int
 	// tombstonedRelPaths holds the normalized path of every document evicted in
 	// this session (EvictDocuments). It is the read-time tombstone SPEC §6.6
 	// requires: a tombstoned chunk MUST NOT appear in results even when the
@@ -513,6 +519,8 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		ragMaxContextChars:  defaultRAGMaxContext,
 		defaultK:            config.RAGKFallback,
 		chunkByLabel:        make(map[uint64]model.SearchHit),
+		axisByLabel:         make(map[uint64]string),
+		axisChunks:          make(map[string]int),
 		tombstonedRelPaths:  make(map[string]struct{}),
 		rootDir:             ".",
 		stateDir:            filepath.Join(".", ".dir2mcp"),
@@ -1351,6 +1359,10 @@ func (s *Service) dropLabels(labels []uint64) {
 	codeIndex := s.codeIndex
 	for _, label := range labels {
 		delete(s.chunkByLabel, label)
+		if axis, ok := s.axisByLabel[label]; ok {
+			s.axisChunks[axis]--
+			delete(s.axisByLabel, label)
+		}
 	}
 	s.metaMu.Unlock()
 	s.deleteVectors(textIndex, codeIndex, labels)
@@ -1460,6 +1472,27 @@ func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHi
 // chunkByLabel (issue #429 D1).
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
 	s.registerChunkMetadata(label, metadata)
+	s.recordChunkAxis(label, indexName)
+}
+
+// recordChunkAxis counts a registered chunk under its axis, for index=auto.
+// Re-registering a label under the same axis changes nothing; under another
+// axis it moves the count.
+func (s *Service) recordChunkAxis(label uint64, axis string) {
+	axis = strings.ToLower(strings.TrimSpace(axis))
+	if axis != "text" && axis != "code" {
+		return
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if prev, ok := s.axisByLabel[label]; ok {
+		if prev == axis {
+			return
+		}
+		s.axisChunks[prev]--
+	}
+	s.axisByLabel[label] = axis
+	s.axisChunks[axis]++
 }
 
 // SetRAGSystemPrompt records the operator's domain rules (rag.system_prompt).
@@ -1638,6 +1671,7 @@ func (s *Service) searchByMode(ctx context.Context, queryText string, k int, que
 	codeModel := s.codeModel
 	textIndex := s.textIndex
 	codeIndex := s.codeIndex
+	hasText, hasCode := s.axisChunks["text"] > 0, s.axisChunks["code"] > 0
 	s.metaMu.RUnlock()
 
 	// resolveSearchAxis is the single source of truth for which physical index a
@@ -1645,7 +1679,7 @@ func (s *Service) searchByMode(ctx context.Context, queryText string, k int, que
 	// tool layer (SPEC §15.2) can never disagree — including the "auto" mode that
 	// routes a code-shaped query to the code index, and HyDE "replace" mode, where
 	// queryText is the generated hypothesis rather than the original query.
-	axis := resolveSearchAxis(query.Index, queryText)
+	axis := resolveSearchAxisFor(query.Index, queryText, hasText, hasCode)
 	// Record the axis of the FIRST (base-query) dispatch so SearchWithAxis can
 	// report an index_used read from the real dispatch. searchByMode is called
 	// again for the HyDE fuse hypothesis pass and for each cross-lingual variant;
@@ -1668,6 +1702,17 @@ func (s *Service) searchByMode(ctx context.Context, queryText string, k int, que
 // default-mode ("auto") query that routes to the code index is reported as
 // "code" rather than the requested-name-derived "text" (SPEC §15.2).
 func resolveSearchAxis(mode, queryText string) string {
+	return resolveSearchAxisFor(mode, queryText, false, false)
+}
+
+// resolveSearchAxisFor is resolveSearchAxis with the corpus composition
+// (SPEC §9.1, 0.73.0). Under index=auto a code-oriented query narrows to code;
+// otherwise a corpus holding both text and code chunks searches both axes, a
+// code-only corpus searches code, and anything else searches text. Before
+// 0.73.0 auto always defaulted to text, so a plain-English question about a
+// repository never reached its code. With no composition known (hasText and
+// hasCode both false) the result is the pre-0.73.0 one.
+func resolveSearchAxisFor(mode, queryText string, hasText, hasCode bool) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "code":
@@ -1677,7 +1722,12 @@ func resolveSearchAxis(mode, queryText string) string {
 	case "text":
 		return "text"
 	case "auto", "":
-		if looksLikeCodeQuery(queryText) {
+		switch {
+		case looksLikeCodeQuery(queryText):
+			return "code"
+		case hasText && hasCode:
+			return "both"
+		case hasCode:
 			return "code"
 		}
 		return "text"
