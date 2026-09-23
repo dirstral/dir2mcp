@@ -703,6 +703,9 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 // #394 unsupported-format diagnostic. It reflects the same structured/flat split
 // extractorCanReadExt uses, not the concrete provider profile name.
 func (s *Service) extractorLabel() string {
+	if s.extractor == nil && s.pandocExtractor == nil {
+		return "none available"
+	}
 	if _, ok := s.extractor.(*pandocExtractor); ok {
 		return "pandoc"
 	}
@@ -3913,14 +3916,18 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 	mediaProduced = len(spans) > 0
 	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
-	if ShouldGenerateExtractedMarkdown(doc.DocType) && (s.extractor != nil || s.pandocExtractor != nil) && !skipOCR {
-		if s.extractorCanReadExt(doc.RelPath) {
+	if ShouldGenerateExtractedMarkdown(doc.DocType) && !skipOCR {
+		haveExtractor := s.extractor != nil || s.pandocExtractor != nil
+		if haveExtractor && s.extractorCanReadExt(doc.RelPath) {
 			if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
 				return false, false, err
 			}
 			s.addRepresentations(1)
 		} else if !mediaProduced {
-			// #394/#395: the active extractor cannot read this format. Rather than
+			// #394/#395: no active extractor reads this format, either because
+			// none is available at all (no docling, no docling-serve URL, no
+			// Mistral key: the default on a fresh machine) or because the one
+			// that is cannot read this extension. Rather than
 			// hand it to an engine that fails silently (docling → empty) or hard-errors
 			// (Mistral OCR → "unsupported file extension"), degrade honestly per the
 			// §7.4.B.2 strict/lenient contract — never a silent empty representation.
