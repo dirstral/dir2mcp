@@ -144,7 +144,13 @@ func TestUp_RefusesWhenOurDaemonLive(t *testing.T) {
 	withWorkingDir(t, tmp, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		code = app.RunWithContext(ctx, []string{"up", "--daemon", "--listen", "127.0.0.1:0"})
+		args := []string{"up", "--daemon", "--listen", "127.0.0.1:0"}
+		if isWindows() {
+			// Windows has no daemon mode, so `--daemon` is a usage error there.
+			// The foreground single-instance guard makes the same refusal.
+			args = []string{"up", "--foreground", "--listen", "127.0.0.1:0"}
+		}
+		code = app.RunWithContext(ctx, args)
 	})
 	if code == 0 {
 		t.Fatalf("up should refuse when our daemon is already live; got exit 0 stdout=%q stderr=%q", stdout.String(), stderr.String())

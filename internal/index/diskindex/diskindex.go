@@ -373,14 +373,17 @@ func writeRecords(w io.Writer, start int64, recs []pendingRecord) ([]int64, int6
 // after the truncation the in-memory state already matches the file again; only
 // the mmap view has to be dropped. Caller holds the write lock.
 func (d *DiskIndex) rollbackAppend(f *os.File, start int64, cause error) error {
+	// Drop the mmap view before the truncate. Windows refuses to truncate a
+	// file below a mapped view (ERROR_USER_MAPPED_FILE); on unix the order
+	// makes no difference.
+	if ierr := d.invalidateReaderLocked(); ierr != nil {
+		return errors.Join(cause, ierr)
+	}
 	if terr := f.Truncate(start); terr != nil {
 		return errors.Join(cause, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
 	}
 	if serr := syncFile(f); serr != nil {
 		return errors.Join(cause, fmt.Errorf("diskindex: rollback sync: %w", serr))
-	}
-	if ierr := d.invalidateReaderLocked(); ierr != nil {
-		return errors.Join(cause, ierr)
 	}
 	return cause
 }
@@ -877,13 +880,15 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 	// This runs INSIDE the critical section: truncating outside it lets a
 	// concurrent durable append land past end between the scan and the truncate,
 	// and the truncate would then silently destroy it.
+	// The mmap view goes first: Windows refuses to truncate a file below a
+	// mapped view.
+	if err := d.invalidateReaderLocked(); err != nil {
+		return err
+	}
 	if torn {
 		if err := os.Truncate(path, end); err != nil {
 			return fmt.Errorf("diskindex: truncate torn segment tail at %d: %w", end, err)
 		}
-	}
-	if err := d.invalidateReaderLocked(); err != nil {
-		return err
 	}
 	identity, idErr := readIdentitySidecar(identitySidecarPath(path))
 	if idErr != nil && end == 0 {
