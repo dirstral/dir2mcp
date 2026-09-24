@@ -199,7 +199,9 @@ func TestParityModeOff_NoPaymentHeaderPassesThrough(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.Mode = x402.ModeOff
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -262,7 +264,9 @@ func TestParityModeOff_PaymentSignatureIsIgnored(t *testing.T) {
 	// Deliberately set a facilitator URL; mode=off must not contact it.
 	cfg.X402.FacilitatorURL = facSrv.URL
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -291,7 +295,9 @@ func TestParityModeOff_InitializeAndToolsListAlwaysPass(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.Mode = x402.ModeOff
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -355,7 +361,9 @@ func TestParityModeOn_NoPaymentHeaderReturns402(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -388,7 +396,9 @@ func TestParityModeOn_ValidPaymentAccepted(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -427,7 +437,9 @@ func TestParityModeOn_FacilitatorUnavailableIsRetryable(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -476,7 +488,9 @@ func TestParityModeRequired_MissingConfigReturns503WhenChallengeCannotBeBuilt(t 
 	// x402.BuildPaymentRequiredHeaderValue will fail, so the server falls back
 	// to a 503.
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -508,7 +522,9 @@ func TestParityModeRequired_NoPaymentHeaderReturns402(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -541,7 +557,9 @@ func TestParityModeRequired_ValidPaymentAccepted(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -574,7 +592,9 @@ func TestParityModeRequired_FacilitatorUnavailableIsFailClosed(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -620,7 +640,9 @@ func TestParityPaymentRequiredHeaderContainsValidJSON(t *testing.T) {
 			cfg := baseX402Config(t, facSrv.URL)
 			cfg.X402.Mode = mode
 
-			srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+			mcpSrv := mcp.NewServer(cfg, nil)
+			t.Cleanup(func() { _ = mcpSrv.Close() })
+			srv := httptest.NewServer(mcpSrv.Handler())
 			defer srv.Close()
 
 			sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -659,7 +681,9 @@ func TestParityModeOff_NoPaymentRequiredHeader(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.Mode = x402.ModeOff
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -687,7 +711,9 @@ func TestParityModeOn_InvalidPaymentProofReturns402WithChallenge(t *testing.T) {
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeOn
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)
@@ -722,7 +748,9 @@ func TestParityModeRequired_InvalidPaymentProofReturns402WithChallenge(t *testin
 	cfg := baseX402Config(t, facSrv.URL)
 	cfg.X402.Mode = x402.ModeRequired
 
-	srv := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	mcpSrv := mcp.NewServer(cfg, nil)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 
 	sid := parityInitSession(t, srv.URL+cfg.MCPPath)

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if shouldDaemonize(a, opts) {
 		return a.runUpAsDaemonParent(ctx, opts)
 	}
+	a.noteForegroundOnlyPlatform(opts)
 
 	cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, code := a.prepareUpConfig(opts)
 	if code != exitSuccess {
@@ -2281,6 +2283,19 @@ func shouldDaemonize(a *App, opts upOptions) bool {
 		return false
 	}
 	return true
+}
+
+// noteForegroundOnlyPlatform tells an interactive user why `up` stays in the
+// terminal on a platform without daemon mode (Windows). On unix it prints
+// nothing, because there an interactive `up` daemonizes before this point.
+func (a *App) noteForegroundOnlyPlatform(opts upOptions) {
+	if isDaemonSupported() || opts.foreground || opts.jsonOutput || opts.quiet {
+		return
+	}
+	if os.Getenv(daemonChildEnv) != "" || !writerIsTerminal(a.stdout) {
+		return
+	}
+	writef(a.stderr, "note: background mode is not available on %s; the server runs in this terminal. Stop it here, or run `dir2mcp down` from another terminal.\n", runtime.GOOS)
 }
 
 // writerIsTerminal reports whether w corresponds to a terminal file

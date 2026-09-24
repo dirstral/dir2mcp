@@ -44,6 +44,7 @@ func newRecognitionFailureService(t *testing.T, root string, rec *brokenThenHeal
 	t.Helper()
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

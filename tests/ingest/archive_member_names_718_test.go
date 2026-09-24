@@ -234,6 +234,7 @@ func TestCorpusFile_LeadingDotsInSubdirIndexed(t *testing.T) {
 	}
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -276,6 +277,7 @@ func TestArchiveMember_RefusalIsObservable(t *testing.T) {
 	}
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

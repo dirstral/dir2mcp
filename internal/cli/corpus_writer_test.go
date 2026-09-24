@@ -5,13 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -379,7 +382,8 @@ func TestWriteConnectionFile_AtomicNoTempLeftover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat connection.json: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
+	// Windows has no POSIX mode bits, so the owner-only check is unix-only.
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("expected connection.json mode 0o600, got %o", got)
 	}
 
@@ -448,7 +452,7 @@ func TestWriteConnectionFile_ConcurrentReadNeverPartial(t *testing.T) {
 			}
 			raw, err := os.ReadFile(path)
 			if err != nil {
-				if os.IsNotExist(err) {
+				if os.IsNotExist(err) || windowsTransientOpenError(err) {
 					continue
 				}
 				t.Errorf("read connection.json: %v", err)
@@ -463,6 +467,14 @@ func TestWriteConnectionFile_ConcurrentReadNeverPartial(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+// windowsTransientOpenError reports a Windows open that failed only because a
+// rename replaced the file at that moment (ERROR_ACCESS_DENIED = 5,
+// ERROR_SHARING_VIOLATION = 32). The reader retries; the property under test
+// is that a read never returns a partial file.
+func windowsTransientOpenError(err error) bool {
+	return runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(5)) || errors.Is(err, syscall.Errno(32)))
 }
 
 // aggregateCorpusStore answers CorpusStats with fixed corpus-wide totals, which

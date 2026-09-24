@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -346,9 +347,37 @@ func buildClaudeMCPRemoteEntry(mcpURL, token, protocolVersion string) claudeServ
 func defaultClaudeDesktopConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "claude_desktop_config.json"
+		home = ""
 	}
-	return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	return claudeDesktopConfigPathFor(runtime.GOOS, home, os.Getenv("APPDATA"))
+}
+
+// claudeDesktopConfigPathFor returns the Claude Desktop config path for goos.
+// On Windows, Claude Desktop keeps its config in %APPDATA%\Claude. On other
+// platforms the path stays under ~/Library/Application Support/Claude. When
+// the base directory is not known, the result is the bare file name in the
+// working directory.
+func claudeDesktopConfigPathFor(goos, home, appData string) string {
+	const name = "claude_desktop_config.json"
+	if goos == "windows" {
+		if appData = strings.TrimSpace(appData); appData != "" {
+			return filepath.Join(appData, "Claude", name)
+		}
+		if home != "" {
+			return filepath.Join(home, "AppData", "Roaming", "Claude", name)
+		}
+		return name
+	}
+	if home == "" {
+		return name
+	}
+	return filepath.Join(home, "Library", "Application Support", "Claude", name)
+}
+
+// ClaudeDesktopConfigPathForTest exposes claudeDesktopConfigPathFor to the
+// external tests package. Test-only surface.
+func ClaudeDesktopConfigPathForTest(goos, home, appData string) string {
+	return claudeDesktopConfigPathFor(goos, home, appData)
 }
 
 func readConnectionAndToken(stateDir string) (connectionPayload, string, error) {

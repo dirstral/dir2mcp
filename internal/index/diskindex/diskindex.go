@@ -45,6 +45,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -441,6 +442,12 @@ func (d *DiskIndex) stageTombstones(chunkIDs []uint64) ([]pendingRecord, error) 
 
 // ensureAppendEnd initialises d.appendEnd from the open file, writing the header
 // on a fresh/empty file. Caller holds the write lock.
+// skipDirSync is true on Windows. Windows cannot flush a directory handle
+// opened for read: the call fails with "Access is denied". NTFS journals
+// directory entries itself, so the file sync is the whole durability step
+// there.
+var skipDirSync = runtime.GOOS == "windows"
+
 // syncDir fsyncs the directory holding path so a newly created file's directory
 // entry is durable. Syncing the file alone leaves a window where the contents
 // are on stable storage but the name is not, so a crash can lose a segment the
@@ -448,6 +455,9 @@ func (d *DiskIndex) stageTombstones(chunkIDs []uint64) ([]pendingRecord, error) 
 // directory for read report no error rather than failing an otherwise good
 // write.
 func syncDir(path string) error {
+	if skipDirSync {
+		return nil
+	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return nil

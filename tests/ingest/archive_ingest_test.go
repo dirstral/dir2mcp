@@ -73,6 +73,7 @@ func runArchiveIngest(t *testing.T, archiveName string, archiveData []byte) *sto
 	}
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -191,6 +192,7 @@ func TestArchiveIngest_MembersNotTombstonedOnRescan(t *testing.T) {
 
 	// Use a single store across both scans so tombstoning is observable.
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

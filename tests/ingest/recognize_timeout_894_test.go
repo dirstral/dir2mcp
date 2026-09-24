@@ -304,6 +304,7 @@ func TestRecognizeTimeout_DoesNotEmptyTheCorpus(t *testing.T) {
 			"00:00:02.000 --> 00:00:05.000\nFreeman flies out to centrefield\n")
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -365,6 +366,7 @@ func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
 	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video-bytes")
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

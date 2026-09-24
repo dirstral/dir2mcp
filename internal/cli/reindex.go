@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -514,6 +515,12 @@ func writeReindexCommitMarker(stateDir string) error {
 // directory for read reports no error rather than failing an otherwise good
 // write.
 func syncStateDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		// Windows cannot flush a directory handle opened for read: the call
+		// fails with "Access is denied". NTFS journals directory entries
+		// itself, so the file sync above is the whole durability step there.
+		return nil
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return nil

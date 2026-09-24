@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
@@ -85,7 +86,13 @@ func TestLocalFSWalk_SpecDefaultDirNamesAsFilesStillDiscovered(t *testing.T) {
 // trimming before the lookup would silently drop a legitimately-named tree.
 func TestLocalFSWalk_ExcludedDirNamesMatchExactly(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, " dist ", "keep.txt"), []byte("padded name"))
+	// Windows strips trailing spaces from a path segment, so there the padded
+	// name keeps only its leading space. It is still not an exact `dist`.
+	padded := " dist "
+	if runtime.GOOS == "windows" {
+		padded = " dist"
+	}
+	mustWrite(t, filepath.Join(root, padded, "keep.txt"), []byte("padded name"))
 	mustWrite(t, filepath.Join(root, "dist.old", "keep.txt"), []byte("different name"))
 	mustWrite(t, filepath.Join(root, "dist", "bundle.js"), []byte("excluded"))
 
@@ -97,7 +104,7 @@ func TestLocalFSWalk_ExcludedDirNamesMatchExactly(t *testing.T) {
 	for _, f := range got {
 		rels[f.RelPath] = true
 	}
-	for _, want := range []string{" dist /keep.txt", "dist.old/keep.txt"} {
+	for _, want := range []string{padded + "/keep.txt", "dist.old/keep.txt"} {
 		if !rels[want] {
 			t.Errorf("%q must be discovered: only an exact `dist` directory is excluded; got %v", want, rels)
 		}

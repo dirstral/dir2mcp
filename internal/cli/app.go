@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1652,6 +1653,9 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	if opts.daemon && opts.jsonOutput {
 		return upOptions{}, fmt.Errorf("--daemon is incompatible with --json (NDJSON event stream requires the foreground process to remain attached)")
 	}
+	if opts.daemon && !isDaemonSupported() {
+		return upOptions{}, fmt.Errorf("--daemon is not supported on %s; run `dir2mcp up` in its own terminal, where the server stays in the foreground", runtime.GOOS)
+	}
 	return opts, nil
 }
 
@@ -2059,7 +2063,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameOverRetrying(tmp, path); err != nil {
 		// os.Rename fails on Windows when the destination already exists.
 		// Remove the existing file and retry once to support Windows.
 		_ = os.Remove(path)
@@ -2069,6 +2073,30 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		}
 	}
 	return nil
+}
+
+// windowsRenameAttempts and windowsRenameBackoff bound the Windows rename
+// retry in renameOverRetrying: about one second in total.
+const (
+	windowsRenameAttempts = 40
+	windowsRenameBackoff  = 25 * time.Millisecond
+)
+
+// renameOverRetrying renames tmp over path. On unix it is one os.Rename. On
+// Windows, a rename over a file that another handle holds open fails for a
+// short time with an access or sharing error, for example while `status`
+// reads corpus.json or a second writer replaces it. The retry waits for that
+// handle to close, so a concurrent reader does not make the write fail.
+func renameOverRetrying(tmp, path string) error {
+	err := os.Rename(tmp, path)
+	if runtime.GOOS != "windows" {
+		return err
+	}
+	for i := 1; err != nil && i < windowsRenameAttempts; i++ {
+		time.Sleep(windowsRenameBackoff)
+		err = os.Rename(tmp, path)
+	}
+	return err
 }
 
 // newNDJSONEmitter constructs an ndjsonEmitter that writes events to out

@@ -2971,7 +2971,9 @@ func hasSecretMatch(patterns []*regexp.Regexp, s string) bool {
 func (s *Service) resolveFilePath(relPath, rootDir string, pathExcludes []string) (normalizedRel, realRoot, targetAbs string, err error) {
 	normalizedRel = filepath.ToSlash(filepath.Clean(relPath))
 	isTraversal := normalizedRel == "." || strings.HasPrefix(normalizedRel, "../") || normalizedRel == ".."
-	if isTraversal || filepath.IsAbs(relPath) {
+	// The leading-slash test matters on Windows, where filepath.IsAbs reports
+	// false for "/etc/passwd". On unix it adds nothing to IsAbs.
+	if isTraversal || filepath.IsAbs(relPath) || strings.HasPrefix(normalizedRel, "/") {
 		return "", "", "", model.ErrPathOutsideRoot
 	}
 	for _, pattern := range pathExcludes {

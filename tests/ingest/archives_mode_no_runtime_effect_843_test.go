@@ -49,6 +49,7 @@ func ingestUnderArchivesMode(t *testing.T, mode string) *store.SQLiteStore {
 	}
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

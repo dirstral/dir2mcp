@@ -511,7 +511,8 @@ func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *test
 	if err != nil {
 		t.Fatalf("stat config: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// Windows has no POSIX mode bits, so the owner-only check is unix-only.
+	if perm := info.Mode().Perm(); !posixModesUnsupported() && perm != 0o600 {
 		t.Errorf("config perms = %o, want 0600 (it embeds a bearer token)", perm)
 	}
 

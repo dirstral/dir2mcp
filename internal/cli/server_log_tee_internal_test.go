@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,6 +136,9 @@ func TestTeeServerLog_WritesToServerLogInForeground(t *testing.T) {
 // The daemon child is identified by a verified launch handshake, so the test
 // builds a real one (a marker that merely "looks long" is rejected, #671).
 func TestTeeServerLog_NoopInDaemonChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
+	}
 	stateDir := t.TempDir()
 	childEnv, cleanup, err := prepareDaemonChildHandshake(stateDir)
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 // stub activate as the pandoc engine without a real pandoc install.
 func writeStubPandoc(t *testing.T, markdown string) string {
 	t.Helper()
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	dir := t.TempDir()
 	script := filepath.Join(dir, "stubpandoc.sh")
 	// The extractor invokes `<script> <tmpfile> -t gfm`; ignore the args and emit
