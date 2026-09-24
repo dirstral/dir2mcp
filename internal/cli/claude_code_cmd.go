@@ -251,7 +251,9 @@ func (a *App) runClaudeCodeInstall(ctx context.Context, global globalOptions, ar
 		return exitGeneric
 	}
 	if out, err := runClaudeCodeCLI(ctx, bin, claudeCodeAddArgs(t, "Bearer "+t.token)...); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("claude mcp add failed: %v: %s", err, redactToken(out, t.token)))
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric,
+			fmt.Sprintf("claude mcp add failed: %v: %s", err, redactToken(out, t.token)),
+			"Fix the cause, then run `dir2mcp install claude-code` again. The server is not registered now.")
 		return exitGeneric
 	}
 	if global.jsonOutput {
