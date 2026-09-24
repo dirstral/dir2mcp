@@ -25,8 +25,55 @@ func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, 
 	if created {
 		writef(a.stdout, "%s created %s with baseline settings\n", s.Success.Render("✓"), configPath)
 	} else {
-		writef(a.stdout, "%s updated %s and ensured baseline settings are present\n", s.Success.Render("✓"), configPath)
+		writef(a.stdout, "%s left %s unchanged: config init never rewrites an existing file\n", s.Success.Render("✓"), configPath)
 	}
+}
+
+// writeConfigInitFile writes a new config file and reports the outcome. An
+// existing file is left unchanged and the profile's lines are printed instead.
+// It returns a terminal exit code, or -1 to continue.
+func (a *App) writeConfigInitFile(global globalOptions, configPath string, created bool, cfg config.Config, profile setupwizard.Profile, profileLines []string) int {
+	if created {
+		if err := config.SaveFile(configPath, cfg); err != nil {
+			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
+			return exitGeneric
+		}
+	}
+	a.emitConfigCreatedMessage(global, configPath, created)
+	if !created && !global.quiet && !global.jsonOutput {
+		writeProfileSettings(a.stdout, profile, configPath, profileLines)
+	}
+	return -1
+}
+
+// configInitPayload is the --json result of config init. "updated" stays in
+// the payload for existing consumers and is always false now: an existing file
+// is never rewritten.
+func configInitPayload(configPath string, created, apiKeySaved bool, nextSteps, profileLines []string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"path":          configPath,
+		"created":       created,
+		"updated":       false,
+		"api_key_saved": apiKeySaved,
+		"next_steps":    nextSteps,
+	}
+	if len(profileLines) > 0 {
+		payload["profile_settings"] = profileLines
+	}
+	return payload
+}
+
+// writeProfileSettings tells the operator how to apply a profile to a config
+// file that was left unchanged. It writes nothing when there is nothing to add.
+func writeProfileSettings(w io.Writer, profile setupwizard.Profile, configPath string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	writef(w, "To apply the %s profile, add these lines to %s:\n\n", profile, configPath)
+	for _, line := range lines {
+		writeln(w, line)
+	}
+	writeln(w)
 }
 
 // confirmDestructive asks the user to confirm a destructive action. On an
@@ -189,17 +236,20 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	// .env.local only — never the .dir2mcp.yaml snapshot. Non-TTY / --json /
 	// --quiet / --non-interactive paths skip the form and keep prior behavior.
 	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
+	before := cfg
 	savedKeys, chosenProfile, dest, exitCode := a.runConfigInitWizard(global, configPath, envPath, !created, &cfg)
 	if exitCode >= 0 {
 		return exitCode
 	}
 
-	if err := config.SaveFile(configPath, cfg); err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
-		return exitGeneric
+	// An existing file is never rewritten. The saved form is a flat subset of
+	// the config, so a rewrite deleted every setting it cannot express (provider
+	// profiles, the embed binding, language routes, comments). A profile the
+	// wizard picked is printed as lines to add instead.
+	profileLines := setupwizard.ProfileSettingsYAML(before, cfg)
+	if code := a.writeConfigInitFile(global, configPath, created, cfg, chosenProfile, profileLines); code >= 0 {
+		return code
 	}
-
-	a.emitConfigCreatedMessage(global, configPath, created)
 	a.emitWizardSummary(global, envPath, savedKeys, dest, chosenProfile)
 	if a.setupWizardEligible(global) {
 		a.emitSetupVerification(global)
@@ -222,13 +272,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	nextSteps = append(nextSteps, "Run: dir2mcp up")
 
 	if global.jsonOutput {
-		payload := map[string]interface{}{
-			"path":          configPath,
-			"created":       created,
-			"updated":       !created,
-			"api_key_saved": apiKeySaved,
-			"next_steps":    nextSteps,
-		}
+		payload := configInitPayload(configPath, created, apiKeySaved, nextSteps, profileLines)
 		if err := emitJSON(a.stdout, payload); err != nil {
 			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode config init json: %v", err))
 			return exitGeneric

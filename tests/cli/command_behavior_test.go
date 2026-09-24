@@ -495,31 +495,69 @@ func TestConfigInitCreatesConfigFile(t *testing.T) {
 	}
 }
 
-func TestConfigInitPatchesMissingKeysPreservesExistingValues(t *testing.T) {
-	tmp := t.TempDir()
-	initial := "root_dir: /custom/root\n"
-	if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"), []byte(initial), 0o644); err != nil {
-		t.Fatalf("write initial config: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	app := cli.NewAppWithIO(&stdout, &stderr)
-	withWorkingDir(t, tmp, func() {
-		code := app.RunWithContext(context.Background(), []string{"config", "init"})
-		if code != 0 {
-			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
-		}
-	})
-
-	cfg, err := config.LoadFile(filepath.Join(tmp, ".dir2mcp.yaml"))
-	if err != nil {
-		t.Fatalf("LoadFile failed: %v", err)
-	}
-	if cfg.RootDir != "/custom/root" {
-		t.Fatalf("RootDir=%q want=%q", cfg.RootDir, "/custom/root")
-	}
-	if strings.TrimSpace(cfg.StateDir) == "" {
-		t.Fatal("expected StateDir to be populated after patching missing keys")
+// TestConfigInitLeavesAnExistingFileUnchanged pins that config init never
+// rewrites an existing .dir2mcp.yaml. The saved form is a flat subset of the
+// config, so the old rewrite deleted what it could not express: here the local
+// provider profile, the embed binding, a language route and the comment. That
+// wiped the README's local-Ollama quickstart file while printing "updated".
+func TestConfigInitLeavesAnExistingFileUnchanged(t *testing.T) {
+	initial := "# my local setup\n" +
+		"root_dir: /custom/root\n" +
+		"providers:\n" +
+		"  local:\n" +
+		"    kind: openai\n" +
+		"    base_url: http://127.0.0.1:11434/v1\n" +
+		"    embed_text_model: nomic-embed-text\n" +
+		"model:\n" +
+		"  embed:\n" +
+		"    provider: local\n" +
+		"media:\n" +
+		"  stt:\n" +
+		"    language_providers:\n" +
+		"      ky: [local]\n"
+	for _, args := range [][]string{{"config", "init"}, {"--json", "config", "init"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, ".dir2mcp.yaml")
+			if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+				t.Fatalf("write initial config: %v", err)
+			}
+			var stdout, stderr bytes.Buffer
+			app := cli.NewAppWithIO(&stdout, &stderr)
+			withWorkingDir(t, tmp, func() {
+				if code := app.RunWithContext(context.Background(), args); code != 0 {
+					t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+				}
+			})
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != initial {
+				t.Fatalf("config init rewrote an existing file:\n--- before\n%s--- after\n%s", initial, got)
+			}
+			if args[0] == "--json" {
+				var payload struct {
+					Created bool `json:"created"`
+					Updated bool `json:"updated"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+					t.Fatalf("unmarshal: %v\nraw=%s", err, stdout.String())
+				}
+				if payload.Created || payload.Updated {
+					t.Errorf("created=%t updated=%t, want both false for an existing file", payload.Created, payload.Updated)
+				}
+			} else if !strings.Contains(stdout.String(), "unchanged") {
+				t.Errorf("stdout does not say the file was left unchanged:\n%s", stdout.String())
+			}
+			cfg, err := config.LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile: %v", err)
+			}
+			if cfg.RootDir != "/custom/root" || cfg.MediaSTTLanguageProviders["ky"] != "local" {
+				t.Errorf("root_dir=%q language_providers=%v after config init", cfg.RootDir, cfg.MediaSTTLanguageProviders)
+			}
+		})
 	}
 }
 
