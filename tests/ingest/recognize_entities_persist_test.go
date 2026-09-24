@@ -26,8 +26,8 @@ func annotation(text, event string, entities []string, start, end int) model.Rec
 
 func TestAnnotationEntitiesAndEventReachTheChunkSpan(t *testing.T) {
 	segments, _ := ingest.RecognitionSegments([]model.RecognizedAnnotation{
-		annotation("Pitch: Robbie Ray to Dylan Crews", "pitch",
-			[]string{"player:robbie-ray", "team:san-francisco-giants"}, 20300, 28300),
+		annotation("Pitch: Jordan Lee to Alex Moreno", "pitch",
+			[]string{"player:jordan-lee", "team:river-city-otters"}, 20300, 28300),
 	})
 	if len(segments) != 1 {
 		t.Fatalf("expected 1 segment, got %d", len(segments))
@@ -36,7 +36,7 @@ func TestAnnotationEntitiesAndEventReachTheChunkSpan(t *testing.T) {
 	if span.Event != "pitch" {
 		t.Fatalf("span.Event = %q, want pitch", span.Event)
 	}
-	want := []string{"player:robbie-ray", "team:san-francisco-giants"}
+	want := []string{"player:jordan-lee", "team:river-city-otters"}
 	if len(span.Entities) != len(want) {
 		t.Fatalf("span.Entities = %v, want %v", span.Entities, want)
 	}
@@ -70,14 +70,14 @@ func TestAnAnnotationWithNoAttributionIsUnchanged(t *testing.T) {
 // the prose happens to be identical.
 func TestChangedAttributionRedervesTheRepresentation(t *testing.T) {
 	base := []model.RecognizedAnnotation{
-		annotation("Pitch: Robbie Ray to Dylan Crews", "pitch", []string{"player:robbie-ray"}, 1, 2),
+		annotation("Pitch: Jordan Lee to Alex Moreno", "pitch", []string{"player:jordan-lee"}, 1, 2),
 	}
 	changedEntities := []model.RecognizedAnnotation{
-		annotation("Pitch: Robbie Ray to Dylan Crews", "pitch",
-			[]string{"player:robbie-ray", "team:san-francisco-giants"}, 1, 2),
+		annotation("Pitch: Jordan Lee to Alex Moreno", "pitch",
+			[]string{"player:jordan-lee", "team:river-city-otters"}, 1, 2),
 	}
 	changedEvent := []model.RecognizedAnnotation{
-		annotation("Pitch: Robbie Ray to Dylan Crews", "at_bat", []string{"player:robbie-ray"}, 1, 2),
+		annotation("Pitch: Jordan Lee to Alex Moreno", "at_bat", []string{"player:jordan-lee"}, 1, 2),
 	}
 
 	_, h0 := ingest.RecognitionSegments(base)
@@ -91,7 +91,7 @@ func TestChangedAttributionRedervesTheRepresentation(t *testing.T) {
 		t.Fatal("changing the event left the derivation hash input unchanged")
 	}
 	// And the text is still in there, so the old invalidation still works.
-	if !strings.Contains(h0, "Pitch: Robbie Ray to Dylan Crews") {
+	if !strings.Contains(h0, "Pitch: Jordan Lee to Alex Moreno") {
 		t.Fatalf("hash input no longer covers the annotation text: %q", h0)
 	}
 }

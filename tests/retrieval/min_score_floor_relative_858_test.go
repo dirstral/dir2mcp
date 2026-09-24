@@ -225,14 +225,14 @@ func hybridTwoHomeRunService(t *testing.T) *retrieval.Service {
 	t.Helper()
 	idx := index.NewHNSWIndex("")
 	vectorHits := []model.SearchHit{
-		annotationHit(1, homeRun, []string{hrBatterID, sfgID}),
-		annotationHit(2, "pitch", []string{hrPitcherID, sfgID}),
-		annotationHit(3, "at_bat", []string{hrBatterID, sfgID}),
+		annotationHit(1, homeRun, []string{hrBatterID, lexClubID}),
+		annotationHit(2, "pitch", []string{hrPitcherID, lexClubID}),
+		annotationHit(3, "at_bat", []string{hrBatterID, lexClubID}),
 	}
 	for _, hit := range vectorHits {
 		addAnnotationVector(t, idx, hit)
 	}
-	lexicalOnly := annotationHit(4, homeRun, []string{hrBatterID, sfgID})
+	lexicalOnly := annotationHit(4, homeRun, []string{hrBatterID, lexClubID})
 	st := &lexicalHitStore{hits: append(append([]model.SearchHit(nil), vectorHits...), lexicalOnly)}
 
 	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{

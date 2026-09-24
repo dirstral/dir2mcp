@@ -16,7 +16,7 @@ import (
 // monotonically (design 0004 §6.1, 58.3% -> 47.8% -> 34.8% precision). Every
 // annotation of a moment names BOTH clubs, so the label cannot discriminate
 // between candidates; it only drags a team-scoped query onto whichever role
-// ranks first. "Giants home run" came back as a Giants pitcher throwing balls.
+// ranks first. "Otters home run" came back as an Otters pitcher throwing balls.
 //
 // The fixture below is that situation exactly: one moment, reported twice, once
 // keyed on the pitcher with the fielding club and once on the batter with the
@@ -25,9 +25,9 @@ import (
 // annotation can say which id acted.
 
 const (
-	giantsID = "team:san-francisco-giants"
-	natsID   = "team:washington-nationals"
-	rayID    = "player:robbie-ray"
+	ottersID = "team:river-city-otters"
+	gullsID  = "team:harbor-town-gulls"
+	leeID    = "player:jordan-lee"
 	crewsID  = "player:dylan-crews"
 )
 
@@ -59,25 +59,25 @@ func addAnnotation(
 func annotationService(t *testing.T) *retrieval.Service {
 	t.Helper()
 	idx := index.NewHNSWIndex("")
-	addAnnotation(t, idx, 1, []float32{1, 0}, "pitch", []string{rayID, giantsID}, 20300, 28300)
-	addAnnotation(t, idx, 2, []float32{0.99, 0.01}, "at_bat", []string{crewsID, natsID}, 20300, 28300)
+	addAnnotation(t, idx, 1, []float32{1, 0}, "pitch", []string{leeID, ottersID}, 20300, 28300)
+	addAnnotation(t, idx, 2, []float32{0.99, 0.01}, "at_bat", []string{crewsID, gullsID}, 20300, 28300)
 	addVecP(t, idx, 3, []float32{0.9, 0.1}, "notes.md", "md")
 
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, nil)
 	svc.SetChunkMetadata(1, model.SearchHit{
-		RelPath: "game.mp4", DocType: "video", Snippet: "Pitch: Robbie Ray to Dylan Crews",
+		RelPath: "game.mp4", DocType: "video", Snippet: "Pitch: Jordan Lee to Alex Moreno",
 		Span: model.Span{
 			Kind: "time", StartMS: 20300, EndMS: 28300,
-			Entities: []string{rayID, giantsID}, Event: "pitch",
+			Entities: []string{leeID, ottersID}, Event: "pitch",
 		},
 	})
 	svc.SetChunkMetadata(2, model.SearchHit{
-		RelPath: "game.mp4", DocType: "video", Snippet: "At bat: Dylan Crews vs Robbie Ray",
+		RelPath: "game.mp4", DocType: "video", Snippet: "At bat: Alex Moreno vs Jordan Lee",
 		Span: model.Span{
 			Kind: "time", StartMS: 20300, EndMS: 28300,
-			Entities: []string{crewsID, natsID}, Event: "at_bat",
+			Entities: []string{crewsID, gullsID}, Event: "at_bat",
 		},
 	})
 	svc.SetChunkMetadata(3, model.SearchHit{
@@ -106,25 +106,25 @@ func searchIDs(t *testing.T, svc *retrieval.Service, q model.SearchQuery) []uint
 
 // TestEntityAndEventTogetherSelectOneRole is the whole point. The club is
 // present on both annotations of the moment, so the club ALONE cannot express
-// "the Giants batting" — and neither can any phrasing of the text. Conjoining
+// "the Otters batting" — and neither can any phrasing of the text. Conjoining
 // the event does, because event records the role the id is acting in.
 func TestEntityAndEventTogetherSelectOneRole(t *testing.T) {
 	svc := annotationService(t)
 
-	// The Giants field this half-inning, so they appear on the pitch cue only.
-	if got := searchIDs(t, svc, model.SearchQuery{Entities: []string{giantsID}}); len(got) != 1 || got[0] != 1 {
-		t.Fatalf("entities=[giants] = %v, want [1] (the pitch cue)", got)
+	// The Otters field this half-inning, so they appear on the pitch cue only.
+	if got := searchIDs(t, svc, model.SearchQuery{Entities: []string{ottersID}}); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("entities=[otters] = %v, want [1] (the pitch cue)", got)
 	}
 	// Pairing them with the batting role must select nothing: they are not at
 	// the plate here. This is the case a text label gets wrong.
 	if got := searchIDs(t, svc, model.SearchQuery{
-		Entities: []string{giantsID}, Events: []string{"at_bat"},
+		Entities: []string{ottersID}, Events: []string{"at_bat"},
 	}); len(got) != 0 {
-		t.Fatalf("entities=[giants] events=[at_bat] = %v, want none", got)
+		t.Fatalf("entities=[otters] events=[at_bat] = %v, want none", got)
 	}
 	// The club actually at the plate, with the same event, does select.
 	if got := searchIDs(t, svc, model.SearchQuery{
-		Entities: []string{natsID}, Events: []string{"at_bat"},
+		Entities: []string{gullsID}, Events: []string{"at_bat"},
 	}); len(got) != 1 || got[0] != 2 {
 		t.Fatalf("entities=[nationals] events=[at_bat] = %v, want [2]", got)
 	}
@@ -133,9 +133,9 @@ func TestEntityAndEventTogetherSelectOneRole(t *testing.T) {
 // TestValuesWithinAFieldAreOr pins the OR half of the semantics.
 func TestValuesWithinAFieldAreOr(t *testing.T) {
 	svc := annotationService(t)
-	got := searchIDs(t, svc, model.SearchQuery{Entities: []string{giantsID, natsID}})
+	got := searchIDs(t, svc, model.SearchQuery{Entities: []string{ottersID, gullsID}})
 	if len(got) != 2 {
-		t.Fatalf("entities=[giants,nationals] = %v, want both annotations", got)
+		t.Fatalf("entities=[otters,gulls] = %v, want both annotations", got)
 	}
 	events := searchIDs(t, svc, model.SearchQuery{Events: []string{"pitch", "at_bat"}})
 	if len(events) != 2 {
@@ -148,7 +148,7 @@ func TestValuesWithinAFieldAreOr(t *testing.T) {
 func TestFieldsAreAndedTogether(t *testing.T) {
 	svc := annotationService(t)
 	got := searchIDs(t, svc, model.SearchQuery{
-		Entities: []string{rayID},    // on the pitch cue
+		Entities: []string{leeID},    // on the pitch cue
 		Events:   []string{"at_bat"}, // on the OTHER cue
 	})
 	if len(got) != 0 {
@@ -185,7 +185,7 @@ func TestAnAbsentFilterIsAPassThrough(t *testing.T) {
 // This is a deliberate difference from the speaker filter, which IS folded.
 func TestMatchingIsLiteralNotCaseFolded(t *testing.T) {
 	svc := annotationService(t)
-	if got := searchIDs(t, svc, model.SearchQuery{Entities: []string{"TEAM:SAN-FRANCISCO-GIANTS"}}); len(got) != 0 {
+	if got := searchIDs(t, svc, model.SearchQuery{Entities: []string{"TEAM:RIVER-CITY-OTTERS"}}); len(got) != 0 {
 		t.Fatalf("a differently-cased id matched %v; ids are opaque tokens", got)
 	}
 	if got := searchIDs(t, svc, model.SearchQuery{Events: []string{"PITCH"}}); len(got) != 0 {

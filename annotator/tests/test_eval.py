@@ -171,11 +171,11 @@ def test_a_feed_without_gameData_leaves_the_clubs_empty(events):
 # (`/api/v1.1/game/{game_pk}/feed/live`), projected down to the fields
 # `parse_pitches` reads and otherwise unedited:
 #
-#   gumbo_823215.json         game 823215, the pilot game, all 84 plays
+#   gumbo_reference_game.json         game 823215, the reference game, all 84 plays
 #   gumbo_trailing_action.json game 776815, the one play in 8 games whose last
 #                             playEvent is not a pitch
 
-PILOT = Path(__file__).parent / "fixtures" / "gumbo_823215.json"
+PILOT = Path(__file__).parent / "fixtures" / "gumbo_reference_game.json"
 TRAILING = Path(__file__).parent / "fixtures" / "gumbo_trailing_action.json"
 
 #: What game 823215 (Washington at San Francisco) actually holds. Counted from

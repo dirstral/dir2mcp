@@ -20,7 +20,7 @@ func TestIsURLCueMatchesHallucinatedCredits(t *testing.T) {
 		"https://example.com",
 		"Subtitles by www.example.org",
 		"amara.org",
-		"Субтитры сделал DimaTorzok tvrain.tv",
+		"Субтитры сделал example_user example.tv",
 	}
 	for _, s := range urls {
 		if !subtitle.IsURLCue(s) {

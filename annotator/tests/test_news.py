@@ -314,7 +314,7 @@ def test_a_non_positive_fps_is_refused_at_construction():
 # --- the readability gate ---------------------------------------------------
 #
 # Agreement says which BAND holds an overlay. It does not say whether the words
-# that came off it are words. Measured on 145 cues of real TV Rain footage, the
+# that came off it are words. Measured on 145 cues of real news footage, the
 # ungated stream is 40.0% precision: 60% of what a reader would cite is noise.
 # The gate is `chars >= 20 and agreement >= 0.6`, which measured 90.0%
 # precision at 62.1% recall. See READABLE_MIN_CHARS for the full table.

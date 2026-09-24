@@ -33,12 +33,12 @@ const docOpenMarker = "<<<BEGIN UNTRUSTED DOCUMENT"
 
 func askAndCapture(t *testing.T, prompt string) string {
 	t.Helper()
-	gen := &fakeGenerator{out: "Matt Chapman homered in the sixth. [" + pilotFile + "]"}
+	gen := &fakeGenerator{out: "Riley Park homered in the sixth. [" + gameFile + "]"}
 	svc := buildAnnotationService(t, gen, chapmanMoment())
 	if prompt != "" {
 		svc.SetRAGSystemPrompt(prompt)
 	}
-	if _, err := svc.Ask(context.Background(), "what happened on Matt Chapman's home run",
+	if _, err := svc.Ask(context.Background(), "what happened on Riley Park's home run",
 		model.SearchQuery{K: 10}); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}

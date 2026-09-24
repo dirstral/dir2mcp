@@ -22,7 +22,7 @@ those are two largely independent views of the same pixels. Real glyphs survive
 both. Noise is a property of the rendering, so it does not: the passes invent
 different garbage and their texts have nothing in common.
 
-Measured on 105 band reads from 15 frames of a TV Rain news broadcast, OCR'd
+Measured on 105 band reads from 15 frames of a Russian-language news broadcast, OCR'd
 with tesseract `rus`, comparing the two overlay bands against five background
 bands per frame:
 
@@ -119,7 +119,7 @@ DEFAULT_AGREEMENT = 0.3
 #: carry, and how firmly that text must have been read. Both floors apply, and
 #: either one set to 0 switches its half of the gate off.
 #:
-#: Measured on 145 cues (94 headline, 51 ticker) from 15 minutes of a TV Rain
+#: Measured on 145 cues (94 headline, 51 ticker) from 15 minutes of a Russian-language news
 #: broadcast at 720p, read with tesseract `rus`. A cue counted as readable when
 #: it held a word of 4 or more Cyrillic letters that the programme's own
 #: subtitle track also held, so the vocabulary came from the same broadcast and

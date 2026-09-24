@@ -72,7 +72,7 @@ def test_the_notability_cues_are_legal_wire():
     import json
 
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    feed = ground_truth.load_game(Path(__file__).parent / "fixtures" / "gumbo_823215.json")
+    feed = ground_truth.load_game(Path(__file__).parent / "fixtures" / "gumbo_reference_game.json")
     events = ground_truth.parse_pitches(feed)
     players, mlbam = [], {}
     for ev in events:

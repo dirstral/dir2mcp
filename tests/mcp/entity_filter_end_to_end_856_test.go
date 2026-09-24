@@ -82,14 +82,14 @@ func annotationCorpus(t *testing.T, st *store.SQLiteStore) map[string]uint64 {
 		"Heliot Ramos hits a home run to left field",
 		model.Span{
 			Kind: "time", StartMS: 3346398, EndMS: 3354398,
-			Entities: []string{"player:heliot-ramos", "team:san-francisco-giants"},
+			Entities: []string{"player:sam-okafor", "team:river-city-otters"},
 			Event:    "home_run",
 		})
 	ids["pitch"] = seed("game2.mp4", "video", "recognition",
 		"Logan Webb throws a pitch to the plate",
 		model.Span{
 			Kind: "time", StartMS: 120000, EndMS: 128000,
-			Entities: []string{"player:logan-webb", "team:san-francisco-giants"},
+			Entities: []string{"player:casey-nguyen", "team:river-city-otters"},
 			Event:    "pitch",
 		})
 	ids["note"] = seed("notes.md", "md", "raw_text",

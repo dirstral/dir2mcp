@@ -79,7 +79,7 @@ def test_consecutive_ticker_passages_are_not_one_claim():
     """The entity test only REJECTS when both sides name someone and the names
     disagree, so two cues that name nobody skipped it and fell through to the
     time test. Every ticker passage shares an event, names nobody, and sits
-    next to the previous one, so they all merged: on 90s of TV Rain that turned
+    next to the previous one, so they all merged: on 90 s of news footage that turned
     nine cues into four, one spanning 58 seconds and five separate stories,
     with `_merge` keeping the longest text and dropping the rest."""
     anns = fuse([

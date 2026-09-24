@@ -56,7 +56,7 @@ func newAnnotationStore(t *testing.T) *store.SQLiteStore {
 
 func TestAnnotationAttributionRoundTrips(t *testing.T) {
 	st := newAnnotationStore(t)
-	entities := []string{"player:robbie-ray", "team:san-francisco-giants"}
+	entities := []string{"player:jordan-lee", "team:river-city-otters"}
 	chunkID := annotationChunk(t, st, "game.mp4", "recognition", model.Span{
 		Kind: "time", StartMS: 20300, EndMS: 28300,
 		Entities: entities, Event: "pitch",

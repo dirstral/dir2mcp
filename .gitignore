@@ -57,3 +57,6 @@ __pycache__/
 # The venv `make test-annotator` owns. It installs there rather than into the
 # ambient interpreter, which a PEP 668 python refuses.
 annotator/.venv-test/
+
+# Stray local sqlite files (a t.db was once committed by accident, #631).
+*.db

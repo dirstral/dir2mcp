@@ -1,5 +1,5 @@
 {
- "source": "TV Rain news programme, bottom ticker band, 2 fps, tesseract rus, psm 6",
+ "source": "Russian-language news programme, bottom ticker band, 2 fps, tesseract rus, psm 6",
  "note": "Real consecutive OCR reads of one scrolling ticker. 60 frames, 30s.",
  "fps": 2.0,
  "reads": [

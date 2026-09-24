@@ -72,7 +72,7 @@ def _same_claim_by_text(group: list[Cue], cue: Cue, entities: set[str]) -> bool:
     where every cue resolves a roster, and wrong for overlay text, which
     resolves nothing: consecutive ticker passages share an event, carry no
     entities and sit next to each other in time, so they all merged into one
-    annotation. On 90s of TV Rain that turned nine ticker cues into four, one
+    annotation. On 90 s of news footage that turned nine ticker cues into four, one
     of which spanned 58 seconds and five separate stories while `_merge` kept
     only the longest text and dropped the other four outright.
 

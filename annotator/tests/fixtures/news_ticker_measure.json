@@ -1,5 +1,5 @@
 {
- "source": "TV Rain news programme, bottom ticker band, 2 fps, tesseract rus, psm 6",
+ "source": "Russian-language news programme, bottom ticker band, 2 fps, tesseract rus, psm 6",
  "note": "Real consecutive OCR reads of one scrolling ticker. 180 frames, 90s. This is the set the text_overlap docstring's measurement table is derived from; test_text_collapse.py re-derives it so the numbers cannot drift out of the docstring unnoticed.",
  "fps": 2.0,
  "reads": [

@@ -18,7 +18,7 @@ func TestAnnotationSourcesRoundTrip(t *testing.T) {
 	sources := []string{"playbyplay", "scorebug", "face"}
 	chunkID := annotationChunk(t, st, "game.mp4", "recognition", model.Span{
 		Kind: "time", StartMS: 20300, EndMS: 28300,
-		Entities: []string{"player:robbie-ray"}, Event: "pitch",
+		Entities: []string{"player:jordan-lee"}, Event: "pitch",
 		Sources: sources,
 	})
 
@@ -31,7 +31,7 @@ func TestAnnotationSourcesRoundTrip(t *testing.T) {
 		t.Fatalf("sources did not round-trip: %v, want %v", span.Sources, sources)
 	}
 	// The provenance must not disturb the attribution stored next to it.
-	if span.Event != "pitch" || strings.Join(span.Entities, ",") != "player:robbie-ray" {
+	if span.Event != "pitch" || strings.Join(span.Entities, ",") != "player:jordan-lee" {
 		t.Fatalf("attribution disturbed by sources: %+v", span)
 	}
 }

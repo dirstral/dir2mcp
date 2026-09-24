@@ -56,7 +56,7 @@ func TestSearchForwardsTheEntityAndEventFilters(t *testing.T) {
 	}
 }
 
-// The ask path gets them too: "what did the Giants do in the 7th" is an ask,
+// The ask path gets them too: "what did the Otters do in the 7th" is an ask,
 // not a search, and it is the query the whole feature exists for.
 func TestAskForwardsTheEntityAndEventFilters(t *testing.T) {
 	q, status, body := entityFilterQuery(t, "dir2mcp_ask",

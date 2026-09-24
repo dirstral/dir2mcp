@@ -28,7 +28,7 @@ func sourced(text, event string, entities, sources []string, start, end int) mod
 func TestAnnotationSourcesReachTheChunkSpan(t *testing.T) {
 	segments, _ := ingest.RecognitionSegments([]model.RecognizedAnnotation{
 		sourced("Heliot Ramos hits a home run", "home_run",
-			[]string{"player:heliot-ramos"}, []string{"playbyplay", "scorebug", "face"},
+			[]string{"player:sam-okafor"}, []string{"playbyplay", "scorebug", "face"},
 			20300, 28300),
 	})
 	if len(segments) != 1 {
