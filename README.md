@@ -1331,7 +1331,7 @@ and `STATE_DIR`.
 - `--public` binds to `0.0.0.0` (unless explicit `--listen` is provided)
 - `--public` with `--auth none` is rejected unless `--force-insecure` is set
 - Browser origins are allowlisted (localhost defaults + explicit additions)
-- The server never indexes its own configuration: `.dir2mcp.yaml`, `.env` and `.env.local` are in the default `security.path_excludes` (with `.git/`, `.dir2mcp/`, keys and certificates), so a key in any of them cannot become a searchable or citable document
+- By default the server does not index its own configuration: `.dir2mcp.yaml`, `.env` and `.env.local` are in the default `security.path_excludes` (with `.git/`, `.dir2mcp/`, keys and certificates), so a key in any of them does not become a searchable or citable document. A `security.path_excludes` list in your config replaces the defaults, so copy these patterns into it when you set one. (`.env` and `.env.*` files are also skipped by classification, whatever the list says; `.dir2mcp.yaml` depends on the list.)
 - The MCP clients (the `ask`/`search`/`open-file`/`list-files` shims and the
   ElevenLabs bridge) buffer at most 64 MiB of one upstream response. A larger
   response fails with an error that names the limit. The client never proxies
