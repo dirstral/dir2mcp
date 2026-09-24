@@ -225,7 +225,7 @@ func splitMergedChunk(ch TranscriptChunk) ([]TranscriptChunk, bool) {
 // as a transcript, but not broadcast-legible. BuildBroadcastCues re-segments
 // from per-word timings into cues that obey these standard subtitle norms.
 // Values are in milliseconds unless noted; they mirror the pilot prototype that
-// validated on the RFE/RL corpus.
+// validated on a multilingual broadcast corpus.
 const (
 	bcMaxDurMS   = 6000 // hard cap on cue length
 	bcMinDurMS   = 1200 // minimum on-screen time

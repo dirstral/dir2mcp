@@ -417,7 +417,7 @@ client can show all of it:
 |---|---|
 | `start_ms` / `end_ms` | the span bounds, so a client can play exactly the cited moment |
 | `event` | the structured event the annotation records, for example `home_run`. Filterable |
-| `entities` | the entities the annotation names, for example `player:curtis-mead`. Filterable |
+| `entities` | the entities the annotation names, for example `player:sam-rivera`. Filterable |
 | `sources` | which recognizer produced the annotation, for example `["playbyplay"]` or `["scorebug","face"]`. Provenance only, never a ranking signal |
 | `derivation` | `observed` or `generated`. A client MUST NOT present a `generated` span as a record of what happened |
 

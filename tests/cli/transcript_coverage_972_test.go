@@ -149,13 +149,13 @@ func TestPartialTranscriptCoverage_CountsOnlyWhatDoesNotStateCompleteness(t *tes
 	st := seedTranscripts(t, dir,
 		// The #961 case: 1 of 8 windows, and the document is `ok` because the
 		// floor defaults to warn. This is the whole point of the report.
-		seedRep{relPath: "rfe/interview.mp4",
+		seedRep{relPath: "archive/interview.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
 		// Fully decoded multi-window: a POSITIVE statement of completeness.
-		seedRep{relPath: "rfe/complete.mp4",
+		seedRep{relPath: "archive/complete.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)},
 		// Single request: records no coverage. Absence is no assertion.
-		seedRep{relPath: "rfe/short.mp3", metaJSON: plainMeta(t)},
+		seedRep{relPath: "archive/short.mp3", metaJSON: plainMeta(t)},
 	)
 	defer func() { _ = st.Close() }()
 
@@ -186,7 +186,7 @@ func TestPartialTranscriptCoverage_ReadsTheCoverageDurationNotTheMediaDuration(t
 	meta := `{"provider":"whisper","model":"large-v3","duration_ms":999999999,` +
 		`"coverage":{"windows_attempted":8,"windows_decoded":1,` +
 		`"decoded_ms":600000,"duration_ms":4380000}}`
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/a.mp4", metaJSON: meta})
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/a.mp4", metaJSON: meta})
 	defer func() { _ = st.Close() }()
 
 	got, err := st.PartialTranscriptCoverage(context.Background())
@@ -203,12 +203,12 @@ func TestPartialTranscriptCoverage_AnUnknownDurationIsReportedNotSummedAsZero(t 
 	// report a shortfall of nothing, which is the silence §7.7 forbids.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/known.mp4",
+		seedRep{relPath: "archive/known.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
 		// The probe failed (duration 0) but two windows DID decode, so
 		// decoded_ms is non-zero. Folded into the length total it would claim
 		// decoded audio against a denominator of nothing.
-		seedRep{relPath: "rfe/unprobed.mp4",
+		seedRep{relPath: "archive/unprobed.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 2, 20*minute, 0)},
 	)
 	defer func() { _ = st.Close() }()
@@ -235,7 +235,7 @@ func TestPartialTranscriptCoverage_ARetiredTranscriptIsNotCounted(t *testing.T) 
 	// audio that is no longer indexed at all; that case is skip_reasons'.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir, seedRep{
-		relPath:  "rfe/refused.mp4",
+		relPath:  "archive/refused.mp4",
 		status:   "skipped",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS),
 		deleted:  true,
@@ -256,7 +256,7 @@ func TestPartialTranscriptCoverage_EveryWindowBackAndTimeStillShortIsPartial(t *
 	// was amended: completeness is the MEASURED question wherever it can be
 	// asked. All 8 windows returned, and the decoded time still falls short.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/gappy.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/gappy.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 8, 40*minute, rfeDurationMS)})
 	defer func() { _ = st.Close() }()
 
@@ -275,8 +275,8 @@ func TestPartialTranscriptCoverage_EveryWindowBackAndTimeStillShortIsPartial(t *
 func TestPartialTranscriptCoverage_AnUnreadableMetaAssertsNothing(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/broken.mp4", metaJSON: `{"coverage": not json`},
-		seedRep{relPath: "rfe/real.mp4",
+		seedRep{relPath: "archive/broken.mp4", metaJSON: `{"coverage": not json`},
+		seedRep{relPath: "archive/real.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
 	)
 	defer func() { _ = st.Close() }()
@@ -294,7 +294,7 @@ func TestDoctorTranscriptCoverage_ReportsACleanCorpusPositively(t *testing.T) {
 	// §7.7: an omitted line and a clean corpus read identically to the operator
 	// deciding whether to trust a search result, so doctor states it.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/complete.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/complete.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
 	_ = st.Close()
 
@@ -312,7 +312,7 @@ func TestDoctorTranscriptCoverage_ReportsACleanCorpusPositively(t *testing.T) {
 
 func TestDoctorTranscriptCoverage_NamesTheShortfallAndAWorkingRemedy(t *testing.T) {
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/interview.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	_ = st.Close()
 
@@ -344,7 +344,7 @@ func TestDoctorTranscriptCoverage_NamesTheShortfallAndAWorkingRemedy(t *testing.
 
 func TestStartupTranscriptCoverage_IsSilentWhereNoBannerPrints(t *testing.T) {
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/interview.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	defer func() { _ = st.Close() }()
 
@@ -371,7 +371,7 @@ func TestDoctorTranscriptCoverage_ASubSecondShortfallIsNotRenderedAsNothing(t *t
 	// forbids. Windows are minutes long, so this is the rounding edge rather
 	// than a common case, and that is exactly why it must not round to zero.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/nearly.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/nearly.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 2, 1, 40*minute-400, 40*minute)})
 	_ = st.Close()
 
@@ -396,9 +396,9 @@ func TestPartialTranscriptCoverage_SeesEveryAudioTrack(t *testing.T) {
 	// on track 0 and the interpreted feed on track 1.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/dual.mp4", repType: "transcript",
+		seedRep{relPath: "archive/dual.mp4", repType: "transcript",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)},
-		seedRep{relPath: "rfe/dual.mp4", repType: "transcript@t1",
+		seedRep{relPath: "archive/dual.mp4", repType: "transcript@t1",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
 	)
 	defer func() { _ = st.Close() }()
@@ -421,9 +421,9 @@ func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.
 	// audio twice for one recording.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/ru.mp4", repType: "transcript",
+		seedRep{relPath: "archive/ru.mp4", repType: "transcript",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
-		seedRep{relPath: "rfe/ru.mp4", repType: "transcript-en",
+		seedRep{relPath: "archive/ru.mp4", repType: "transcript-en",
 			metaJSON: `{"provider":"whisper","model":"large-v3","source_language":"ru",` +
 				`"translate_provider":"openai","translate_model":"gpt-4o","language":"en"}`},
 	)
@@ -447,12 +447,12 @@ func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.
 // assertion", never a positive value.
 
 func TestTranscriptCoverage_ACorpusThatAssertsNothingSaysSo(t *testing.T) {
-	// The real RFE shape: decoded transcripts, not one coverage record between
+	// The real archive shape: decoded transcripts, not one coverage record between
 	// them, because they were indexed before the record existed.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/a.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
-		seedRep{relPath: "rfe/b.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "archive/a.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "archive/b.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
 	)
 	_ = st.Close()
 
@@ -474,7 +474,7 @@ func TestTranscriptCoverage_ACleanCorpusStillReadsClean(t *testing.T) {
 	// The clause must not appear when every transcript asserts, or it becomes
 	// the noise it was added to remove.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/complete.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/complete.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
 	_ = st.Close()
 
@@ -492,9 +492,9 @@ func TestTranscriptCoverage_TheClauseRidesAlongsideAKnownShortfall(t *testing.T)
 	// AND transcripts that say nothing, and the report must not drop either.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/partial.mp4",
+		seedRep{relPath: "archive/partial.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)},
-		seedRep{relPath: "rfe/silent.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
+		seedRep{relPath: "archive/silent.mp4", metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
 	)
 	_ = st.Close()
 
@@ -517,11 +517,11 @@ func TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted(t *testin
 	// about any decode.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/decoded.mp4",
+		seedRep{relPath: "archive/decoded.mp4",
 			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`},
-		seedRep{relPath: "rfe/authored.mp4", repType: "transcript",
+		seedRep{relPath: "archive/authored.mp4", repType: "transcript",
 			metaJSON: `{"source":"sidecar","language":"ru"}`},
-		seedRep{relPath: "rfe/decoded.mp4", repType: "transcript-en",
+		seedRep{relPath: "archive/decoded.mp4", repType: "transcript-en",
 			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
 				`"translate_provider":"openai","translate_model":"gpt-4o"}`},
 	)
@@ -544,11 +544,11 @@ func TestPartialTranscriptCoverage_TheWordCoverageInSomeOtherFieldIsNotACoverage
 	// population, which is the one thing this count exists to get right.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/live.mp4",
+		seedRep{relPath: "archive/live.mp4",
 			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
 				`"track_label":"Live coverage","language":"ru"}`},
 		// Same trap on the other two exclusions.
-		seedRep{relPath: "rfe/note.mp4",
+		seedRep{relPath: "archive/note.mp4",
 			metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
 				`"track_label":"translate_provider"}`},
 	)
@@ -570,7 +570,7 @@ func TestPartialTranscriptCoverage_WhitespaceAroundTheKeyIsStillACoverageRecord(
 	// Reading it as "no record" would under-report the very number this count
 	// exists to make honest.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/spaced.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/spaced.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3",` +
 			`"coverage" : {"windows_attempted":4,"windows_decoded":4,` +
 			`"decoded_ms":2400000,"duration_ms":2400000}}`})
@@ -595,8 +595,8 @@ func TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing(t
 	// either, so dropping it would be the same silence this count removes.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/broken.mp4", metaJSON: `{"coverage": not json`},
-		seedRep{relPath: "rfe/empty.mp4", metaJSON: ``},
+		seedRep{relPath: "archive/broken.mp4", metaJSON: `{"coverage": not json`},
+		seedRep{relPath: "archive/empty.mp4", metaJSON: ``},
 	)
 	defer func() { _ = st.Close() }()
 
@@ -614,7 +614,7 @@ func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T)
 	// the probe's count: a corpus whose transcripts merely assert nothing
 	// produces no Speech coverage section, and only `doctor` names them.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/silent.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/silent.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
 	defer func() { _ = st.Close() }()
 
@@ -636,7 +636,7 @@ func TestStartupBanner_AKnownShortfallDoesRenderTheSection(t *testing.T) {
 	// The other side of the same claim: without this, a section that never
 	// rendered at all would satisfy the test above.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/partial.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/partial.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	defer func() { _ = st.Close() }()
 

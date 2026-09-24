@@ -37,7 +37,7 @@ func TestReindexRedecode_SaysSoWhenThereIsNothingToRepair(t *testing.T) {
 	// nothing to do", and the operator has just repaired an endpoint and wants
 	// to know whether the repair reached anything.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/complete.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/complete.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
 	_ = st.Close()
 
@@ -50,13 +50,13 @@ func TestReindexRedecode_SaysSoWhenThereIsNothingToRepair(t *testing.T) {
 func TestReindexRedecode_NamesHowManyItWillRepair(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/one.mp4",
+		seedRep{relPath: "archive/one.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)},
-		seedRep{relPath: "rfe/two.mp4",
+		seedRep{relPath: "archive/two.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 2, 20*minute, 73*minute)},
 		// Complete: must not be re-decoded, because re-decoding a corpus that is
 		// mostly fine is the cost this flag exists to avoid.
-		seedRep{relPath: "rfe/fine.mp4",
+		seedRep{relPath: "archive/fine.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)},
 	)
 	_ = st.Close()
@@ -70,7 +70,7 @@ func TestReindexRedecode_NamesHowManyItWillRepair(t *testing.T) {
 func TestReindexRedecode_APlainReindexAnnouncesNothing(t *testing.T) {
 	// The ordinary reindex stays the cheap operation.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/one.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/one.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)})
 	_ = st.Close()
 
@@ -114,9 +114,9 @@ func TestReindexRedecode_CountsRecordingsNotTranscripts(t *testing.T) {
 	// misreport what the run is about to do.
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
-		seedRep{relPath: "rfe/dual.mp4", repType: "transcript",
+		seedRep{relPath: "archive/dual.mp4", repType: "transcript",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)},
-		seedRep{relPath: "rfe/dual.mp4", repType: "transcript@t1",
+		seedRep{relPath: "archive/dual.mp4", repType: "transcript@t1",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 2, 20*minute, 73*minute)},
 	)
 	_ = st.Close()
@@ -136,7 +136,7 @@ func TestReindexRedecode_RefusesWhenNoTranscriberResolves(t *testing.T) {
 	// TranscriberFromConfig returns (nil, nil) for `off`, not an error, so the
 	// nil is the case that has to be caught.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/one.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/one.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)})
 	_ = st.Close()
 
