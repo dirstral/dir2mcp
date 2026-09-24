@@ -830,6 +830,34 @@ def test_an_abandoned_pass_records_nothing(bands, tmp_path):
     assert [p.name for p in cache.iterdir() if p.is_file()] == []
 
 
+def test_closing_read_text_closes_the_inner_read_now(monkeypatch):
+    """Closing `read_text` must close the `read` generator it wraps at once.
+
+    The inner generator owns the worker pool, the scratch directory and the
+    half-written recording. Left to garbage collection, a reference that keeps
+    it alive (here the list below; in CI, a reference cycle) left the `.part`
+    file behind after an abandoned pass.
+    """
+    inner = []
+
+    def tracked_read(self, media_path, interpret=None):
+        def gen():
+            try:
+                while True:
+                    yield "read", 1
+            finally:
+                inner.append("closed")
+        g = gen()
+        inner.append(g)  # an extra reference, so collection cannot close it
+        return g
+
+    monkeypatch.setattr(OverlayReader, "read", tracked_read)
+    reads = OverlayReader(ocr=lambda p: "", crop=BADGE, workers=1).read_text(MEDIA)
+    assert next(reads) == "read"
+    reads.close()
+    assert "closed" in inner
+
+
 def test_a_log_recorded_by_a_different_reader_is_refused(bands, tmp_path):
     bands({BADGE: "GAME 1"}, frames=3, fps=0.5)
     cache = tmp_path / "logs"

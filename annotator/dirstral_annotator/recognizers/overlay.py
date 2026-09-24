@@ -60,6 +60,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, TypeVar
@@ -664,8 +665,13 @@ class OverlayReader:
 
     def read_text(self, media_path: Path) -> Iterator[OverlayRead]:
         """Every band's text, and nothing else. The no-interpretation path."""
-        for read, _ in self.read(media_path):
-            yield read
+        # `closing`, as every other caller of `read` does: closing THIS generator
+        # must close the inner one now. Without it the inner generator (its
+        # worker pool, scratch directory and half-written recording) was left
+        # to garbage collection, so a `.part` file could outlive an abandoned pass.
+        with closing(self.read(media_path)) as reads:
+            for read, _ in reads:
+                yield read
 
 
 class _RegionSearch:
