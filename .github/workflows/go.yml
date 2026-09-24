@@ -205,3 +205,35 @@ jobs:
         run: >-
           go test -v ./tests/ingest/
           -run 'Docling|DescribeDocumentExtractor|DocumentExtractorFromConfig|DescribeAndBuild'
+
+  # Windows build and Go test suite. dir2mcp ships Windows binaries, so the
+  # Go suite must run on Windows too. The job runs go directly, not `make ci`:
+  # the Makefile gates need a POSIX shell and the Python annotator venv, and
+  # the annotator suite stays on Linux (the `annotator` job above). Tests that
+  # need unix-only features skip on Windows with a stated reason.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # Keep LF line endings. Fixtures and golden files compare bytes, and the
+      # runner default (core.autocrlf=true) rewrites them to CRLF.
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
