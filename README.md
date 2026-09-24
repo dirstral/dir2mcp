@@ -1046,6 +1046,7 @@ ingest:
 ```
 
 Notes:
+- **Transcription is optional.** A folder with no audio or video needs no speech server: drop the `local-stt` profile and the `stt_provider` line, and transcription stays off (the default selector is `auto`, which turns STT on only when an eligible profile exists).
 - **Document extraction:** use local `docling` (the `dir2mcp-full` track bundles it) or a self-hosted [docling-serve](#docling-extraction-over-http-docling-serve). Avoid `extractor: auto`, whose last fallback is cloud Mistral OCR — pin `extractor: docling` (or `docling-serve`, or `off`) so no page image is ever uploaded. For a self-hosted OCR endpoint instead, bind `model.ocr.provider` to a `kind: mistral` `/v1/ocr` profile (see below).
 - **Verify, don't infer:** run `dir2mcp doctor` — its **egress** row must report `no third-party egress: all resolved providers target local/loopback or private/LAN endpoints`. If it names any public host, that capability is still leaving the machine.
 - A trusted-LAN endpoint may be **credential-less** (omit `api_key`); loopback, private-range, `.local`/`.internal`, and single-label LAN hosts all count as no-egress.
