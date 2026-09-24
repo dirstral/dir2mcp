@@ -56,7 +56,7 @@ func buildAnnotationService(t *testing.T, gen model.Generator, chunks []annotati
 	idx := index.NewHNSWIndex("")
 	for i, c := range chunks {
 		vec := []float32{1, float32(i) / 1000}
-		addAnnotation(t, idx, c.id, vec, c.event, []string{"player:matt-chapman"}, c.startMS, c.endMS)
+		addAnnotation(t, idx, c.id, vec, c.event, []string{"player:riley-park"}, c.startMS, c.endMS)
 	}
 	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
@@ -66,7 +66,7 @@ func buildAnnotationService(t *testing.T, gen model.Generator, chunks []annotati
 			ChunkID: c.id, RelPath: gameFile, DocType: "video", Snippet: c.text,
 			Span: model.Span{
 				Kind: "time", StartMS: c.startMS, EndMS: c.endMS,
-				Entities: []string{"player:matt-chapman"}, Event: c.event,
+				Entities: []string{"player:riley-park"}, Event: c.event,
 			},
 		})
 	}
@@ -347,7 +347,7 @@ func TestAsk891_StillAbstainsOnWeakEvidence(t *testing.T) {
 	// under the shipped absolute threshold.
 	for i := 0; i < 40; i++ {
 		addAnnotation(t, idx, uint64(i+1), []float32{0.02, 1}, "captivating",
-			[]string{"player:matt-chapman"}, 60000*i, 60000*i+8000)
+			[]string{"player:riley-park"}, 60000*i, 60000*i+8000)
 	}
 	fabricated := "The most captivating moment was the grand slam."
 	gen := &fakeGenerator{out: fabricated}
@@ -360,7 +360,7 @@ func TestAsk891_StillAbstainsOnWeakEvidence(t *testing.T) {
 			Snippet: fmt.Sprintf("Captivating moment (captivating index %d).", 10+i),
 			Span: model.Span{
 				Kind: "time", StartMS: 60000 * i, EndMS: 60000*i + 8000,
-				Entities: []string{"player:matt-chapman"}, Event: "captivating",
+				Entities: []string{"player:riley-park"}, Event: "captivating",
 			},
 		})
 	}
