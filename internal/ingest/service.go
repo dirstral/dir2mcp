@@ -159,6 +159,11 @@ type Service struct {
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
 	languageRouteIDs map[string]string
+	// identifier is the §8.2.3 language identifier (media.stt.language_identifier),
+	// nil when none is bound; routeLists caches each language's eligible
+	// candidate routes (§8.2.3), guarded by routeMu.
+	identifier *routedSTT
+	routeLists map[string][]routedSTT
 	// windowGate is the §8.6.6 gate run PER decode window under window scope
 	// (SPEC §8.2.2, #1030): repetition, gibberish and script mismatch against the
 	// window's resolved language. It deliberately omits the empty and density
@@ -1056,6 +1061,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		svc.windowGate = quality.New(windowGateConfig())
 		svc.windowDocGate = quality.New(windowDocGateConfigFrom(quality.DefaultConfig()))
 	}
+	svc.setupLanguageIdentifier()
 	svc.resolveTranscriptIdentityFields()
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
 	// translation is enabled we resolve the chat capability and build a

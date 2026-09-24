@@ -37,9 +37,13 @@ type providerProfileYAML struct {
 	// assertion); a declared, non-empty set drives the honest-coverage warning
 	// when the effective source language falls outside it.
 	STTLanguages []string `yaml:"stt_languages"`
-	TTSModel     string   `yaml:"tts_model"`
-	TTSVoice     string   `yaml:"tts_voice"`
-	RerankModel  string   `yaml:"rerank_model"`
+	// STTValidation is the operator's own measurement that this profile
+	// transcribes a language acceptably (SPEC §8.2.3, dir2mcp #1031). Only
+	// `language` is interpreted, by media.stt.require_validation.
+	STTValidation []provider.STTValidation `yaml:"stt_validation"`
+	TTSModel      string                   `yaml:"tts_model"`
+	TTSVoice      string                   `yaml:"tts_voice"`
+	RerankModel   string                   `yaml:"rerank_model"`
 }
 
 type capBindingYAML struct {
@@ -459,45 +463,77 @@ func parseCarbonConfig(raw []byte) (CarbonConfig, error) {
 type mediaSTTLanguageProvidersDoc struct {
 	Media struct {
 		STT struct {
-			LanguageProviders map[string]string `yaml:"language_providers"`
+			LanguageProviders map[string]routeCandidates `yaml:"language_providers"`
 		} `yaml:"stt"`
 	} `yaml:"media"`
+}
+
+// routeCandidates is one media.stt.language_providers value: a single profile
+// name (SPEC §8.2.1) or an ordered list of candidate names (SPEC §8.2.3,
+// #1031). A single name decodes as a one-element list, so every existing
+// configuration keeps its meaning.
+type routeCandidates []string
+
+func (r *routeCandidates) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		*r = routeCandidates{node.Value}
+		return nil
+	case yaml.SequenceNode:
+		var names []string
+		if err := node.Decode(&names); err != nil {
+			return err
+		}
+		*r = names
+		return nil
+	}
+	return fmt.Errorf("line %d: a language_providers value must be a profile name or a list of names", node.Line)
 }
 
 // parseMediaSTTLanguageProviders decodes the optional media.stt.language_providers
 // map into a route table keyed by the BCP-47 PRIMARY language subtag (SPEC §8.2.1,
 // #566), so a "ru" route matches a "ru-RU" pin and vice versa — the same matching
-// rule the honest-coverage check uses. Absent block ⇒ nil, no error. Two keys that
-// collapse to the same primary subtag but name DIFFERENT profiles are rejected
-// (ambiguous route), so lookup is deterministic.
-func parseMediaSTTLanguageProviders(raw []byte) (map[string]string, error) {
+// rule the honest-coverage check uses. It returns the FIRST candidate per
+// language (the item-level route) and the full ordered candidate list (SPEC
+// §8.2.3). Absent block ⇒ nil, no error. Two keys that collapse to the same
+// primary subtag but name DIFFERENT candidates are rejected (ambiguous route), so
+// lookup is deterministic; so is an empty list.
+func parseMediaSTTLanguageProviders(raw []byte) (map[string]string, map[string][]string, error) {
 	sub := extractTopLevelSubtree(raw, "media")
 	if len(sub) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var doc mediaSTTLanguageProvidersDoc
 	if err := yaml.Unmarshal(sub, &doc); err != nil {
-		return nil, fmt.Errorf("parse media.stt.language_providers config: %w", err)
+		return nil, nil, fmt.Errorf("parse media.stt.language_providers config: %w", err)
 	}
 	in := doc.Media.STT.LanguageProviders
 	if len(in) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	out := make(map[string]string, len(in))
-	for lang, name := range in {
+	first := make(map[string]string, len(in))
+	all := make(map[string][]string, len(in))
+	for lang, names := range in {
 		key := provider.PrimarySubtag(lang)
-		name = strings.TrimSpace(name)
 		if key == "" {
 			continue
 		}
-		if existing, dup := out[key]; dup && existing != name {
-			return nil, fmt.Errorf(
-				"CONFIG_INVALID: media.stt.language_providers has conflicting routes for language %q (%q vs %q)",
-				key, existing, name)
+		clean := make([]string, 0, len(names))
+		for _, n := range names {
+			clean = append(clean, strings.TrimSpace(n))
 		}
-		out[key] = name
+		if len(clean) == 0 {
+			return nil, nil, fmt.Errorf("CONFIG_INVALID: media.stt.language_providers[%q] is an empty list", key)
+		}
+		if existing, dup := all[key]; dup && strings.Join(existing, ",") != strings.Join(clean, ",") {
+			return nil, nil, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.language_providers has conflicting routes for language %q (%q vs %q)",
+				key, strings.Join(existing, ","), strings.Join(clean, ","))
+		}
+		all[key] = clean
+		first[key] = clean[0]
 	}
-	return out, nil
+	return first, all, nil
 }
 
 func parseProvidersDoc(raw []byte) (providersDoc, error) {
@@ -602,6 +638,9 @@ func mergeProfiles(base, user map[string]providerProfileYAML, declOrder []string
 		// STTLanguages (declared STT coverage, #566) is a slice: a non-empty
 		// override replaces the built-in's set wholesale; an omitted/empty one
 		// leaves the base intact (matching the "unset => open/unknown" contract).
+		if len(up.STTValidation) > 0 {
+			base.STTValidation = append([]provider.STTValidation(nil), up.STTValidation...)
+		}
 		if len(up.STTLanguages) > 0 {
 			base.STTLanguages = append([]string(nil), up.STTLanguages...)
 		}
@@ -681,6 +720,7 @@ func toProfiles(merged map[string]providerProfileYAML, getenv func(string) strin
 			STTModel:       p.STTModel,
 			STTLanguage:    p.STTLanguage,
 			STTLanguages:   append([]string(nil), p.STTLanguages...),
+			STTValidation:  append([]provider.STTValidation(nil), p.STTValidation...),
 			TTSModel:       p.TTSModel,
 			TTSVoice:       p.TTSVoice,
 			RerankModel:    p.RerankModel,
@@ -856,17 +896,27 @@ func (c Config) RouteSTTProfile(def provider.Profile) (provider.Profile, error) 
 	if pin == "" || len(c.MediaSTTLanguageProviders) == 0 {
 		return def, nil
 	}
-	mapped, ok := c.MediaSTTLanguageProviders[provider.PrimarySubtag(pin)]
-	if !ok {
+	key := provider.PrimarySubtag(pin)
+	if _, ok := c.MediaSTTLanguageProviders[key]; !ok {
 		return def, nil
 	}
-	mapped = strings.TrimSpace(mapped) // defensive: values are trimmed at parse, but never route to a blank name
-	routed, err := c.Providers().ResolveExplicit(provider.CapSTT, mapped, true)
-	if err != nil {
-		return provider.Profile{}, err
+	// SPEC §8.2.3: the item decodes on the first ELIGIBLE candidate. Under
+	// media.stt.require_validation a candidate without a validation record for
+	// the language is skipped; when none is eligible the default profile stays,
+	// as for an unmatched language.
+	for _, name := range c.routeCandidatesFor(key) {
+		name = strings.TrimSpace(name) // defensive: values are trimmed at parse, but never route to a blank name
+		routed, err := c.Providers().ResolveExplicit(provider.CapSTT, name, true)
+		if err != nil {
+			return provider.Profile{}, err
+		}
+		if c.MediaSTTRequireValidation && !routed.ValidatedFor(key) {
+			continue
+		}
+		routed.STTLanguage = pin
+		return routed, nil
 	}
-	routed.STTLanguage = pin
-	return routed, nil
+	return def, nil
 }
 
 // sttSelectorProfile is the SINGLE mapping from a normalized legacy stt.provider
@@ -1009,7 +1059,27 @@ func (c *Config) validateSTTLanguageProviders() error {
 	}
 	sort.Strings(langs)
 	for _, lang := range langs {
-		name := strings.TrimSpace(c.MediaSTTLanguageProviders[lang])
+		if err := validateSTTRouteCandidates(byName, lang, c.routeCandidatesFor(lang)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// routeCandidatesFor returns the ordered candidate list of one route: the
+// SPEC §8.2.3 list when the config carried one, else the single §8.2.1 name.
+func (c *Config) routeCandidatesFor(lang string) []string {
+	if names := c.MediaSTTLanguageCandidates[lang]; len(names) > 0 {
+		return names
+	}
+	return []string{c.MediaSTTLanguageProviders[lang]}
+}
+
+// validateSTTRouteCandidates checks every candidate of one route the way a
+// single §8.2.1 route is checked: present, and STT-capable.
+func validateSTTRouteCandidates(byName map[string]provider.Profile, lang string, names []string) error {
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
 		if name == "" {
 			return fmt.Errorf(
 				"CONFIG_INVALID: media.stt.language_providers[%q] has no provider profile name", lang)

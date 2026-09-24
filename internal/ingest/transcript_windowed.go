@@ -539,6 +539,9 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	var st *windowLanguageState
 	if label == "transcription" && s.windowScoped() {
 		st = s.newWindowLanguageState()
+		st.cut = func(ctx context.Context, startMS, endMS int) ([]byte, error) {
+			return s.extractMediaSegment(ctx, tmpPath, startMS, endMS)
+		}
 	}
 	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, windowSchedule{
 		totalMS:  totalMS,

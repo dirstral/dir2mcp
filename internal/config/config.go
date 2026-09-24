@@ -1202,6 +1202,23 @@ type Config struct {
 	// coverage.refused on its transcript meta_json. Any other value is
 	// CONFIG_INVALID. Off by default: an existing corpus is unchanged.
 	MediaSTTLanguageScope string
+	// MediaSTTLanguageIdentifier names an STT-capable provider profile used ONLY
+	// to identify the source language (config `media.stt.language_identifier`,
+	// SPEC §8.2.3, dir2mcp #1031). Its report outranks the decoder's own report
+	// and text detection; its text is discarded. Empty (default) = §8.2.2.
+	MediaSTTLanguageIdentifier string
+	// MediaSTTLanguageProbeSec bounds how much audio is sent to the identifier
+	// (config `media.stt.language_probe_sec`, SPEC §8.2.3); default 30.
+	MediaSTTLanguageProbeSec int
+	// MediaSTTRequireValidation makes a language_providers candidate eligible
+	// only when its profile declares stt_validation for the language (config
+	// `media.stt.require_validation`, SPEC §8.2.3). Default false.
+	MediaSTTRequireValidation bool
+	// MediaSTTLanguageCandidates is media.stt.language_providers with each value
+	// as the ordered candidate list SPEC §8.2.3 allows (a single name is a
+	// one-element list). MediaSTTLanguageProviders keeps the FIRST candidate, so
+	// every item-level caller is unchanged.
+	MediaSTTLanguageCandidates map[string][]string
 
 	// MediaSTTTracks selects WHICH audio tracks of a multi-track media container
 	// are transcribed (config `media.stt.tracks`, SPEC §8.6.12, issue #567). It is
@@ -1507,6 +1524,9 @@ type fileConfig struct {
 	MediaSTTMinCoverage                *float64
 	MediaSTTOnPartialTranscript        *string
 	MediaSTTLanguageScope              *string
+	MediaSTTLanguageIdentifier         *string
+	MediaSTTLanguageProbeSec           *int
+	MediaSTTRequireValidation          *bool
 	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
@@ -1679,6 +1699,9 @@ type persistedConfig struct {
 	MediaSTTMinCoverage                float64       `yaml:"media_stt_min_coverage"`
 	MediaSTTOnPartialTranscript        string        `yaml:"media_stt_on_partial_transcript"`
 	MediaSTTLanguageScope              string        `yaml:"media_stt_language_scope"`
+	MediaSTTLanguageIdentifier         string        `yaml:"media_stt_language_identifier"`
+	MediaSTTLanguageProbeSec           int           `yaml:"media_stt_language_probe_sec"`
+	MediaSTTRequireValidation          bool          `yaml:"media_stt_require_validation"`
 	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
@@ -1937,6 +1960,7 @@ func Default() Config {
 		MediaSTTOnUncoveredLanguage: onUncoveredLanguageWarn,
 		MediaSTTOnPartialTranscript: onPartialTranscriptWarn,
 		MediaSTTLanguageScope:       languageScopeItem,
+		MediaSTTLanguageProbeSec:    30,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2139,6 +2163,9 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTMinCoverage:                cfg.MediaSTTMinCoverage,
 		MediaSTTOnPartialTranscript:        cfg.MediaSTTOnPartialTranscript,
 		MediaSTTLanguageScope:              cfg.MediaSTTLanguageScope,
+		MediaSTTLanguageIdentifier:         cfg.MediaSTTLanguageIdentifier,
+		MediaSTTLanguageProbeSec:           cfg.MediaSTTLanguageProbeSec,
+		MediaSTTRequireValidation:          cfg.MediaSTTRequireValidation,
 		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
@@ -2562,12 +2589,13 @@ func applyFileOverrides(cfg *Config, path string) error {
 	// a map of BCP-47 language -> STT provider profile name, so it is decoded from
 	// the media: subtree with yaml.v3 rather than the bespoke flat parser above
 	// (which is scalar/list-only). Absent block ⇒ nil (no routing), no error.
-	langProviders, err := parseMediaSTTLanguageProviders(raw)
+	langProviders, langCandidates, err := parseMediaSTTLanguageProviders(raw)
 	if err != nil {
 		return fmt.Errorf("config file %s: %w", path, err)
 	}
 	if len(langProviders) > 0 {
 		cfg.MediaSTTLanguageProviders = langProviders
+		cfg.MediaSTTLanguageCandidates = langCandidates
 	}
 
 	return nil
@@ -3152,6 +3180,15 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTLanguageScope != nil {
 		cfg.MediaSTTLanguageScope = *fc.MediaSTTLanguageScope
 	}
+	if fc.MediaSTTLanguageIdentifier != nil {
+		cfg.MediaSTTLanguageIdentifier = strings.TrimSpace(*fc.MediaSTTLanguageIdentifier)
+	}
+	if fc.MediaSTTLanguageProbeSec != nil {
+		cfg.MediaSTTLanguageProbeSec = *fc.MediaSTTLanguageProbeSec
+	}
+	if fc.MediaSTTRequireValidation != nil {
+		cfg.MediaSTTRequireValidation = *fc.MediaSTTRequireValidation
+	}
 	if fc.MediaSTTTracks != nil {
 		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
@@ -3293,6 +3330,23 @@ func normalizeStringSlice(values []string) []string {
 	return out
 }
 
+// applyYAMLListItem handles one "- value" line of the flat scanner: it
+// appends to the current list key, and is ignored where yaml.v3 decodes the
+// list instead: inside a separately parsed block (a provider profile's
+// stt_validation records, SPEC §8.2.3) and under a
+// media.stt.language_providers.<lang> key (a block-style candidate list). It
+// is an error anywhere else.
+func applyYAMLListItem(cfg *fileConfig, currentListKey string, inSideParsedBlock bool, lastBlockKey, line string, lineNo int) error {
+	if currentListKey == "" {
+		if inSideParsedBlock || strings.HasPrefix(lastBlockKey, "media.stt.language_providers.") {
+			return nil
+		}
+		return fmt.Errorf("line %d: list item without a list key", lineNo)
+	}
+	setFileListValue(cfg, currentListKey, unquoteYAMLScalar(strings.TrimPrefix(line, "- ")))
+	return nil
+}
+
 // parseConfigYAML parses the supported flat/nested-key YAML subset into
 // a fileConfig using a bespoke line scanner (lists, inline lists, and
 // indentation-derived section prefixes).
@@ -3305,6 +3359,10 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 	// True while inside a top-level block decoded separately with yaml.v3, whose
 	// children must not be reported as unrecognized keys (#628).
 	inSideParsedBlock := false
+	// The last key that opened a nested block. A block-style list under a
+	// media.stt.language_providers.<lang> key is a SPEC §8.2.3 candidate list,
+	// which parseMediaSTTLanguageProviders decodes with yaml.v3.
+	lastBlockKey := ""
 
 	for scanner.Scan() {
 		lineNo++
@@ -3316,10 +3374,9 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 		}
 
 		if strings.HasPrefix(line, "- ") {
-			if currentListKey == "" {
-				return fileConfig{}, fmt.Errorf("line %d: list item without a list key", lineNo)
+			if err := applyYAMLListItem(&cfg, currentListKey, inSideParsedBlock, lastBlockKey, line, lineNo); err != nil {
+				return fileConfig{}, err
 			}
-			setFileListValue(&cfg, currentListKey, unquoteYAMLScalar(strings.TrimPrefix(line, "- ")))
 			continue
 		}
 
@@ -3339,7 +3396,9 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			inSideParsedBlock = sideParsedTopLevelBlocks[key]
 		}
 
+		lastBlockKey = ""
 		if value == "" {
+			lastBlockKey = key
 			newListKey, err := handleYAMLEmptyValue(&cfg, key, sectionByIndent, indent)
 			if err != nil {
 				return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
@@ -3667,6 +3726,9 @@ var configKeyAliases = map[string]string{
 	"media_stt_min_coverage":                  "media.stt.min_coverage",
 	"media_stt_on_partial_transcript":         "media.stt.on_partial_transcript",
 	"media_stt_language_scope":                "media.stt.language_scope",
+	"media_stt_language_identifier":           "media.stt.language_identifier",
+	"media_stt_language_probe_sec":            "media.stt.language_probe_sec",
+	"media_stt_require_validation":            "media.stt.require_validation",
 	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
@@ -3806,20 +3868,21 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 // from a table (rather than a switch) keeps its cyclomatic complexity flat as
 // more boolean keys are added.
 var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
-	"public":                     func(c *fileConfig) **bool { return &c.Public },
-	"rag.generate_answer":        func(c *fileConfig) **bool { return &c.RAGGenerateAnswer },
-	"ingest.gitignore":           func(c *fileConfig) **bool { return &c.IngestGitignore },
-	"ingest.follow_symlinks":     func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
-	"ingest.scan_cache":          func(c *fileConfig) **bool { return &c.IngestScanCache },
-	"ingest.late_chunking":       func(c *fileConfig) **bool { return &c.IngestLateChunking },
-	"ingest.watch":               func(c *fileConfig) **bool { return &c.IngestWatch },
-	"quality_gates_enabled":      func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
-	"language_detection_enabled": func(c *fileConfig) **bool { return &c.LanguageDetectionEnabled },
-	"media_sidecars_disabled":    func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
-	"media.variants.group":       func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
-	"media.translate.enabled":    func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
-	"media.translate.name_hints": func(c *fileConfig) **bool { return &c.MediaTranslateNameHints },
-	"media.stt.language_strict":  func(c *fileConfig) **bool { return &c.MediaSTTLanguageStrict },
+	"public":                       func(c *fileConfig) **bool { return &c.Public },
+	"rag.generate_answer":          func(c *fileConfig) **bool { return &c.RAGGenerateAnswer },
+	"ingest.gitignore":             func(c *fileConfig) **bool { return &c.IngestGitignore },
+	"ingest.follow_symlinks":       func(c *fileConfig) **bool { return &c.IngestFollowSymlinks },
+	"ingest.scan_cache":            func(c *fileConfig) **bool { return &c.IngestScanCache },
+	"ingest.late_chunking":         func(c *fileConfig) **bool { return &c.IngestLateChunking },
+	"ingest.watch":                 func(c *fileConfig) **bool { return &c.IngestWatch },
+	"quality_gates_enabled":        func(c *fileConfig) **bool { return &c.QualityGatesEnabled },
+	"language_detection_enabled":   func(c *fileConfig) **bool { return &c.LanguageDetectionEnabled },
+	"media_sidecars_disabled":      func(c *fileConfig) **bool { return &c.MediaSidecarsDisabled },
+	"media.variants.group":         func(c *fileConfig) **bool { return &c.MediaVariantsGroup },
+	"media.translate.enabled":      func(c *fileConfig) **bool { return &c.MediaTranslateEnabled },
+	"media.translate.name_hints":   func(c *fileConfig) **bool { return &c.MediaTranslateNameHints },
+	"media.stt.language_strict":    func(c *fileConfig) **bool { return &c.MediaSTTLanguageStrict },
+	"media.stt.require_validation": func(c *fileConfig) **bool { return &c.MediaSTTRequireValidation },
 	"media.subtitles.ttml.enabled": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesTTMLEnabled
 	},
@@ -3903,6 +3966,7 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.clip.max_duration_ms":         func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
 	"media.clip.max_bytes":               func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
 	"media.stt.max_payload_mb":           func(c *fileConfig) **int { return &c.MediaSTTMaxPayloadMB },
+	"media.stt.language_probe_sec":       func(c *fileConfig) **int { return &c.MediaSTTLanguageProbeSec },
 	"media.stt.request_timeout_sec": func(c *fileConfig) **int {
 		return &c.MediaSTTRequestTimeoutSec
 	},
@@ -4242,6 +4306,8 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaSTTOnPartialTranscript = strPtr(value)
 	case "media.stt.language_scope":
 		cfg.MediaSTTLanguageScope = strPtr(value)
+	case "media.stt.language_identifier":
+		cfg.MediaSTTLanguageIdentifier = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -4538,6 +4604,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_stt_min_coverage", strconv.FormatFloat(cfg.MediaSTTMinCoverage, 'f', -1, 64))
 	writeScalar("media_stt_on_partial_transcript", cfg.MediaSTTOnPartialTranscript)
 	writeScalar("media_stt_language_scope", cfg.MediaSTTLanguageScope)
+	writeScalar("media_stt_language_identifier", cfg.MediaSTTLanguageIdentifier)
+	writeInt("media_stt_language_probe_sec", cfg.MediaSTTLanguageProbeSec)
+	writeBool("media_stt_require_validation", cfg.MediaSTTRequireValidation)
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -5045,6 +5114,7 @@ func (c *Config) Validate() error {
 		c.validateMediaSTTOnUncoveredLanguage,
 		c.validateMediaSTTPartialTranscriptFloor,
 		c.validateMediaSTTLanguageScope,
+		c.validateSTTLanguageIdentifier,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -5737,6 +5807,29 @@ const (
 	languageScopeItem   = "item"
 	languageScopeWindow = "window"
 )
+
+// validateSTTLanguageIdentifier fails fast (CONFIG_INVALID) when
+// media.stt.language_identifier (SPEC §8.2.3, #1031) names a profile that does
+// not exist or is not STT-capable, and rejects a negative probe length. Like the
+// language_providers routes it is static validation: an identifier that can
+// never answer must be caught at startup, not on the first recording.
+func (c *Config) validateSTTLanguageIdentifier() error {
+	if c.MediaSTTLanguageProbeSec < 0 {
+		return fmt.Errorf("media.stt.language_probe_sec must be non-negative: %d", c.MediaSTTLanguageProbeSec)
+	}
+	name := strings.TrimSpace(c.MediaSTTLanguageIdentifier)
+	if name == "" {
+		return nil
+	}
+	prof, ok := c.Providers().ByName()[name]
+	if !ok {
+		return fmt.Errorf("CONFIG_INVALID: media.stt.language_identifier names unknown provider profile %q", name)
+	}
+	if provider.Can(prof.Kind, provider.CapSTT) == provider.Unsupported {
+		return fmt.Errorf("CONFIG_INVALID: media.stt.language_identifier provider %q (kind %q) is not speech-to-text capable", name, prof.Kind)
+	}
+	return nil
+}
 
 // validateMediaSTTLanguageScope normalizes media.stt.language_scope: item or
 // window, case-insensitive, with empty defaulting to item. Anything else is
