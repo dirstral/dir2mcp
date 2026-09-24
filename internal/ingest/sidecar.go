@@ -178,6 +178,9 @@ type transcriptMeta struct {
 	// transcript records neither, so its meta_json and identity are unchanged.
 	LanguageScope  string `json:"language_scope,omitempty"`
 	LanguageRoutes string `json:"language_routes,omitempty"`
+	// LanguageIdentifier names the §8.2.3 identifier profile that resolved the
+	// window languages, when one was bound (SPEC §8.2.3).
+	LanguageIdentifier string `json:"language_identifier,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

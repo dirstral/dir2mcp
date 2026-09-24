@@ -241,6 +241,10 @@ type Profile struct {
 	// Empty = open/unknown (no coverage assertion). A non-empty set drives the
 	// honest-coverage warning when the effective source language is outside it.
 	STTLanguages []string
+	// STTValidation holds the operator's own validation records (SPEC §8.2.3,
+	// #1031): which languages this profile was measured to transcribe
+	// acceptably, how, and when. Only Language is interpreted.
+	STTValidation []STTValidation
 	// STTVAD requests a provider-side voice-activity-detection filter where
 	// supported (dir2mcp#258, config `media.vad`). For the self-hosted whisper
 	// provider this maps to the OpenAI-compatible `vad_filter` form field;
@@ -796,4 +800,31 @@ func insertEmbedBaseURLField(parts []string) string {
 	out = append(out, parts[0], "")
 	out = append(out, parts[1:]...)
 	return strings.Join(out, "|")
+}
+
+// STTValidation is one operator validation record on an STT profile (SPEC
+// §8.2.3): the profile was measured to transcribe Language acceptably. Method,
+// Sample, Score and Date are informational and surfaced unchanged; nothing
+// interprets them.
+type STTValidation struct {
+	Language string `yaml:"language" json:"language"`
+	Method   string `yaml:"method" json:"method,omitempty"`
+	Sample   string `yaml:"sample" json:"sample,omitempty"`
+	Score    string `yaml:"score" json:"score,omitempty"`
+	Date     string `yaml:"date" json:"date,omitempty"`
+}
+
+// ValidatedFor reports whether the profile carries a validation record for
+// lang, matched on the BCP-47 primary subtag.
+func (p Profile) ValidatedFor(lang string) bool {
+	want := PrimarySubtag(lang)
+	if want == "" {
+		return false
+	}
+	for _, v := range p.STTValidation {
+		if PrimarySubtag(v.Language) == want {
+			return true
+		}
+	}
+	return false
 }

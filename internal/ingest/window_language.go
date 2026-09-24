@@ -106,40 +106,14 @@ func (s *Service) SetRouteTranscriber(lang string, tr model.Transcriber, route s
 // languages builds each transcriber once. An unknown language (empty) always
 // takes the default route.
 func (s *Service) routeForLanguage(lang string) (routedSTT, error) {
-	key := provider.PrimarySubtag(lang)
-	if key == "" {
+	cands, err := s.routeCandidates(lang)
+	if err != nil {
+		return routedSTT{}, err
+	}
+	if len(cands) == 0 {
 		return s.defaultRoute(), nil
 	}
-	s.routeMu.Lock()
-	defer s.routeMu.Unlock()
-	if r, ok := s.routes[key]; ok {
-		return r, nil
-	}
-	mapped, ok := s.cfg.MediaSTTLanguageProviders[key]
-	if !ok {
-		return s.defaultRoute(), nil
-	}
-	prof, err := s.cfg.Providers().ResolveExplicit(provider.CapSTT, mapped, true)
-	if err != nil {
-		return routedSTT{}, fmt.Errorf("route language %q to STT profile %q: %w", key, mapped, err)
-	}
-	// The same profile adjustments TranscriberFromConfigWithLanguage applies to
-	// the default route, so a routed window decodes under the same VAD and
-	// request limits as an unrouted one; only the model differs.
-	prof.STTLanguage = key
-	prof.STTVAD = s.cfg.MediaVAD
-	prof.STTMaxPayloadMB = s.cfg.MediaSTTMaxPayloadMB
-	prof.STTRequestTimeoutSec = s.cfg.MediaSTTRequestTimeoutSec
-	tr, err := buildTranscriber(prof)
-	if err != nil {
-		return routedSTT{}, fmt.Errorf("build STT route %q for language %q: %w", mapped, key, err)
-	}
-	r := routedSTT{stt: tr, route: strings.TrimSpace(prof.Name), coverage: append([]string(nil), prof.STTLanguages...)}
-	if s.routes == nil {
-		s.routes = map[string]routedSTT{}
-	}
-	s.routes[key] = r
-	return r, nil
+	return cands[0], nil
 }
 
 // windowLanguageState is the continuity the §8.2.2 rules carry from one window
@@ -158,6 +132,9 @@ type windowLanguageState struct {
 	// refuse), so decoded and refused ranges never overlap in the record.
 	decodedEnd int
 	last       *model.CoverageLanguage
+	// cut slices [startMS,endMS) out of the staged recording, for the §8.2.3
+	// identifier probe. Nil when the recording was not staged (one request).
+	cut func(ctx context.Context, startMS, endMS int) ([]byte, error)
 }
 
 // newWindowLanguageState seeds the state with the item-level resolution of
@@ -217,33 +194,45 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if len(results) == 0 {
 		return out
 	}
-	lang, source, conf := st.resolve(results)
+	idTag, idConf, idOK := s.identifyWindow(ctx, relPath, pieces, core, st)
+	lang, source, conf := st.resolveWith(results, idTag, idConf, idOK)
 	results, cur = s.rerouteWindow(ctx, relPath, pieces, plan, core, results, cur, lang)
-	covered := routeCovers(cur, lang)
-	if !covered && s.onUncoveredLanguage == onUncoveredLanguageSkip {
+	v := s.judgeWindow(results, cur, lang, core)
+	lastGood := cur
+	results, cur, v, ferr := s.fallThroughCandidates(ctx, relPath, pieces, plan, core, lang, results, cur, v)
+	if ferr != nil {
+		// A candidate that fails to decode is a failed window (§8.6.13), not a
+		// refusal: the window is retried on the next run. The state advances on
+		// the route that last PRODUCED results, never the failing candidate: the
+		// next window decodes on the state's route first, and a broken one there
+		// would fail every later window before routing could move it.
+		out.err = ferr
+		st.advance(lang, source, conf, lastGood)
+		return out
+	}
+	switch v.reason {
+	case model.RefusedLanguageUncovered:
 		s.getLogger().Printf("windowed %s: refusing window [%d,%d]ms of %s: language %q is outside %s's declared coverage %v (media.stt.on_uncovered_language=skip, SPEC §8.2.2)",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 		out.refused, out.languages = st.refuse(core, model.RefusedLanguageUncovered)
 		st.advance(lang, source, conf, cur)
 		return out
-	}
-	if !covered {
-		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s is in %q, outside %s's declared coverage %v; indexed anyway and recorded covered=false (SPEC §8.2.2)",
-			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
-	}
-	// §8.6.6 per window (§8.2.2, #1030): degenerate output is refused with its
-	// reason instead of reaching the transcript. The window's RESOLVED language
-	// is the expected one for the script check, as the spec requires; the
-	// detail is content-free, so it is safe to log.
-	if finding := s.windowQualityFinding(results, lang, core); finding != nil {
+	case model.RefusedQualityGate:
+		// §8.6.6 per window (§8.2.2, #1030): degenerate output is refused with
+		// its reason instead of reaching the transcript. The detail is
+		// content-free, so it is safe to log.
 		s.getLogger().Printf("windowed %s: quality gate refused window [%d,%d]ms of %s: reason=%s (%s) (SPEC §8.2.2)",
-			plan.label, core.StartMS, core.EndMS, relPath, finding.Reason, finding.Detail)
+			plan.label, core.StartMS, core.EndMS, relPath, v.finding.Reason, v.finding.Detail)
 		out.refused, out.languages = st.refuse(core, model.RefusedQualityGate)
-		out.qualityReason = string(finding.Reason)
+		out.qualityReason = string(v.finding.Reason)
 		st.advance(lang, source, conf, cur)
 		return out
 	}
-	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, covered)
+	if !v.covered {
+		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s is in %q, outside %s's declared coverage %v; indexed anyway and recorded covered=false (SPEC §8.2.2)",
+			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
+	}
+	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, v.covered)
 	st.recordDecoded(out.covered, out.languages)
 	st.advance(lang, source, conf, cur)
 	return out
@@ -820,16 +809,36 @@ func languageScopeIdentity(scope string, routes map[string]string) string {
 // its configured name, so the component still changes when the table does. STT
 // profiles carry no model version today; when they do it joins here.
 func (s *Service) languageRouteIdentities() map[string]string {
-	if len(s.cfg.MediaSTTLanguageProviders) == 0 {
-		return nil
+	out := map[string]string{}
+	for lang := range s.cfg.MediaSTTLanguageProviders {
+		key := provider.PrimarySubtag(lang)
+		var ids []string
+		for _, name := range s.configuredCandidates(key) {
+			id := strings.TrimSpace(name)
+			if prof, err := s.cfg.Providers().ResolveExplicit(provider.CapSTT, name, true); err == nil {
+				if s.cfg.MediaSTTRequireValidation && !prof.ValidatedFor(key) {
+					continue // not eligible, so it decodes nothing (SPEC §8.2.3)
+				}
+				id = routeIdentity(prof)
+			}
+			ids = append(ids, id)
+		}
+		out[key] = strings.Join(ids, "+")
 	}
-	out := make(map[string]string, len(s.cfg.MediaSTTLanguageProviders))
-	for lang, name := range s.cfg.MediaSTTLanguageProviders {
-		id := strings.TrimSpace(name)
+	// The §8.2.3 identifier changes which language a window resolves to, and so
+	// which route decodes it: it joins the identity under its own key.
+	if name := strings.TrimSpace(s.cfg.MediaSTTLanguageIdentifier); name != "" {
+		id := name
 		if prof, err := s.cfg.Providers().ResolveExplicit(provider.CapSTT, name, true); err == nil {
 			id = routeIdentity(prof)
 		}
-		out[lang] = id
+		// The probe length joins too (SPEC §8.2.3): another slice can move one
+		// window to another language and route while the representation
+		// language stays the same.
+		out[identifierRouteKey] = fmt.Sprintf("%s|probe=%ds", id, s.cfg.MediaSTTLanguageProbeSec)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -903,6 +912,9 @@ func (s *Service) applyWindowLanguageMeta(meta *transcriptMeta, coverage *Transc
 	}
 	meta.LanguageScope = languageScopeWindow
 	meta.LanguageRoutes = renderLanguageRoutes(s.languageRouteIDs)
+	if s.identifier != nil {
+		meta.LanguageIdentifier = s.identifier.route
+	}
 	lang, conf, ok := windowLanguageForMeta(coverage, s.transcriptLanguage)
 	if ok {
 		meta.Language = lang
