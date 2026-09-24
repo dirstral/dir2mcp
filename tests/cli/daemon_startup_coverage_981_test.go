@@ -19,7 +19,7 @@ import (
 
 func TestDaemonReady_NamesAPartialTranscriptOnTheDefaultPath(t *testing.T) {
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/interview.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	_ = st.Close()
 
@@ -45,7 +45,7 @@ func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 	// The sections are silent when there is nothing to report, so the default
 	// banner does not grow for a healthy corpus.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/complete.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/complete.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
 	_ = st.Close()
 
@@ -73,7 +73,7 @@ func TestDaemonReady_TheStillStartingPathReportsNoCoverage(t *testing.T) {
 	// coverage ever moved above the readiness wait, printDaemonReady would no
 	// longer be the only place it renders and this pairing would need revisiting.
 	dir := t.TempDir()
-	st := seedTranscripts(t, dir, seedRep{relPath: "rfe/interview.mp4",
+	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	_ = st.Close()
 

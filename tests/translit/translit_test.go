@@ -225,7 +225,7 @@ func TestIsEnglishTarget(t *testing.T) {
 // and "Римский-Корсаков" split into "Римский -> Rimsky" AND "Корсаков ->
 // Korsakov". The prompt says "use exactly these spellings", so a fragment did
 // not merely fail to help -- it pushed the model to corrupt a complete surname.
-// Ukrainian and Belarusian apostrophe names are routine in an RFE archive.
+// Ukrainian and Belarusian apostrophe names are routine in an Eastern European news archive.
 func TestHints_AJoinerNameIsNeverPinnedAsAFragment(t *testing.T) {
 	for _, s := range []string{
 		"сказал Лук'яненко вчера", // straight apostrophe

@@ -141,7 +141,7 @@ func partialTranscriptCoverage(ctx context.Context, db *sql.DB) (model.Transcrip
 // rather than fold it into the clean count. A corpus indexed before the record
 // existed has zero coverage objects, so a check that only counts INCOMPLETE
 // coverage reports "no transcript records an incomplete decode" — the same
-// sentence a genuinely clean corpus gets. Measured on the RFE validation
+// sentence a genuinely clean corpus gets. Measured on a multilingual validation
 // corpus: 34 transcripts, 0 coverage records, and 19 of the 50 recordings large
 // enough that a decode today would be windowed.
 //

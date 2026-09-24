@@ -10,7 +10,7 @@ import (
 // question that is enough. On a cross-lingual corpus it is not.
 //
 // Measured 2026-09-12 on an eight-recording Ukrainian/Kyrgyz/Russian/Georgian
-// archive (RFE/RL material, 4h41m), chat provider openai / gpt-5.4-mini, three
+// archive (broadcast material, 4h41m), chat provider openai / gpt-5.4-mini, three
 // English questions asked six times each:
 //
 //	shipped rule + reminder ............. 13 of 18 answers in English

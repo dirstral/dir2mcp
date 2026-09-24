@@ -106,7 +106,7 @@ func (c transcriptCoverage) Summary() string {
 // Without it, a corpus holding no coverage records at all gets the same sentence
 // as a corpus that is genuinely whole: "no transcript records an incomplete
 // decode". Every corpus indexed before §8.6.13 existed is in that state, and on
-// the RFE validation corpus it meant a clean-looking verdict over 34 transcripts
+// a multilingual validation corpus it meant a clean-looking verdict over 34 transcripts
 // of which 19 recordings were large enough to be windowed today.
 //
 // It does not say how many of those sit on media that WOULD be windowed now.

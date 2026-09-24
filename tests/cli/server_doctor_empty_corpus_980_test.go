@@ -63,7 +63,7 @@ func TestDoctor_APopulatedRecordAlwaysStatesItsSize(t *testing.T) {
 	// The count is printed on every healthy run, so "nothing indexed" can never
 	// look like "everything fine" through a line that is simply absent.
 	dir := t.TempDir()
-	seedTranscripts(t, dir, seedRep{relPath: "rfe/a.mp4",
+	seedTranscripts(t, dir, seedRep{relPath: "archive/a.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
 
 	check, _ := doctorCheckNamed(t, dir, "corpus_record")
@@ -115,7 +115,7 @@ func TestDoctor_DurableSkipsAreNamedWithTheirReasons(t *testing.T) {
 
 func TestDoctor_NoSkipsIsReportedPositively(t *testing.T) {
 	dir := t.TempDir()
-	seedTranscripts(t, dir, seedRep{relPath: "rfe/a.mp4",
+	seedTranscripts(t, dir, seedRep{relPath: "archive/a.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
 
 	check, _ := doctorCheckNamed(t, dir, "skipped_documents")

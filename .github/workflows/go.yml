@@ -7,7 +7,7 @@ on:
   # PRs into main. Without this, a PR targeting integration/* got exactly one
   # status check (CodeRabbit, and only since #986) and the whole Go suite was
   # skipped -- silently, since a PR with one green check looks normal. That is
-  # how integration/rfe-batch came to fail vet, gocyclo and fmt-check at once
+  # how a long-lived integration branch came to fail vet, gocyclo and fmt-check at once
   # with nothing reporting it. The patterns mirror .coderabbit.yaml.
   pull_request:
     branches: [ "main", "integration/**", "release/**" ]
