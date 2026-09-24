@@ -26,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-annotator check ci benchmark inspector-smoke conformance
+.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-annotator check ci benchmark inspector-smoke conformance demo
 
 all: check
 
@@ -51,6 +51,7 @@ help:
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
 	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"
+	@echo "  demo             - render the README terminal demo (assets/demo.gif); needs vhs and a local Ollama"
 
 # Go trees the two formatting targets cover. `fmt` rewrites them, `fmt-check`
 # only reads them.
@@ -172,6 +173,14 @@ TRANSPORT ?= http
 ARGS ?=
 release-smoke:
 	python3 scripts/release_smoke.py --state-dir "$(STATE_DIR)" --transport "$(TRANSPORT)" $(ARGS)
+
+# demo re-renders assets/demo.gif from assets/demo/demo.tape with a real run.
+# It needs vhs (brew install vhs) and an Ollama server with nomic-embed-text and
+# qwen2.5:7b. The default endpoint is http://127.0.0.1:11434/v1. Set
+# DEMO_OLLAMA_URL and DEMO_CHAT_MODEL in the environment to use another one.
+demo: build
+	@command -v vhs >/dev/null 2>&1 || (echo "vhs is required. Install: brew install vhs" && exit 1)
+	vhs assets/demo/demo.tape
 
 clean:
 	rm -f dir2mcp coverage.out
