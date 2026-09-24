@@ -733,6 +733,25 @@ the files in precedence order. Values are never printed. A dotenv file that exis
 cannot be read fails the load with the path in the message; a dotenv file that is
 absent is normal and silent.
 
+### Which files are indexed
+
+Each file is classified by name or extension first (SPEC §7.3). Common source
+languages (for example `.go`, `.py`, `.ts`, `.mjs`, `.vue`, `.lua`, `.tf`,
+`.proto`, plus `Makefile` and `Dockerfile`) index as code; prose and data
+formats index as text; PDFs, images, audio and video go to the extractors below.
+
+Any other file (an unknown extension, or a dotfile such as `.gitignore` or
+`.editorconfig`) is sniffed: when its first 8 KiB is valid UTF-8 with no
+NUL byte, it indexes as text. It stays skipped as binary when it looks binary,
+when it is empty, when it holds a private key, and when it is a subtitle file
+(a subtitle is read as the sidecar of its media).
+
+After an upgrade that changes a classification, the next scan re-reads the
+affected files. One case waits: on an S3 corpus, an unchanged object with an
+unknown extension that an older version stored as binary keeps that result
+until its ETag changes. Only its bytes can show that it is text, and the S3
+fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
+
 ### Document extraction: modes & fallback
 
 PDFs and images are converted to text by an **extractor**, selected with `ingest.extractor` (env `DIR2MCP_INGEST_EXTRACTOR`):
