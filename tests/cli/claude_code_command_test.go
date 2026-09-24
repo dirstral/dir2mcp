@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,23 +14,22 @@ import (
 )
 
 // fakeClaudeScript is a stand-in for the `claude` CLI. It keeps one file per
-// registered server in $FAKE_CLAUDE_STATE and appends every argv to
-// $FAKE_CLAUDE_STATE/calls.log. Its messages copy the text of the real CLI
-// (claude 2.1.x) for the cases dir2mcp parses. `mcp get` prints the headers
-// in clear text, as the real CLI does, so the tests can prove that dir2mcp
-// never passes that output through.
+// registered server in $FAKE_CLAUDE_STATE (the add-json entry) and appends
+// every argv to $FAKE_CLAUDE_STATE/calls.log. Its messages copy the text of
+// the real CLI (claude 2.1.x) for the cases dir2mcp parses, and `mcp get`
+// prints a "URL:" line as the real CLI does.
 const fakeClaudeScript = `#!/bin/sh
 state="$FAKE_CLAUDE_STATE"
 printf '%s\n' "$*" >> "$state/calls.log"
 case "$2" in
-add)
-  name="$7"
+add-json)
+  name="$5"
   if [ -f "$state/server-$name" ]; then
-    echo "MCP server $name already exists in $6 config"
+    echo "MCP server $name already exists in $4 config"
     exit 1
   fi
-  printf '%s\n' "$*" > "$state/server-$name"
-  echo "Added HTTP MCP server $name"
+  printf '%s\n' "$6" > "$state/server-$name"
+  echo "Added http MCP server $name to $4 config"
   ;;
 remove)
   name="$3"
@@ -48,9 +48,7 @@ get)
   fi
   echo "$name:"
   echo "  Type: http"
-  set -- $(cat "$state/server-$name")
-  echo "  URL: $8"
-  echo "  Headers: $*"
+  echo "  URL: $(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$state/server-$name")"
   ;;
 esac
 exit 0
@@ -105,31 +103,82 @@ func assertNoToken(t *testing.T, token string, outputs ...string) {
 	}
 }
 
-func TestClaudeCodeInstallCallsClaudeMCPAddWithHTTPEntry(t *testing.T) {
+// readFakeEntry decodes the add-json entry the fake CLI stored for name.
+func readFakeEntry(t *testing.T, fake, name string) map[string]interface{} {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(fake, "server-"+name))
+	if err != nil {
+		t.Fatalf("read fake entry %s: %v", name, err)
+	}
+	var entry map[string]interface{}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		t.Fatalf("decode fake entry: %v raw=%s", err, raw)
+	}
+	return entry
+}
+
+func TestClaudeCodeInstallCallsAddJSONWithHTTPEntry(t *testing.T) {
 	tmp := t.TempDir()
-	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-install")
+	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-install")
 	fake := installFakeClaude(t, tmp)
 
 	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes-dir2mcp")
 	if code != 0 {
 		t.Fatalf("exit code = %d stderr=%s", code, stderr)
 	}
-	assertNoToken(t, "tok-cc-install", stdout, stderr)
-
 	calls := fakeClaudeCalls(t, fake)
+	// The token must not reach the argv of the claude process.
+	assertNoToken(t, "tok-cc-install", append([]string{stdout, stderr}, calls...)...)
 	if len(calls) != 2 {
-		t.Fatalf("want remove + add calls, got %q", calls)
+		t.Fatalf("want remove + add-json calls, got %q", calls)
 	}
 	if calls[0] != "mcp remove notes-dir2mcp --scope user" {
 		t.Fatalf("first call = %q, want the pre-add remove", calls[0])
 	}
-	want := "mcp add --transport http --scope user notes-dir2mcp http://127.0.0.1:9882/mcp " +
-		"--header Authorization: Bearer tok-cc-install --header MCP-Protocol-Version: 2025-11-25"
-	if calls[1] != want {
-		t.Fatalf("add call:\n got %q\nwant %q", calls[1], want)
+	if !strings.HasPrefix(calls[1], "mcp add-json --scope user notes-dir2mcp {") {
+		t.Fatalf("second call = %q, want add-json", calls[1])
+	}
+
+	entry := readFakeEntry(t, fake, "notes-dir2mcp")
+	if entry["type"] != "http" || entry["url"] != "http://127.0.0.1:9882/mcp" {
+		t.Fatalf("unexpected entry: %v", entry)
+	}
+	headers, _ := entry["headers"].(map[string]interface{})
+	if headers["MCP-Protocol-Version"] != "2025-11-25" {
+		t.Fatalf("unexpected headers: %v", headers)
+	}
+	if _, static := headers["Authorization"]; static {
+		t.Fatalf("the entry must not hold a static Authorization header: %v", headers)
+	}
+	wantHelper := `printf '{"Authorization":"Bearer %s"}' "$(cat '` + tokenPath + `')"`
+	if entry["headersHelper"] != wantHelper {
+		t.Fatalf("headersHelper:\n got %v\nwant %s", entry["headersHelper"], wantHelper)
 	}
 	if !strings.Contains(stdout, `added MCP server "notes-dir2mcp" to Claude Code (user scope)`) {
 		t.Fatalf("unexpected stdout: %q", stdout)
+	}
+}
+
+// TestClaudeCodeHeadersHelperPrintsAuthorization runs the helper command in
+// a real shell, as Claude Code does, and checks its JSON output.
+func TestClaudeCodeHeadersHelperPrintsAuthorization(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-helper")
+	fake := installFakeClaude(t, tmp)
+	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
+		t.Fatalf("install exit code = %d stderr=%s", code, stderr)
+	}
+	helper, _ := readFakeEntry(t, fake, "notes")["headersHelper"].(string)
+	out, err := exec.Command("/bin/sh", "-c", helper).Output()
+	if err != nil {
+		t.Fatalf("run helper: %v", err)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(out, &headers); err != nil {
+		t.Fatalf("helper output is not a JSON object: %v raw=%s", err, out)
+	}
+	if headers["Authorization"] != "Bearer tok-cc-helper" {
+		t.Fatalf("helper Authorization = %q", headers["Authorization"])
 	}
 }
 
@@ -189,8 +238,9 @@ func TestClaudeCodeInstallWithoutClaudePrintsCommand(t *testing.T) {
 	assertNoToken(t, "tok-cc-nocli", stdout, stderr)
 	for _, want := range []string{
 		"could not find the claude CLI in PATH",
-		"claude mcp add --transport http --scope user notes http://127.0.0.1:9882/mcp",
-		`"Authorization: Bearer $(cat '` + tokenPath + `')"`,
+		"claude mcp add-json --scope user notes '{",
+		`"url":"http://127.0.0.1:9882/mcp"`,
+		tokenPath,
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr missing %q:\n%s", want, stderr)
@@ -207,7 +257,7 @@ func TestClaudeCodeUninstallRemovesOnlyOurServer(t *testing.T) {
 		}
 	}
 
-	code, stdout, stderr := runCLI(t, "uninstall", "claude-code", "--name", "notes")
+	code, stdout, stderr := runCLI(t, "--state-dir", filepath.Join(tmp, "state"), "uninstall", "claude-code", "--name", "notes")
 	if code != 0 {
 		t.Fatalf("exit code = %d stderr=%s", code, stderr)
 	}
@@ -226,7 +276,7 @@ func TestClaudeCodeUninstallIsIdempotentWhenAbsent(t *testing.T) {
 	tmp := t.TempDir()
 	installFakeClaude(t, tmp)
 
-	code, stdout, stderr := runCLI(t, "--json", "uninstall", "claude-code", "--name", "notes")
+	code, stdout, stderr := runCLI(t, "--state-dir", filepath.Join(tmp, "state"), "--json", "uninstall", "claude-code", "--name", "notes")
 	if code != 0 {
 		t.Fatalf("exit code = %d stderr=%s", code, stderr)
 	}
@@ -265,7 +315,6 @@ func TestClaudeCodeDoctorReportsRegistration(t *testing.T) {
 	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
 		t.Fatalf("install exit code = %d stderr=%s", code, stderr)
 	}
-	// The fake `mcp get` prints the token; doctor must hide that output.
 	after := doctor()
 	if after["registered_error"] != "" {
 		t.Fatalf("registered_error after install = %v", after["registered_error"])
@@ -276,15 +325,33 @@ func TestClaudeCodePrintConfigNeverPrintsToken(t *testing.T) {
 	tmp := t.TempDir()
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-print")
 
-	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "print-config", "claude-code", "--name", "notes")
+	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "--json", "print-config", "claude-code", "--name", "notes")
 	if code != 0 {
 		t.Fatalf("exit code = %d stderr=%s", code, stderr)
 	}
 	assertNoToken(t, "tok-cc-print", stdout, stderr)
-	want := `claude mcp add --transport http --scope user notes http://127.0.0.1:9882/mcp ` +
-		`--header "Authorization: Bearer $(cat '` + tokenPath + `')" --header 'MCP-Protocol-Version: 2025-11-25'`
-	if strings.TrimSpace(stdout) != want {
-		t.Fatalf("print-config:\n got %q\nwant %q", strings.TrimSpace(stdout), want)
+	var payload struct {
+		Command   string                 `json:"command"`
+		TokenFile string                 `json:"token_file"`
+		Entry     map[string]interface{} `json:"entry"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("decode: %v raw=%s", err, stdout)
+	}
+	if !strings.HasPrefix(payload.Command, "claude mcp add-json --scope user notes '{") {
+		t.Fatalf("command = %q", payload.Command)
+	}
+	if payload.TokenFile != tokenPath || payload.Entry["url"] != "http://127.0.0.1:9882/mcp" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	// The printed command must work when pasted: run it with the fake CLI.
+	fake := installFakeClaude(t, tmp)
+	if out, err := exec.Command("/bin/sh", "-c", payload.Command).CombinedOutput(); err != nil {
+		t.Fatalf("run printed command: %v: %s", err, out)
+	}
+	if got := readFakeEntry(t, fake, "notes")["headersHelper"]; got != payload.Entry["headersHelper"] {
+		t.Fatalf("pasted command stored headersHelper %v, want %v", got, payload.Entry["headersHelper"])
 	}
 }
 

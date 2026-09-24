@@ -149,7 +149,7 @@ func TestCursorUninstallRemovesOnlyOurEntry(t *testing.T) {
 		t.Fatalf("install exit code = %d stderr=%s", code, stderr)
 	}
 
-	code, stdout, stderr := runCLI(t, "uninstall", "cursor", "--name", "notes", "--config-path", configPath)
+	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "uninstall", "cursor", "--name", "notes", "--config-path", configPath)
 	if code != 0 {
 		t.Fatalf("uninstall exit code = %d stderr=%s", code, stderr)
 	}
@@ -174,7 +174,8 @@ func TestCursorUninstallDropsEmptyBlockAndIsIdempotent(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"notes":{"url":"http://x/mcp"}}}`), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if code, _, stderr := runCLI(t, "uninstall", "cursor", "--name", "notes", "--config-path", configPath); code != 0 {
+	stateDir := filepath.Join(tmp, "state")
+	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "uninstall", "cursor", "--name", "notes", "--config-path", configPath); code != 0 {
 		t.Fatalf("uninstall exit code = %d stderr=%s", code, stderr)
 	}
 	if _, present := readJSONObject(t, configPath)["mcpServers"]; present {
@@ -184,7 +185,7 @@ func TestCursorUninstallDropsEmptyBlockAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	code, stdout, stderr := runCLI(t, "uninstall", "cursor", "--name", "notes", "--config-path", configPath)
+	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "uninstall", "cursor", "--name", "notes", "--config-path", configPath)
 	if code != 0 || !strings.Contains(stdout, "nothing to remove") {
 		t.Fatalf("second uninstall: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
@@ -259,5 +260,46 @@ func TestCursorPrintConfigUsesEnvPlaceholder(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "export DIR2MCP_TOKEN=\"$(cat '"+tokenPath+"')\"") {
 		t.Fatalf("stderr should show how to set the variable: %q", stderr)
+	}
+}
+
+func TestCursorDoctorResolvesEnvPlaceholder(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cursor-env")
+	configPath := filepath.Join(tmp, "mcp.json")
+	// Write the print-config snippet as a user would paste it.
+	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "print-config", "cursor", "--name", "notes")
+	if code != 0 {
+		t.Fatalf("print-config exit code = %d stderr=%s", code, stderr)
+	}
+	if err := os.WriteFile(configPath, []byte(stdout), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cases := []struct {
+		name, value, wantErr string
+		set                  bool
+	}{
+		{name: "unset", wantErr: "DIR2MCP_TOKEN is not set here"},
+		{name: "wrong", value: "tok-other", set: true, wantErr: "$DIR2MCP_TOKEN does not match the current token"},
+		{name: "match", value: "tok-cursor-env", set: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DIR2MCP_TOKEN", tc.value)
+			} else {
+				t.Setenv("DIR2MCP_TOKEN", "")
+				_ = os.Unsetenv("DIR2MCP_TOKEN")
+			}
+			payload := cursorDoctor(t, stateDir, configPath, "tok-cursor-env")
+			got, _ := payload["entry_error"].(string)
+			if tc.wantErr == "" && got != "" {
+				t.Fatalf("entry_error = %q, want none", got)
+			}
+			if tc.wantErr != "" && !strings.Contains(got, tc.wantErr) {
+				t.Fatalf("entry_error = %q, want %q", got, tc.wantErr)
+			}
+		})
 	}
 }

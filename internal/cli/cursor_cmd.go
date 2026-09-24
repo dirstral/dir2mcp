@@ -257,8 +257,39 @@ func checkCursorEntry(path, name, wantURL, token string) error {
 	}
 	headers, _ := entry["headers"].(map[string]interface{})
 	auth, _ := headers["Authorization"].(string)
-	if auth != "Bearer "+token && !strings.Contains(auth, "${env:") {
+	return checkCursorAuthorization(auth, token)
+}
+
+// checkCursorAuthorization compares the Authorization value of the entry with
+// the current token. A value of the form "Bearer ${env:NAME}" (the
+// print-config output) is resolved from the environment of this process, the
+// same way Cursor resolves it from its own environment.
+func checkCursorAuthorization(auth, token string) error {
+	if name, ok := cursorEnvPlaceholder(auth); ok {
+		value, set := os.LookupEnv(name)
+		if !set || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("authorization header reads $%s, but %s is not set here; set it for Cursor too, or run: dir2mcp install cursor", name, name)
+		}
+		if strings.TrimSpace(value) != token {
+			return fmt.Errorf("$%s does not match the current token; run: dir2mcp install cursor", name)
+		}
+		return nil
+	}
+	if auth != "Bearer "+token {
 		return errors.New("authorization header does not match the current token; run: dir2mcp install cursor")
 	}
 	return nil
+}
+
+// cursorEnvPlaceholder returns NAME when auth is exactly "Bearer ${env:NAME}".
+func cursorEnvPlaceholder(auth string) (string, bool) {
+	rest, ok := strings.CutPrefix(auth, "Bearer ${env:")
+	if !ok {
+		return "", false
+	}
+	name, ok := strings.CutSuffix(rest, "}")
+	if !ok || name == "" || strings.ContainsAny(name, "{}$ ") {
+		return "", false
+	}
+	return name, true
 }

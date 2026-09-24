@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,15 +15,16 @@ import (
 
 // Claude Code support.
 //
-// The documented interface to add an MCP server to Claude Code is its CLI:
-// `claude mcp add --transport http <name> <url> --header ...`. Claude Code
+// The documented interface to add an MCP server to Claude Code is its CLI
+// (`claude mcp add`, `claude mcp add-json`). Claude Code
 // keeps user and local scope servers in ~/.claude.json, a large file that the
 // running Claude Code process also rewrites. dir2mcp therefore does not edit
 // that file. When `claude` is on PATH, install and uninstall call the CLI.
 // When it is not, install prints the exact command and exits non-zero.
 //
 // The entry is a native Streamable HTTP entry (type "http"), so Claude Code
-// needs no stdio bridge such as mcp-remote.
+// needs no stdio bridge such as mcp-remote. See claudeCodeEntry for how the
+// token reaches Claude Code.
 
 const (
 	claudeCodeBinary       = "claude"
@@ -143,32 +145,50 @@ func claudeCodeProtocolVersion(connection connectionPayload) string {
 	return "2025-11-25"
 }
 
-// claudeCodeAddArgs returns the argv (without the binary) of the
-// `claude mcp add` call. authValue is the full Authorization header value.
-func claudeCodeAddArgs(t claudeCodeTarget, authValue string) []string {
-	return []string{
-		"mcp", "add",
-		"--transport", "http",
-		"--scope", t.scope,
-		t.name,
-		t.connection.URL,
-		"--header", "Authorization: " + authValue,
-		"--header", "MCP-Protocol-Version: " + claudeCodeProtocolVersion(t.connection),
-	}
+// claudeCodeEntry is the server JSON that `claude mcp add-json` takes.
+//
+// The entry holds no token. HeadersHelper is a shell command that Claude Code
+// runs at each connection; it reads the token file and prints the
+// Authorization header as JSON. So the token is not in ~/.claude.json and not
+// in the argv of any process, and a new token takes effect at the next
+// connection without a reinstall.
+type claudeCodeEntry struct {
+	Type          string            `json:"type"`
+	URL           string            `json:"url"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	HeadersHelper string            `json:"headersHelper"`
 }
 
-// claudeCodeShellCommand renders the `claude mcp add` command for a shell.
-// The token is read from its file at run time, so the command text never
-// contains the token value.
-func claudeCodeShellCommand(t claudeCodeTarget) string {
-	args := claudeCodeAddArgs(t, "Bearer $(cat "+shellQuote(t.tokenPath)+")")
+// claudeCodeHeadersHelper returns the shell command that prints
+// {"Authorization":"Bearer <token>"} from the token file.
+func claudeCodeHeadersHelper(tokenPath string) string {
+	return `printf '{"Authorization":"Bearer %s"}' "$(cat ` + shellQuote(tokenPath) + `)"`
+}
+
+func claudeCodeEntryJSON(t claudeCodeTarget) (string, error) {
+	raw, err := json.Marshal(claudeCodeEntry{
+		Type:          "http",
+		URL:           t.connection.URL,
+		Headers:       map[string]string{"MCP-Protocol-Version": claudeCodeProtocolVersion(t.connection)},
+		HeadersHelper: claudeCodeHeadersHelper(t.tokenPath),
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// claudeCodeAddArgs returns the argv (without the binary) of the
+// `claude mcp add-json` call.
+func claudeCodeAddArgs(t claudeCodeTarget, entryJSON string) []string {
+	return []string{"mcp", "add-json", "--scope", t.scope, t.name, entryJSON}
+}
+
+// claudeCodeShellCommand renders the `claude mcp add-json` command for a
+// shell. Like the entry, it holds no token.
+func claudeCodeShellCommand(t claudeCodeTarget, entryJSON string) string {
 	parts := []string{claudeCodeBinary}
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "Authorization: Bearer $(cat ") {
-			// Double quotes keep the command substitution active.
-			parts = append(parts, `"`+arg+`"`)
-			continue
-		}
+	for _, arg := range claudeCodeAddArgs(t, entryJSON) {
 		parts = append(parts, shellQuoteIfNeeded(arg))
 	}
 	return strings.Join(parts, " ")
@@ -180,8 +200,8 @@ func shellQuote(s string) string {
 }
 
 // runClaudeCodeCLI runs the claude binary and returns its combined output.
-// Callers must not print the output of `claude mcp get`: it shows headers,
-// and so the token, in clear text.
+// Callers must not print the output of `claude mcp get`: it shows the static
+// headers of a server in clear text, and an older entry can hold a token.
 func runClaudeCodeCLI(ctx context.Context, bin string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, claudeCodeCallTimeout)
 	defer cancel()
@@ -211,13 +231,19 @@ func (a *App) runClaudeCodePrintConfig(global globalOptions, args []string) int 
 	if code != exitSuccess {
 		return code
 	}
-	command := claudeCodeShellCommand(t)
+	entryJSON, err := claudeCodeEntryJSON(t)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("prepare Claude Code MCP entry: %v", err))
+		return exitGeneric
+	}
+	command := claudeCodeShellCommand(t, entryJSON)
 	if global.jsonOutput {
 		if err := emitJSON(a.stdout, map[string]interface{}{
 			"server_name": t.name,
 			"scope":       t.scope,
 			"url":         t.connection.URL,
 			"token_file":  t.tokenPath,
+			"entry":       json.RawMessage(entryJSON),
 			"command":     command,
 		}); err != nil {
 			writeCLIError(a.stderr, true, exitGeneric, fmt.Sprintf("encode claude-code print-config json: %v", err))
@@ -234,25 +260,30 @@ func (a *App) runClaudeCodeInstall(ctx context.Context, global globalOptions, ar
 	if code != exitSuccess {
 		return code
 	}
+	entryJSON, err := claudeCodeEntryJSON(t)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("prepare Claude Code MCP entry: %v", err))
+		return exitGeneric
+	}
 	bin, err := exec.LookPath(claudeCodeBinary)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric,
 			"could not find the claude CLI in PATH",
 			"Install Claude Code, or run this command yourself:",
-			claudeCodeShellCommand(t),
+			claudeCodeShellCommand(t, entryJSON),
 		)
 		return exitGeneric
 	}
-	// `claude mcp add` refuses a name that exists. Remove our entry first so a
-	// second install replaces it (for example after the port or token changes).
+	// `claude mcp add-json` refuses a name that exists. Remove our entry first
+	// so a second install replaces it (for example after the port changes).
 	replaced, err := removeClaudeCodeServer(ctx, bin, t.name, t.scope)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error())
 		return exitGeneric
 	}
-	if out, err := runClaudeCodeCLI(ctx, bin, claudeCodeAddArgs(t, "Bearer "+t.token)...); err != nil {
+	if out, err := runClaudeCodeCLI(ctx, bin, claudeCodeAddArgs(t, entryJSON)...); err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric,
-			fmt.Sprintf("claude mcp add failed: %v: %s", err, redactToken(out, t.token)),
+			fmt.Sprintf("claude mcp add-json failed: %v: %s", err, out),
 			"Fix the cause, then run `dir2mcp install claude-code` again. The server is not registered now.")
 		return exitGeneric
 	}
@@ -378,14 +409,6 @@ func claudeCodeGetURL(out string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// redactToken replaces every copy of the token in s.
-func redactToken(s, token string) string {
-	if strings.TrimSpace(token) == "" {
-		return s
-	}
-	return strings.ReplaceAll(s, token, "[REDACTED]")
 }
 
 func (a *App) emitClientJSON(label string, payload map[string]interface{}) int {

@@ -429,7 +429,7 @@ dir2mcp up --listen 0.0.0.0:8087
 | `install <client>` | Install dir2mcp into a supported MCP client: `claude-code`, `cursor`, or `claude` (Claude Desktop). See [Connect an MCP client](#connect-an-mcp-client) |
 | `uninstall <client>` | Remove dir2mcp from a supported MCP client. Other servers in the client config stay as they are |
 | `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures); add `--deep` to actively probe the embedding credential |
-| `print-config <client>` | Print what a client needs for a manual setup: the `claude mcp add` command for `claude-code`, the `mcp.json` snippet for `cursor` and `claude`. For `claude-code` and `cursor` the output never contains the token |
+| `print-config <client>` | Print what a client needs for a manual setup: the `claude mcp add-json` command for `claude-code`, the `mcp.json` snippet for `cursor` and `claude`. For `claude-code` and `cursor` the output never contains the token |
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |
 
@@ -445,16 +445,17 @@ the [server identity](#server-identity); use `--name` to choose another.
 
 | Client | Install | What it changes |
 |---|---|---|
-| Claude Code | `dir2mcp install claude-code [--scope user\|local]` | Calls `claude mcp add --transport http` with the URL and the `Authorization` header. The default scope is `user` (all projects); `local` is the current project only. dir2mcp refuses `--scope project`, because that scope writes the token into `.mcp.json` in your working tree |
+| Claude Code | `dir2mcp install claude-code [--scope user\|local]` | Calls `claude mcp add-json` with an HTTP entry for the daemon URL. The entry holds no token: its `headersHelper` reads the token file at each connection. The default scope is `user` (all projects); `local` is the current project only. dir2mcp refuses `--scope project`, because that scope writes into `.mcp.json` in your working tree |
 | Cursor | `dir2mcp install cursor [--config-path PATH]` | Adds a `url` + `headers` entry to `~/.cursor/mcp.json`. For a project config, pass `--config-path .cursor/mcp.json` and keep that file out of version control |
 | Claude Desktop | `dir2mcp install claude [--config-path PATH]` | Adds a `bunx mcp-remote` bridge entry to `claude_desktop_config.json` |
 
 Claude Code and Cursor speak Streamable HTTP to the daemon directly, so they
 need no bridge. Claude Code keeps its servers in `~/.claude.json`, a file that
 Claude Code itself also rewrites; dir2mcp uses the `claude` CLI and does not
-edit that file. When `claude` is not on `PATH`, `install claude-code` exits
-non-zero and prints the command to run. The printed command reads the token with
-`$(cat ...)`, so the token never shows on screen.
+edit that file. The token is not in `~/.claude.json` and not on any command
+line, and a new token takes effect at the next connection. When `claude` is not
+on `PATH`, `install claude-code` exits non-zero and prints the command to run.
+That command also holds no token.
 
 Every file edit is atomic, writes mode `0600` (the entry holds the token), keeps
 all other servers and unknown keys, and replaces only the dir2mcp entry, so a
