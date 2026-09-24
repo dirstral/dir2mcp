@@ -2284,6 +2284,11 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if currentFP != existing.SidecarFingerprint {
 		return false, nil
 	}
+	// The ETag proves the bytes did not change, not that they classify the
+	// same way: a classifier upgrade (SPEC §7.3) can give the path a new type.
+	if storedTypeStale(existing.DocType, f.RelPath) {
+		return false, nil
+	}
 	// Derivation-identity gate (spec §8.6.7): the ETag/fingerprint fast path
 	// proves the BYTES are unchanged, but a transcript/OCR representation may
 	// still be stale because the active STT/OCR model changed since it was
@@ -2295,6 +2300,25 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	}
 	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
 	return true, nil
+}
+
+// storedTypeStale reports whether a stored row's doc type no longer matches
+// what the classifier gives its path, so the remote fast path must re-read the
+// object. The stored type is the path type refined by SniffTextDocType, so a
+// path that classifies as binary_ignored may be stored as binary_ignored or
+// text: only the bytes can tell the two apart, and the fast path exists to
+// avoid that read. Such an object is re-classified when its ETag changes or on
+// reindex. Every other mismatch (an extension the table gained, for example
+// .mjs to code) is exact and needs no read to detect.
+func storedTypeStale(storedType, relPath string) bool {
+	if storedType == "" {
+		return false
+	}
+	pathType := ClassifyDocType(relPath)
+	if pathType == "binary_ignored" {
+		return storedType != "binary_ignored" && storedType != "text"
+	}
+	return storedType != pathType
 }
 
 // skipUnchangedRemoteDocument records the run-progress counters for an object

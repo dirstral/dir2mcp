@@ -109,11 +109,7 @@ func SniffTextDocType(docType, relPath string, content []byte) string {
 	}
 	sample := content
 	if len(sample) > sniffSampleBytes {
-		sample = sample[:sniffSampleBytes]
-		// Do not let a multi-byte rune cut at the sample edge fail the check.
-		for i := 0; i < utf8.UTFMax && len(sample) > 0 && !utf8.Valid(sample); i++ {
-			sample = sample[:len(sample)-1]
-		}
+		sample = trimIncompleteRune(sample[:sniffSampleBytes])
 	}
 	if bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample) {
 		return docType
@@ -122,4 +118,21 @@ func SniffTextDocType(docType, relPath string, content []byte) string {
 		return docType
 	}
 	return "text"
+}
+
+// trimIncompleteRune drops a multi-byte UTF-8 rune that the sample edge cut in
+// two, so a valid text file does not fail the check at byte 8 KiB. It trims
+// only an incomplete rune start and its continuation bytes. An invalid byte is
+// a complete (one-byte) error for utf8.FullRune, so it stays in the sample and
+// still fails the check, and so does any NUL after it.
+func trimIncompleteRune(sample []byte) []byte {
+	for i := 1; i < utf8.UTFMax && i <= len(sample); i++ {
+		if utf8.RuneStart(sample[len(sample)-i]) {
+			if !utf8.FullRune(sample[len(sample)-i:]) {
+				return sample[:len(sample)-i]
+			}
+			return sample
+		}
+	}
+	return sample
 }
