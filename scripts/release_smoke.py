@@ -313,7 +313,10 @@ def run_checks(client, questions):
     hits = r.get("structuredContent", {}).get("hits", []) if not r.get("isError") else []
     check("search: >=1 hit", len(hits) >= 1, f"hits={len(hits)}")
 
-    lf = client.call("dir2mcp_list_files", {"glob": "*.pdf", "limit": 12})
+    # `*` does not cross `/` (canonical glob dialect), so "*.pdf" saw only PDFs at
+    # the corpus root and failed a corpus that keeps them in a subfolder.
+    # "**/" also matches zero directories, so root-level PDFs still match.
+    lf = client.call("dir2mcp_list_files", {"glob": "**/*.pdf", "limit": 12})
     if not validate("dir2mcp_list_files", lf):
         return fails  # schema failed; the files list can't be trusted to drive open_file
     files = [f["rel_path"] for f in lf.get("structuredContent", {}).get("files", [])]
