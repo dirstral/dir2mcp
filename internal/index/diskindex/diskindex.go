@@ -374,16 +374,19 @@ func writeRecords(w io.Writer, start int64, recs []pendingRecord) ([]int64, int6
 // the mmap view has to be dropped. Caller holds the write lock.
 func (d *DiskIndex) rollbackAppend(f *os.File, start int64, cause error) error {
 	// Drop the mmap view before the truncate. Windows refuses to truncate a
-	// file below a mapped view (ERROR_USER_MAPPED_FILE); on unix the order
-	// makes no difference.
-	if ierr := d.invalidateReaderLocked(); ierr != nil {
-		return errors.Join(cause, ierr)
-	}
+	// file below a mapped view (ERROR_USER_MAPPED_FILE). A failed unmap must
+	// not skip the truncate, though: the view is dropped either way, and on
+	// unix the truncate still succeeds, so the file stays at its pre-append
+	// length. Every failure is joined into the returned error.
+	ierr := d.invalidateReaderLocked()
 	if terr := f.Truncate(start); terr != nil {
-		return errors.Join(cause, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
+		return errors.Join(cause, ierr, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
 	}
 	if serr := syncFile(f); serr != nil {
-		return errors.Join(cause, fmt.Errorf("diskindex: rollback sync: %w", serr))
+		return errors.Join(cause, ierr, fmt.Errorf("diskindex: rollback sync: %w", serr))
+	}
+	if ierr != nil {
+		return errors.Join(cause, ierr)
 	}
 	return cause
 }
