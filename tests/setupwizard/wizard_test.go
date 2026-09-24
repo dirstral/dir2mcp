@@ -200,21 +200,21 @@ func TestEnsureGitignoreEntries(t *testing.T) {
 }
 
 func TestBuildForm_ConstructsWithoutPanic(t *testing.T) {
-	keyValues := make(map[string]*string, len(setupwizard.ProviderKeys))
-	for _, spec := range setupwizard.ProviderKeys {
-		keyValues[spec.EnvVar] = new(string)
+	probes := []setupwizard.OllamaProbe{
+		{BaseURL: setupwizard.DefaultOllamaURL},
+		{BaseURL: setupwizard.DefaultOllamaURL, Reachable: true, Embed: []string{"nomic-embed-text:latest"}, Chat: []string{"qwen2.5:7b"}},
+		{BaseURL: setupwizard.DefaultOllamaURL, Reachable: true},
 	}
-	var more, save bool
-	profile := string(setupwizard.ProfileGeneral)
-	dest := string(setupwizard.DestFile)
-
 	for _, existed := range []bool{false, true} {
-		form := setupwizard.BuildForm(keyValues, &more, &profile, &dest, &save, setupwizard.Input{
-			ExistingKeys:  map[string]bool{"MISTRAL_API_KEY": existed},
-			ConfigExisted: existed,
-		})
-		if form == nil {
-			t.Fatalf("BuildForm returned nil (configExisted=%t)", existed)
+		for _, probe := range probes {
+			in := setupwizard.Input{
+				ExistingKeys:  map[string]bool{"MISTRAL_API_KEY": existed},
+				ConfigExisted: existed,
+				Ollama:        probe,
+			}
+			if form := setupwizard.BuildForm(setupwizard.NewFormState(in), in); form == nil {
+				t.Fatalf("BuildForm returned nil (configExisted=%t, probe=%+v)", existed, probe)
+			}
 		}
 	}
 }

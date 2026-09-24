@@ -35,6 +35,13 @@ cd ~/notes                      # any folder you want to ask about
 
 ```bash
 ollama pull nomic-embed-text && ollama pull qwen2.5:7b
+dir2mcp up        # the first run asks how to run the models: pick "Locally with Ollama"
+```
+
+The setup finds Ollama, lists its models and writes `.dir2mcp.yaml`. To script
+it (no terminal), write the same file yourself:
+
+```bash
 cat > .dir2mcp.yaml <<'EOF'
 providers:
   local:
@@ -418,7 +425,7 @@ dir2mcp up --listen 0.0.0.0:8087
 | `export` | Render a transcript as VTT/SRT/TTML subtitles (`export --format vtt\|srt\|ttml <path>`) |
 | `bridge` | Run helper adapters (for example the ElevenLabs webhook bridge) |
 | `support-bundle` | Collect logs + config + status into a shareable `tar.gz` (owner-only; credentials always redacted, local paths/endpoints redacted unless `--include-content` — see [What a support bundle discloses](#what-a-support-bundle-discloses)) |
-| `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys, where to store them (`.env.local` or the OS keychain), and a corpus profile, then writes `.dir2mcp.yaml` when it does not exist. An existing `.dir2mcp.yaml` is never rewritten: credentials still go to `.env.local` or the keychain, and a chosen profile is printed as the lines to add. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config when none exists. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
+| `config init` | Interactive setup wizard (on a TTY). It first asks how to run the models. **Locally with Ollama**: it probes Ollama (`OLLAMA_HOST`, else `127.0.0.1:11434`), lists the installed embedding and chat models, asks for no key, and binds a `local` provider. **With a cloud key**: pick Mistral, OpenAI or Gemini and paste that one key (each gives embeddings and answers alone), optionally more providers, and where to store keys (`.env.local` or the OS keychain). Then a corpus profile. It writes `.dir2mcp.yaml` when it does not exist. An existing `.dir2mcp.yaml` is never rewritten: credentials still go to `.env.local` or the keychain, and a chosen profile is printed as the lines to add. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config when none exists. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
 | `config print` | Print effective config |
 | `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
 | `config rm-secret <ENV_VAR>` | Remove a credential from the OS keychain |
