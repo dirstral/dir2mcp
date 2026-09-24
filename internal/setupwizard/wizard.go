@@ -324,7 +324,7 @@ func (st *FormState) Result(in Input) (Result, error) {
 	}
 	for _, spec := range ProviderKeys {
 		chosen := spec.EnvVar == st.CloudProvider
-		if !chosen && !(spec.Optional && st.ConfigureMore) {
+		if !chosen && (!spec.Optional || !st.ConfigureMore) {
 			continue
 		}
 		if v := strings.TrimSpace(*st.Keys[spec.EnvVar]); v != "" {

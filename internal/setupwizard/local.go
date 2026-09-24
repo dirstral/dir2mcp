@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,17 +41,33 @@ const (
 )
 
 // OllamaURL is the address the wizard probes: OLLAMA_HOST when it is set (the
-// variable Ollama itself reads), else DefaultOllamaURL. A bare host:port gets
-// http://, and a 0.0.0.0 listen address is reached through 127.0.0.1.
+// variable Ollama itself reads), else DefaultOllamaURL. It follows Ollama's own
+// reading of the variable: a value with no scheme gets http:// and, with no
+// port, Ollama's default port 11434; a value with a scheme keeps that scheme's
+// default port. A 0.0.0.0 listen address is reached through 127.0.0.1.
 func OllamaURL() string {
 	host := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
 	if host == "" {
 		return DefaultOllamaURL
 	}
 	if !strings.Contains(host, "://") {
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			host = net.JoinHostPort(strings.Trim(host, "[]"), "11434")
+		}
 		host = "http://" + host
 	}
-	return strings.TrimRight(strings.Replace(host, "://0.0.0.0", "://127.0.0.1", 1), "/")
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return DefaultOllamaURL
+	}
+	if u.Hostname() == "0.0.0.0" {
+		if port := u.Port(); port != "" {
+			u.Host = net.JoinHostPort("127.0.0.1", port)
+		} else {
+			u.Host = "127.0.0.1"
+		}
+	}
+	return strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/")
 }
 
 // LocalSetup is the local route's answer: the Ollama OpenAI-compatible
@@ -191,20 +209,46 @@ func WriteNewLocalConfig(path string, l LocalSetup, extra []string) error {
 	if err != nil {
 		return fmt.Errorf("create config file: %w", err)
 	}
-	if _, err := f.Write(content); err != nil {
-		_ = f.Close()
+	created, statErr := f.Stat()
+	_, writeErr := f.Write(content)
+	closeErr := f.Close()
+	if err := errors.Join(statErr, writeErr, closeErr); err != nil {
+		removeIfSame(path, created)
 		return fmt.Errorf("write config file: %w", err)
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("write config file: %w", err)
+	if err := checkLocalBinding(path); err != nil {
+		// Remove the file this call created, so the next run can try again
+		// instead of stopping at ErrConfigExists.
+		removeIfSame(path, created)
+		return err
 	}
+	return nil
+}
+
+// checkLocalBinding loads the config at path and checks that embeddings
+// resolve to the local provider.
+func checkLocalBinding(path string) error {
 	cfg, err := config.LoadFile(path)
 	if err != nil {
 		return fmt.Errorf("the written config does not load: %w", err)
 	}
 	prof, err := cfg.Providers().Resolve(provider.CapEmbed)
-	if err != nil || prof.Name != localProviderName {
-		return fmt.Errorf("the written config does not bind embeddings to %q: %v", localProviderName, err)
+	if err != nil {
+		return fmt.Errorf("the written config does not bind embeddings to %q: %w", localProviderName, err)
+	}
+	if prof.Name != localProviderName {
+		return fmt.Errorf("the written config binds embeddings to %q, not %q", prof.Name, localProviderName)
 	}
 	return nil
+}
+
+// removeIfSame removes path only when it is still the file this call created
+// (same inode), so a file that another process put there meanwhile survives.
+func removeIfSame(path string, created os.FileInfo) {
+	if created == nil {
+		return
+	}
+	if now, err := os.Stat(path); err == nil && os.SameFile(created, now) {
+		_ = os.Remove(path)
+	}
 }

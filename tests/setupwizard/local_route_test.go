@@ -90,7 +90,11 @@ func TestOllamaURL(t *testing.T) {
 	for _, tc := range []struct{ env, want string }{
 		{"", setupwizard.DefaultOllamaURL},
 		{"0.0.0.0:11434", "http://127.0.0.1:11434"},
+		{"0.0.0.0", "http://127.0.0.1:11434"},
+		{"gpu-box", "http://gpu-box:11434"},
 		{"http://gpu-box:11434/", "http://gpu-box:11434"},
+		{"https://ollama.example.com", "https://ollama.example.com"},
+		{"http://0.0.0.0", "http://127.0.0.1"},
 	} {
 		t.Setenv("OLLAMA_HOST", tc.env)
 		if got := setupwizard.OllamaURL(); got != tc.want {
@@ -210,5 +214,27 @@ func TestProviderKeys_NoCloudKeyIsRequired(t *testing.T) {
 		if strings.Contains(strings.ToLower(spec.Description), "required") {
 			t.Errorf("%s: description %q still says required", spec.EnvVar, spec.Description)
 		}
+	}
+}
+
+// TestWriteNewLocalConfig_RemovesAFileThatFailsValidation pins that a written
+// config that does not load is removed again, so the next run can retry
+// instead of stopping at ErrConfigExists.
+func TestWriteNewLocalConfig_RemovesAFileThatFailsValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	broken := setupwizard.LocalSetup{BaseURL: "http://127.0.0.1:11434/v1", EmbedModel: "e\n  : [", ChatModel: "c"}
+	err := setupwizard.WriteNewLocalConfig(path, broken, nil)
+	if err == nil || errors.Is(err, setupwizard.ErrConfigExists) {
+		t.Fatalf("err = %v, want a validation error", err)
+	}
+	if strings.Contains(err.Error(), "<nil>") {
+		t.Errorf("error text prints a nil error: %v", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("the file that failed validation is still there (stat err %v)", statErr)
+	}
+	good := setupwizard.LocalSetup{BaseURL: "http://127.0.0.1:11434/v1", EmbedModel: "nomic-embed-text", ChatModel: "qwen2.5:7b"}
+	if err := setupwizard.WriteNewLocalConfig(path, good, nil); err != nil {
+		t.Fatalf("retry after a failed validation: %v", err)
 	}
 }
