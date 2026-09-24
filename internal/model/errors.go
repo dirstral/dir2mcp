@@ -82,3 +82,22 @@ func (e *ProviderError) Unwrap() error {
 	}
 	return e.Cause
 }
+
+// IsRetryableProviderError reports whether err wraps a ProviderError the
+// adapter marked retryable (a refused connection, a timeout, a 429 or 5xx).
+func IsRetryableProviderError(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Retryable
+}
+
+// ProviderErrorDetail is the most useful one-line description of err for an
+// operator: the wrapped cause of a ProviderError when it has one ("connect:
+// connection refused"), which the adapter's own message ("request failed")
+// hides, else err's own text.
+func ProviderErrorDetail(err error) string {
+	var pe *ProviderError
+	if errors.As(err, &pe) && pe.Cause != nil {
+		return pe.Cause.Error()
+	}
+	return err.Error()
+}
