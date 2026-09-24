@@ -1,0 +1,12 @@
+# Local route for the benchmark: Ollama on its default port.
+# Pull the models first: ollama pull nomic-embed-text && ollama pull qwen2.5:7b-instruct-q4_K_M
+providers:
+  local:
+    kind: openai
+    base_url: http://127.0.0.1:11434/v1
+    embed_text_model: nomic-embed-text:latest
+    embed_code_model: nomic-embed-text:latest
+    chat_model: qwen2.5:7b-instruct-q4_K_M
+model:
+  embed: {provider: local}
+  chat: {provider: local}

@@ -1,0 +1,89 @@
+{
+  "counts": {
+    "answerable": 80,
+    "unanswerable_in_corpus": 20,
+    "unanswerable_off_corpus": 20,
+    "tool_errors": 0,
+    "answerable_without_citations": 0,
+    "server_evidence_insufficient": 0
+  },
+  "answer_contains_gold": {
+    "num": 60,
+    "den": 80,
+    "value": 0.75
+  },
+  "answer_gold_token_recall_mean": 0.836875,
+  "answer_token_f1_mean": 0.26584490481512135,
+  "inline_citations": {
+    "precision_span": {
+      "num": 53,
+      "den": 79,
+      "value": 0.6708860759493671
+    },
+    "precision_file": {
+      "num": 78,
+      "den": 79,
+      "value": 0.9873417721518988
+    },
+    "per_answer_mean": 0.9875,
+    "supporting_rate_span": {
+      "num": 52,
+      "den": 80,
+      "value": 0.65
+    },
+    "supporting_rate_file": {
+      "num": 77,
+      "den": 80,
+      "value": 0.9625
+    }
+  },
+  "returned_citations": {
+    "precision_span": {
+      "num": 106,
+      "den": 1190,
+      "value": 0.08907563025210084
+    },
+    "precision_file": {
+      "num": 599,
+      "den": 1190,
+      "value": 0.5033613445378151
+    },
+    "per_answer_mean": 14.875,
+    "supporting_rate_span": {
+      "num": 80,
+      "den": 80,
+      "value": 1.0
+    },
+    "supporting_rate_file": {
+      "num": 80,
+      "den": 80,
+      "value": 1.0
+    }
+  },
+  "abstention_unanswerable_all": {
+    "num": 10,
+    "den": 40,
+    "value": 0.25
+  },
+  "abstention_unanswerable_in_corpus": {
+    "num": 1,
+    "den": 20,
+    "value": 0.05
+  },
+  "abstention_unanswerable_off_corpus": {
+    "num": 9,
+    "den": 20,
+    "value": 0.45
+  },
+  "false_abstention_answerable": {
+    "num": 5,
+    "den": 80,
+    "value": 0.0625
+  },
+  "latency_ms": {
+    "p50": 10881,
+    "p95": 17017,
+    "max": 23699,
+    "n": 120
+  }
+}

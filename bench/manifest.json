@@ -1,0 +1,35 @@
+{
+  "name": "squad2-dev-e2e",
+  "description": "End-to-end answer and citation benchmark built from the SQuAD 2.0 development set.",
+  "source": {
+    "url": "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json",
+    "sha256": "80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8",
+    "bytes": 4370528,
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "citation": "Rajpurkar, Jia and Liang. Know What You Don't Know: Unanswerable Questions for SQuAD. ACL 2018."
+  },
+  "corpus_articles": [
+    "Normans",
+    "Southern_California",
+    "Sky_(United_Kingdom)",
+    "Victoria_(Australia)",
+    "Amazon_rainforest",
+    "Black_Death",
+    "Pharmacy",
+    "Jacksonville,_Florida",
+    "Prime_number",
+    "Rhine"
+  ],
+  "off_corpus_articles": [
+    "Packet_switching",
+    "Ctenophora",
+    "Yuan_dynasty",
+    "Scottish_Parliament"
+  ],
+  "sample": {
+    "answerable_per_article": 8,
+    "unanswerable_in_corpus_per_article": 2,
+    "off_corpus_per_article": 5
+  }
+}

@@ -60,3 +60,6 @@ annotator/.venv-test/
 
 # Stray local sqlite files (a t.db was once committed by accident, #631).
 *.db
+
+# End-to-end benchmark scratch data (bench/README.md)
+/bench/work/
