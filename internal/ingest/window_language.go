@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/langdetect"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/quality"
 )
 
 // This file implements SPEC §8.2.2 (dir2mcp #1029): per-window language
@@ -185,7 +187,10 @@ type windowDecode struct {
 	covered   []CoverageRange
 	languages []model.CoverageLanguage
 	refused   []model.RefusedRange
-	err       error
+	// qualityReason is the §8.6.6 reason when the window was refused as
+	// quality_gate, for the log and the terminal-status message.
+	qualityReason string
+	err           error
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.
@@ -225,6 +230,18 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if !covered {
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s is in %q, outside %s's declared coverage %v; indexed anyway and recorded covered=false (SPEC §8.2.2)",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
+	}
+	// §8.6.6 per window (§8.2.2, #1030): degenerate output is refused with its
+	// reason instead of reaching the transcript. The window's RESOLVED language
+	// is the expected one for the script check, as the spec requires; the
+	// detail is content-free, so it is safe to log.
+	if finding := s.windowQualityFinding(results, lang, core); finding != nil {
+		s.getLogger().Printf("windowed %s: quality gate refused window [%d,%d]ms of %s: reason=%s (%s) (SPEC §8.2.2)",
+			plan.label, core.StartMS, core.EndMS, relPath, finding.Reason, finding.Detail)
+		out.refused, out.languages = st.refuse(core, model.RefusedQualityGate)
+		out.qualityReason = string(finding.Reason)
+		st.advance(lang, source, conf, cur)
+		return out
 	}
 	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, covered)
 	st.recordDecoded(out.covered, out.languages)
@@ -266,6 +283,65 @@ func (st *windowLanguageState) recordDecoded(ranges []CoverageRange, entries []m
 		last := entries[len(entries)-1]
 		st.last = &last
 	}
+}
+
+// windowGateConfig is the §8.6.6 detector set run per decode window: the
+// default gate without the empty and density detectors. A silent window is
+// "nothing said", which §8.6.13 already records as decoded audio with no text,
+// and the density floor was tuned for a whole recording, not a ten-minute
+// slice of one. Repetition, gibberish and the script mismatch stay on: those
+// are the shapes a hallucinating decoder produces on audio it cannot cover.
+func windowGateConfig() quality.Config {
+	return windowGateConfigFrom(quality.DefaultConfig())
+}
+
+// windowGateConfigFrom derives the per-window detector set from an installed
+// gate's configuration: the same detectors and thresholds, minus empty and
+// density. A caller that disabled a detector keeps it disabled per window, so
+// a window is never refused by a check the caller's own gate would pass.
+func windowGateConfigFrom(base quality.Config) quality.Config {
+	cfg := base
+	cfg.Empty.Enabled = false
+	cfg.Density.Enabled = false
+	return cfg
+}
+
+// windowDocGateConfigFrom is the document-level gate for a transcript whose
+// windows were already gated (SPEC §8.2.2): only the empty and density
+// detectors. Repetition, gibberish and script mismatch ran on every window, and
+// a window that passed them must not fail the document through the merged text,
+// which the spec fails only when every window fails.
+func windowDocGateConfigFrom(base quality.Config) quality.Config {
+	cfg := base
+	cfg.Repetition.Enabled = false
+	cfg.Gibberish.Enabled = false
+	cfg.Language.Enabled = false
+	return cfg
+}
+
+// windowQualityFinding runs the per-window gate over the window's decoded text
+// and returns the primary finding, or nil when the gate is off or the text
+// passes. The expected language is the window's resolved language (§8.2.2), so
+// the script check judges the text against what the window was decoded as,
+// not against an item-level pin.
+func (s *Service) windowQualityFinding(results []pieceResult, lang string, core CoverageRange) *quality.Finding {
+	if s.windowGate == nil {
+		return nil
+	}
+	var texts []string
+	for _, r := range results {
+		texts = append(texts, r.res.Text)
+	}
+	text := stripSegmentMarkers(strings.Join(texts, "\n"))
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	verdict := s.windowGate.Evaluate(text, quality.Context{
+		Modality:         quality.ModalityTranscript,
+		ExpectedLanguage: lang,
+		Duration:         time.Duration(core.EndMS-core.StartMS) * time.Millisecond,
+	})
+	return verdict.Primary()
 }
 
 // resolve identifies the window's language under the §8.2.2 resolution and

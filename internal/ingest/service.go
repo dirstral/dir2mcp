@@ -159,6 +159,16 @@ type Service struct {
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
 	languageRouteIDs map[string]string
+	// windowGate is the §8.6.6 gate run PER decode window under window scope
+	// (SPEC §8.2.2, #1030): repetition, gibberish and script mismatch against the
+	// window's resolved language. It deliberately omits the empty and density
+	// detectors: a silent window is "nothing said", not degenerate output, and a
+	// window is a fraction of the recording the density floor was tuned for. Nil
+	// when quality gates are off, in which case no window is refused for quality.
+	windowGate *quality.Gate
+	// windowDocGate is the document-level gate for a transcript whose windows
+	// windowGate already screened: empty and density only (SPEC §8.2.2).
+	windowDocGate *quality.Gate
 
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
@@ -1043,6 +1053,8 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	// a follow-up); when off, the field stays nil and screening is skipped.
 	if cfg.QualityGatesEnabled {
 		svc.qualityGate = quality.New(quality.DefaultConfig())
+		svc.windowGate = quality.New(windowGateConfig())
+		svc.windowDocGate = quality.New(windowDocGateConfigFrom(quality.DefaultConfig()))
 	}
 	svc.resolveTranscriptIdentityFields()
 	// Resolve the optional transcript-translation binding (SPEC §8.6.2). When
@@ -1835,6 +1847,18 @@ func (s *Service) openScanCache() *scancache.SQLiteCache {
 // disables screening so generated transcript/OCR text is chunked and embedded
 // without quarantine. Mirrors SetTranscriber for tests.
 func (s *Service) SetQualityGate(gate *quality.Gate) {
+	// The per-window gate (§8.2.2) follows the document gate: nil turns both
+	// off, and any installed gate turns the default per-window detector set on
+	// (windowGateConfig), so a test that installs a gate sees it act at both
+	// granularities. The custom gate's own thresholds apply to the document
+	// only: the window set is a fixed subset tuned for a window's length.
+	if gate == nil {
+		s.windowGate = nil
+		s.windowDocGate = nil
+	} else {
+		s.windowGate = quality.New(windowGateConfigFrom(gate.Config()))
+		s.windowDocGate = quality.New(windowDocGateConfigFrom(gate.Config()))
+	}
 	s.qualityGate = gate
 }
 
@@ -5328,10 +5352,28 @@ func qualityGateFailureCode(kind string) string {
 // the chunk-level quarantine values. kind selects the canonical code and the
 // diagnostic label; doc identifies the document to mark.
 func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
-	if s.qualityGate == nil {
+	return s.screenOutputQualityWith(s.qualityGate, ctx, doc, kind, text, qctx)
+}
+
+// transcriptDocGate picks the document-level gate for a transcript: the
+// reduced windowDocGate only when THIS run's decode screened every window
+// (coverage.ScreenedPerWindow, SPEC §8.2.2), else the full gate. A recording
+// decoded as one unscoped request, or a cache hit whose screening marker is
+// missing or was written under another window gate (for example text cached
+// while gates were off), keeps every check.
+func (s *Service) transcriptDocGate(coverage *TranscriptCoverage) *quality.Gate {
+	if s.qualityGate != nil && s.windowDocGate != nil && coverage != nil && coverage.ScreenedPerWindow {
+		return s.windowDocGate
+	}
+	return s.qualityGate
+}
+
+// screenOutputQualityWith is screenOutputQuality with an explicit gate.
+func (s *Service) screenOutputQualityWith(gate *quality.Gate, ctx context.Context, doc model.Document, kind, text string, qctx quality.Context) quarantineDecision {
+	if gate == nil {
 		return quarantineDecision{}
 	}
-	verdict := s.qualityGate.Evaluate(text, qctx)
+	verdict := gate.Evaluate(text, qctx)
 	if verdict.OK() {
 		return quarantineDecision{}
 	}
@@ -5525,6 +5567,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 	producedAny := false
 	failed := 0
 	partialSkips := 0
+	gateRejections := 0
 	skipReason := ""
 	var firstFailErr error
 	for _, n := range indices {
@@ -5559,6 +5602,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		}
 		if rejected {
 			failed++
+			gateRejections++
 			continue
 		}
 		if produced {
@@ -5566,26 +5610,42 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		}
 	}
 
-	// §8.6.6/§8.6.7 over the SELECTED track set: the document is an error only when
-	// every selected track failed (the degenerate single-track case is one track, so
-	// its failure is the document's). Surface it through the provider-failure channel
-	// so the caller marks the document status=error and retries it next run, without
-	// double-counting the video-no-representation path.
 	if failed == len(indices) {
-		// §8.6.13 (#961): when EVERY selected track was refused by the coverage
-		// floor, nothing failed: the daemon declined on purpose, so the document is
-		// a declared skip rather than an error to retry next run. A mix of refusals
-		// and real failures still reports the failure: it is the retryable one, and
-		// the more urgent thing to tell an operator.
-		if partialSkips == failed {
-			return false, skipReason, nil
-		}
-		if firstFailErr != nil {
-			return false, "", firstFailErr
-		}
-		return false, "", fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
+		skip, err := s.settleAllTracksFailed(doc, failed, partialSkips, gateRejections, skipReason, firstFailErr)
+		return false, skip, err
 	}
 	return producedAny, "", nil
+}
+
+// settleAllTracksFailed is the verdict on a multi-track document none of whose
+// SELECTED tracks produced a transcript (§8.6.6/§8.6.7 over the selected set;
+// the degenerate single-track case is one track, so its failure is the
+// document's).
+//
+//   - §8.6.13 (#961): every track refused by the coverage floor is a declared
+//     skip, not an error to retry: the daemon declined on purpose.
+//   - §8.2.2 terminal status across tracks: a track refused for its language
+//     next to a track the per-window gate rejected, with no provider failure
+//     among them, is the language skip. It is the operator's decision and it
+//     recurs on every run, exactly as across the windows of one track
+//     (judgeEmptyTranscript).
+//   - A real provider failure is reported in preference to any refusal: it is
+//     the retryable one, and the more urgent thing to tell an operator.
+//   - Otherwise (every track rejected by the gate, or refusals mixed with
+//     rejections without a language refusal) the document is the §8.6.6 error,
+//     surfaced through the provider-failure channel so the caller marks it
+//     status=error without double-counting the video-no-representation path.
+func (s *Service) settleAllTracksFailed(doc model.Document, failed, partialSkips, gateRejections int, skipReason string, firstFailErr error) (string, error) {
+	if partialSkips == failed {
+		return skipReason, nil
+	}
+	if firstFailErr == nil && partialSkips+gateRejections == failed && skipReason == model.SkipReasonLanguageUncovered {
+		return skipReason, nil
+	}
+	if firstFailErr != nil {
+		return "", firstFailErr
+	}
+	return "", fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
 }
 
 // preferLanguageSkip picks the skip reason a multi-track document reports when
@@ -5674,7 +5734,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	if d, derr := s.probeDuration(ctx, doc); derr == nil {
 		duration = d
 	}
-	decision := s.screenOutputQuality(ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
+	decision := s.screenOutputQualityWith(s.transcriptDocGate(coverage), ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
 		Duration:         duration,
@@ -5802,32 +5862,50 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 // Recording that as ordinary silence would assert the recording had nothing to
 // say. An empty transcript cannot carry a secret, so the floor is the only
 // judgement left to make here.
-func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (string, error) {
+func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (skipReason string, gateRejected bool, err error) {
 	// §8.2.2 terminal status: no window produced text and at least one was
 	// refused. A language refusal is an operator decision that recurs on every
 	// run, so the item is a declared skip with that reason, and any earlier
-	// run's transcript is retired first exactly as the §8.6.13 floor does. A
-	// decode whose every refusal is quality_gate is left to the §8.6.6 path
-	// (TRANSCRIBE_FAILED) once per-window gating lands (#1030); this build never
-	// emits that reason.
-	if reason := allWindowsRefusedReason(coverage); reason == model.RefusedLanguageUncovered {
+	// run's transcript is retired first exactly as the §8.6.13 floor does. When
+	// every refusal is quality_gate the decoder produced only degenerate output:
+	// that is the §8.6.6 outcome, TRANSCRIBE_FAILED, recorded exactly as a
+	// failed document-level gate is (deferred under a multi-track selection).
+	switch allWindowsRefusedReason(coverage) {
+	case model.RefusedLanguageUncovered:
 		s.logTrackDropped(doc, tc, fmt.Sprintf(
 			"every decode window was refused: the resolved language is outside the routed model's declared coverage (media.stt.on_uncovered_language=skip, SPEC §8.2.2; %d of %d windows refused)",
 			coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted))
 		if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
-			return "", fmt.Errorf("uncovered-language refusal for %s: %w", doc.RelPath, err)
+			return "", false, fmt.Errorf("uncovered-language refusal for %s: %w", doc.RelPath, err)
 		}
-		return model.SkipReasonLanguageUncovered, nil
+		return model.SkipReasonLanguageUncovered, false, nil
+	case model.RefusedQualityGate:
+		reason := quality.Reason(coverage.RefusedQualityReason)
+		if reason == "" {
+			reason = quality.Reason(model.RefusedQualityGate)
+		}
+		s.logTrackDropped(doc, tc, fmt.Sprintf(
+			"every decode window was refused by the per-window quality gate (first reason %s; SPEC §8.2.2, §8.6.6)", reason))
+		// An earlier run's transcript of this track is retired, exactly as the
+		// language refusal above does: otherwise another track's success would
+		// finish the document with this track's stale chunks still searchable.
+		if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
+			return "", false, fmt.Errorf("quality-gate refusal for %s: %w", doc.RelPath, err)
+		}
+		if !s.deferGateDocError {
+			s.recordQualityGateDocError(ctx, doc, qualityKindTranscript, reason)
+		}
+		return "", true, nil
 	}
-	refused, err := s.refusePartialTranscript(ctx, doc, tc, coverage)
-	if err != nil {
-		return "", err
+	refused, perr := s.refusePartialTranscript(ctx, doc, tc, coverage)
+	if perr != nil {
+		return "", false, perr
 	}
 	if refused {
-		return model.SkipReasonTranscriptPartial, nil
+		return model.SkipReasonTranscriptPartial, false, nil
 	}
 	s.warnPartialTranscript(doc, tc, coverage)
-	return "", nil
+	return "", false, nil
 }
 
 // refusedTranscriptRep reports whether a stored representation is one the
@@ -5882,11 +5960,11 @@ func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, 
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
 func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, string, error) {
-	skipReason, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
+	skipReason, gateRejected, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
 	if err != nil {
 		return false, false, "", err
 	}
-	return false, false, skipReason, nil
+	return false, gateRejected, skipReason, nil
 }
 
 func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
@@ -6803,6 +6881,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
+	screenedPath := filepath.Join(cacheDir, base+".screened")
 	// #974: an operator asked for this document to be decoded again, so the cache
 	// is not consulted. The entry is rewritten below, so this costs one decode
 	// rather than leaving the document uncached forever.
@@ -6818,7 +6897,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
 			// text. A cache hit that dropped it would re-index the same PARTIAL
 			// transcript as a complete one on the next run, which is the whole defect.
-			return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
+			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), nil
 		}
 	}
 
@@ -6838,6 +6917,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	if !s.publishCachedCoverage(coveragePath, coverage) {
 		return string(transcriptBytes), words, coverage, nil
 	}
+	s.publishScreenedMarker(screenedPath, coverage)
 	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
 		return "", nil, nil, fmt.Errorf("write transcript cache: %w", err)
 	}
@@ -7061,6 +7141,45 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	return &coverage
 }
 
+// restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
+// transient ScreenedPerWindow fact from the entry's screening marker. The fact
+// is trusted only when the per-window gate is active now and the marker holds
+// this gate's fingerprint. Without the marker a cache hit re-screened a
+// window-screened transcript with the full gate, so the same recording was
+// indexed on one run and failed on the next (SPEC §8.2.2). Text cached while
+// gates were off has no marker, so it still gets every check.
+func (s *Service) restoreCachedCoverage(coveragePath, screenedPath string) *TranscriptCoverage {
+	coverage := readCachedCoverage(coveragePath)
+	if coverage == nil || s.windowGate == nil {
+		return coverage
+	}
+	marker, err := os.ReadFile(screenedPath)
+	coverage.ScreenedPerWindow = err == nil && string(marker) == s.windowGateFingerprint()
+	return coverage
+}
+
+// publishScreenedMarker writes the cache entry's screening marker when this
+// decode screened every window, and removes a stale one otherwise. It is
+// best-effort: without the marker a later cache hit runs the full gate, which
+// is the conservative outcome.
+func (s *Service) publishScreenedMarker(path string, coverage *TranscriptCoverage) {
+	if coverage == nil || !coverage.ScreenedPerWindow || s.windowGate == nil {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.getLogger().Printf("clear stale transcript screening marker (%s): %v", path, err)
+		}
+		return
+	}
+	if err := statefs.WriteFile(path, []byte(s.windowGateFingerprint())); err != nil {
+		s.getLogger().Printf("write transcript screening marker (%s): %v; a cache hit runs the full gate", path, err)
+	}
+}
+
+// windowGateFingerprint identifies the active per-window gate configuration, so
+// a marker written under other thresholds is not trusted.
+func (s *Service) windowGateFingerprint() string {
+	return fmt.Sprintf("window-gate %+v", s.windowGate.Config())
+}
+
 // publishCachedCoverage makes the cache entry's coverage sidecar match this
 // decode, and reports whether the transcript text may now be published alongside
 // it (SPEC §8.6.13).
@@ -7116,8 +7235,8 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 	return s.readOrComputeTranscript(ctx, doc, content, language)
 }
 
-// PurgeTranscriptCache removes the transcript cache entry (and its word-timing
-// and §8.6.13 coverage sidecars) for the given content+language, using the same active-STT key
+// PurgeTranscriptCache removes the transcript cache entry (and its word-timing,
+// §8.6.13 coverage and screening sidecars) for the given content+language, using the same active-STT key
 // readOrComputeTranscriptWithWords writes under. Callers that gate the returned
 // transcript (e.g. the MCP secret-pattern gate) use this so refused text is
 // never left persisted in {StateDir}/cache/transcribe. Missing files are
@@ -7132,7 +7251,7 @@ func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	// refused) translated text must not be left persisted after a purge.
 	translateBase := key + "-translate" + TranscriptLangSuffix("en")
 	for _, p := range []string{
-		base + ".txt", base + ".words.json", base + ".coverage.json",
+		base + ".txt", base + ".words.json", base + ".coverage.json", base + ".screened",
 		translateBase + ".txt", translateBase + ".words.json", translateBase + ".coverage.json",
 	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {

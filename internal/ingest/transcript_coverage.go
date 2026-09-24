@@ -67,6 +67,7 @@ func newScopedTranscriptCoverage(stats windowStats, totalMS int) *TranscriptCove
 	}
 	base.Languages = coalesceCoverageLanguages(stats.languages, totalMS)
 	base.Refused = coalesceRefusedRanges(stats.refused, totalMS)
+	base.RefusedQualityReason = stats.firstQualityReason
 	return base
 }
 
@@ -106,4 +107,14 @@ func newTranscriptCoverage(attempted, decoded, totalMS int, ranges []CoverageRan
 		DurationMS:       totalMS,
 		Ranges:           merged,
 	}
+}
+
+// liveScopedCoverage is newScopedTranscriptCoverage for a decode this run just
+// performed: it marks the record screened when the per-window gate was active.
+func (s *Service) liveScopedCoverage(stats windowStats, totalMS int) *TranscriptCoverage {
+	cov := newScopedTranscriptCoverage(stats, totalMS)
+	if cov != nil {
+		cov.ScreenedPerWindow = s.windowGate != nil
+	}
+	return cov
 }

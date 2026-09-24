@@ -57,6 +57,17 @@ type TranscriptCoverage struct {
 	// sibling fields of the same meta_json so a §7.7 report can name what
 	// decoded the recording without carrying the whole meta around.
 	Identity string `json:"-"`
+	// RefusedQualityReason is the §8.6.6 reason of the FIRST window refused as
+	// quality_gate (§8.2.2), for the log line and the TRANSCRIBE_FAILED message
+	// when every window was refused that way. Transient: the persisted record
+	// carries only coverage.refused[].reason, as the spec defines it.
+	RefusedQualityReason string `json:"-"`
+	// ScreenedPerWindow is true on a coverage record whose windows the
+	// per-window quality gate screened (SPEC §8.2.2). Not part of the persisted
+	// coverage object: a cache hit restores it from the cache entry's screening
+	// marker only when that marker holds the active window gate's fingerprint,
+	// so text cached while gates were off still gets every check.
+	ScreenedPerWindow bool `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds

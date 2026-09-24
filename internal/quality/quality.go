@@ -95,7 +95,13 @@ func (v Verdict) Primary() *Finding {
 // Gate runs an ordered set of detectors over content.
 type Gate struct {
 	detectors []Detector
+	// cfg is the resolved configuration the gate was built from, so a caller can
+	// derive a related gate (the per-window gate, SPEC §8.2.2) from it.
+	cfg Config
 }
+
+// Config returns the resolved configuration the gate was built from.
+func (g *Gate) Config() Config { return g.cfg }
 
 // New builds a Gate from cfg. Defaults are filled via [Config.WithDefaults],
 // and detectors are appended in severity order (empty, gibberish, repetition,
@@ -105,7 +111,7 @@ type Gate struct {
 // is included only if its corresponding Enabled flag is set.
 func New(cfg Config) *Gate {
 	cfg = cfg.WithDefaults()
-	g := &Gate{}
+	g := &Gate{cfg: cfg}
 	if cfg.Empty.Enabled {
 		g.detectors = append(g.detectors, emptyDetector{minChars: cfg.Empty.MinChars})
 	}
