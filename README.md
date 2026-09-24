@@ -57,7 +57,8 @@ export MISTRAL_API_KEY=...
 dir2mcp up
 ```
 
-Then ask from the terminal, or hand the folder to Claude Desktop:
+Then ask from the terminal, or hand the folder to Claude Code, Cursor or
+Claude Desktop:
 
 ```console
 $ dir2mcp ask "When is the budget meeting?"
@@ -66,7 +67,9 @@ The quarterly budget meeting is on Thursday. [notes.md:L1-L3]
   Citations
   [1] notes.md  chunk=2 span=L1-L3
 
-$ dir2mcp install claude        # restart Claude Desktop, then ask it about the folder
+$ dir2mcp install claude-code   # Claude Code: start a new session, then ask about the folder
+$ dir2mcp install cursor        # Cursor: the server shows in Settings > MCP
+$ dir2mcp install claude        # Claude Desktop: restart it, then ask about the folder
 ```
 
 `dir2mcp status` shows what was indexed, and names every file it skipped with
@@ -423,15 +426,43 @@ dir2mcp up --listen 0.0.0.0:8087
 | `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
 | `config rm-secret <ENV_VAR>` | Remove a credential from the OS keychain |
 | `config secrets` | Show which provider credentials are present in the keychain / environment (never prints values) |
-| `install <client>` | Install dir2mcp into a supported MCP client (e.g. `dir2mcp install claude`) |
-| `uninstall <client>` | Remove dir2mcp from a supported MCP client |
+| `install <client>` | Install dir2mcp into a supported MCP client: `claude-code`, `cursor`, or `claude` (Claude Desktop). See [Connect an MCP client](#connect-an-mcp-client) |
+| `uninstall <client>` | Remove dir2mcp from a supported MCP client. Other servers in the client config stay as they are |
 | `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures); add `--deep` to actively probe the embedding credential |
-| `print-config <client>` | Print the MCP-server JSON snippet a client expects |
+| `print-config <client>` | Print what a client needs for a manual setup: the `claude mcp add` command for `claude-code`, the `mcp.json` snippet for `cursor` and `claude`. For `claude-code` and `cursor` the output never contains the token |
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments, or any command with `--help` (or `-h`), prints usage to stdout and exits 0.
 `ask`, `search`, `open-file`, and `list-files` are legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
+
+### Connect an MCP client
+
+Start the daemon first (`dir2mcp up`). Each client command reads the URL and the
+bearer token from `.dir2mcp/connection.json` and `.dir2mcp/secret.token`, so run
+it in the folder you serve, or pass `--state-dir`. The server name defaults to
+the [server identity](#server-identity); use `--name` to choose another.
+
+| Client | Install | What it changes |
+|---|---|---|
+| Claude Code | `dir2mcp install claude-code [--scope user\|local]` | Calls `claude mcp add --transport http` with the URL and the `Authorization` header. The default scope is `user` (all projects); `local` is the current project only. dir2mcp refuses `--scope project`, because that scope writes the token into `.mcp.json` in your working tree |
+| Cursor | `dir2mcp install cursor [--config-path PATH]` | Adds a `url` + `headers` entry to `~/.cursor/mcp.json`. For a project config, pass `--config-path .cursor/mcp.json` and keep that file out of version control |
+| Claude Desktop | `dir2mcp install claude [--config-path PATH]` | Adds a `bunx mcp-remote` bridge entry to `claude_desktop_config.json` |
+
+Claude Code and Cursor speak Streamable HTTP to the daemon directly, so they
+need no bridge. Claude Code keeps its servers in `~/.claude.json`, a file that
+Claude Code itself also rewrites; dir2mcp uses the `claude` CLI and does not
+edit that file. When `claude` is not on `PATH`, `install claude-code` exits
+non-zero and prints the command to run. The printed command reads the token with
+`$(cat ...)`, so the token never shows on screen.
+
+Every file edit is atomic, writes mode `0600` (the entry holds the token), keeps
+all other servers and unknown keys, and replaces only the dir2mcp entry, so a
+second install is safe. `dir2mcp doctor <client>` checks that the entry
+exists, that it uses the current daemon URL, and that the daemon answers. For
+Cursor it also checks that the entry holds the current token. `dir2mcp uninstall
+<client>` removes only the dir2mcp entry. When the daemon URL or token changes,
+run `install` again.
 
 ### Recovering from a failed embed run
 

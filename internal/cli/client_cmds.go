@@ -8,10 +8,11 @@ import (
 )
 
 // supportedClients enumerates the MCP clients dir2mcp can configure
-// today. As more clients land, add them here and route the new entry
-// through each verb's switch — the top-level surface (`install`,
-// `uninstall`, `doctor`, `print-config`) stays flat.
-var supportedClients = []string{"claude"}
+// today: claude (Claude Desktop), claude-code (Claude Code) and cursor.
+// As more clients land, add them here and route the new entry through
+// each verb's switch. The top-level surface (`install`, `uninstall`,
+// `doctor`, `print-config`) stays flat.
+var supportedClients = []string{"claude", "claude-code", "cursor"}
 
 // extractClient reads the leading positional argument as the client
 // name and returns it (lowercased, trimmed) along with the remaining
@@ -48,10 +49,9 @@ func unknownClientError(a *App, jsonOutput bool, verb, client string) int {
 }
 
 // runInstall installs the dir2mcp MCP server entry into the requested
-// client's configuration. Today the only supported client is claude
-// (Claude Desktop); future clients (chatgpt, cursor, ...) plug into
-// the same switch.
-func (a *App) runInstall(_ context.Context, global globalOptions, args []string) int {
+// client's configuration. Each client in supportedClients has a case
+// in the switch.
+func (a *App) runInstall(ctx context.Context, global globalOptions, args []string) int {
 	client, rest, ok := extractClient(a, global.jsonOutput, "install", args)
 	if !ok {
 		return exitConfigInvalid
@@ -59,6 +59,10 @@ func (a *App) runInstall(_ context.Context, global globalOptions, args []string)
 	switch client {
 	case "claude":
 		return a.runClaudeInstall(global, rest)
+	case "claude-code":
+		return a.runClaudeCodeInstall(ctx, global, rest)
+	case "cursor":
+		return a.runCursorInstall(global, rest)
 	default:
 		return unknownClientError(a, global.jsonOutput, "install", client)
 	}
@@ -67,7 +71,7 @@ func (a *App) runInstall(_ context.Context, global globalOptions, args []string)
 // runUninstall removes the dir2mcp MCP server entry from the
 // requested client's configuration. Idempotent — uninstalling a
 // not-installed client is a clean no-op.
-func (a *App) runUninstall(_ context.Context, global globalOptions, args []string) int {
+func (a *App) runUninstall(ctx context.Context, global globalOptions, args []string) int {
 	client, rest, ok := extractClient(a, global.jsonOutput, "uninstall", args)
 	if !ok {
 		return exitConfigInvalid
@@ -79,6 +83,10 @@ func (a *App) runUninstall(_ context.Context, global globalOptions, args []strin
 	switch client {
 	case "claude":
 		return a.runClaudeUninstall(global, rest)
+	case "claude-code":
+		return a.runClaudeCodeUninstall(ctx, global, rest)
+	case "cursor":
+		return a.runCursorUninstall(global, rest)
 	default:
 		return unknownClientError(a, global.jsonOutput, "uninstall", client)
 	}
@@ -104,6 +112,10 @@ func (a *App) runDoctor(ctx context.Context, global globalOptions, args []string
 	switch client {
 	case "claude":
 		return a.runClaudeDoctor(ctx, global, rest)
+	case "claude-code":
+		return a.runClaudeCodeDoctor(ctx, global, rest)
+	case "cursor":
+		return a.runCursorDoctor(ctx, global, rest)
 	default:
 		return unknownClientError(a, global.jsonOutput, "doctor", client)
 	}
@@ -120,6 +132,10 @@ func (a *App) runPrintConfig(_ context.Context, global globalOptions, args []str
 	switch client {
 	case "claude":
 		return a.runClaudePrintConfig(global, rest)
+	case "claude-code":
+		return a.runClaudeCodePrintConfig(global, rest)
+	case "cursor":
+		return a.runCursorPrintConfig(global, rest)
 	default:
 		return unknownClientError(a, global.jsonOutput, "print-config", client)
 	}
