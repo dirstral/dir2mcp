@@ -89,6 +89,8 @@ make build
 # point a daemon at a freshly-reindexed corpus on THIS binary, wait for pending=0, then:
 make release-smoke STATE_DIR=/path/to/corpus/.dir2mcp                  # server contract (HTTP)
 make release-smoke STATE_DIR=/path/to/corpus/.dir2mcp TRANSPORT=stdio  # full mcp-remote bridge
+# the default questions are for the stas-legal corpus; for another corpus pass its own:
+make release-smoke STATE_DIR=... ARGS='--question "What is the leave policy?"'
 ```
 
 It speaks MCP to the daemon and asserts: indexing stopped + `errors=0` +

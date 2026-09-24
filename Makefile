@@ -166,8 +166,12 @@ inspector-smoke: build
 # Run both before a release.
 STATE_DIR ?= .dir2mcp
 TRANSPORT ?= http
+# ARGS passes extra flags to the script, for example questions the corpus can
+# answer: ARGS='--question "What is the leave policy?"'. The default questions
+# are written for the stas-legal corpus.
+ARGS ?=
 release-smoke:
-	python3 scripts/release_smoke.py --state-dir "$(STATE_DIR)" --transport "$(TRANSPORT)"
+	python3 scripts/release_smoke.py --state-dir "$(STATE_DIR)" --transport "$(TRANSPORT)" $(ARGS)
 
 clean:
 	rm -f dir2mcp coverage.out
