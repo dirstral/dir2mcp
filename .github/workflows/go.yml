@@ -235,5 +235,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # The core user path on a real binary: up, status, list-files, ask,
+      # open-file, install claude and down. Run verbose and on its own, so the
+      # log shows PASS for this test by name, not only a package "ok".
+      - name: Core path end-to-end
+        run: go test -count=1 -v -run 'TestCorePath_ForegroundUpAskDown' ./tests/cli
+
       - name: Test
         run: go test ./...

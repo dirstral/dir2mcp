@@ -411,6 +411,7 @@ func assertInstallClaudeDefaultPath(t *testing.T, bin, root string, env []string
 	if !strings.Contains(string(raw), `"corepath"`) {
 		t.Fatalf("Claude config lacks the corepath entry: %s", raw)
 	}
+	t.Logf("install claude wrote %s", want)
 }
 
 func assertDownStopsServer(t *testing.T, bin, root string, env []string, stateDir string, p *upProcess) {
