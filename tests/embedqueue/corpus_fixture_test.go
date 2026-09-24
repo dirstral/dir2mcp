@@ -37,11 +37,15 @@ func newTestCorpus(t *testing.T, name string) *testCorpus {
 	t.Helper()
 	ctx := context.Background()
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
+	st := store.NewSQLiteStore(filepath.Join(storeTempDir(t), "meta.db"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("%s: init store: %v", name, err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("%s: close store: %v", name, err)
+		}
+	})
 
 	relPath := "notes.md"
 	if err := st.UpsertDocument(ctx, model.Document{
