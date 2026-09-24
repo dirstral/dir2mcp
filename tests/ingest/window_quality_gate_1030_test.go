@@ -392,9 +392,67 @@ func TestWindowQuality_ACachedTranscriptGetsTheFullGate(t *testing.T) {
 		t.Fatalf("run 2: %v", err)
 	}
 	if tr.callCount() != calls {
-		t.Skipf("run 2 re-decoded (%d calls after %d): the transcript cache was not hit, so this path is not exercised", tr.callCount(), calls)
+		t.Fatalf("run 2 re-decoded (%d calls after %d): the transcript cache was not hit, so this path is not exercised", tr.callCount(), calls)
 	}
 	if !strings.Contains(h.logs.String(), "quality gate quarantined transcript") {
 		t.Errorf("a cached, never-screened transcript passed the reduced gate:\n%s", h.logs.String())
+	}
+}
+
+// TestWindowQuality_AScreenedCachedTranscriptKeepsItsVerdict: run 1 screens
+// every window and indexes the recording. Run 2 hits the transcript cache with
+// the same gate, so it must reach the same verdict. Before the cache recorded
+// the screening, the cache hit ran the full gate on the merged text and failed
+// a recording that run 1 had indexed.
+func TestWindowQuality_AScreenedCachedTranscriptKeepsItsVerdict(t *testing.T) {
+	t.Parallel()
+	tr := &langWindowTranscriber{def: langReply{lang: "en", conf: 0.9, text: "[00:00] ok ok ok ok ok"}}
+	h, content := newScopedHarness(t, tr, scopeTotalMS)
+	cfg := quality.DefaultConfig()
+	cfg.Density.Enabled = false
+	h.svc.SetQualityGate(quality.New(cfg))
+	_ = runScoped(t, h, "talks/stable.m4a", content) // run 1: windows screened, cached
+	calls := tr.callCount()
+
+	h.store.reps = nil
+	h.store.chunks = nil
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/stable.m4a"), content); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if tr.callCount() != calls {
+		t.Fatalf("run 2 re-decoded (%d calls after %d): the transcript cache was not hit", tr.callCount(), calls)
+	}
+	if strings.Contains(h.logs.String(), "quality gate quarantined transcript") {
+		t.Errorf("a window-screened transcript failed on its cache hit:\n%s", h.logs.String())
+	}
+}
+
+// TestWindowQuality_AMarkerFromAnotherGateIsNotTrusted: the screening marker
+// holds the window gate's fingerprint. After the gate changes, a cache hit is
+// not taken as screened, and the full gate runs on the merged text.
+func TestWindowQuality_AMarkerFromAnotherGateIsNotTrusted(t *testing.T) {
+	t.Parallel()
+	tr := &langWindowTranscriber{def: langReply{lang: "en", conf: 0.9, text: "[00:00] ok ok ok ok ok"}}
+	h, content := newScopedHarness(t, tr, scopeTotalMS)
+	first := quality.DefaultConfig()
+	first.Density.Enabled = false
+	first.Repetition.MaxRepeatFraction = 0.95
+	h.svc.SetQualityGate(quality.New(first))
+	_ = runScoped(t, h, "talks/regated.m4a", content) // run 1: marker under the first gate
+	calls := tr.callCount()
+
+	second := quality.DefaultConfig()
+	second.Density.Enabled = false
+	h.svc.SetQualityGate(quality.New(second))
+	h.store.reps = nil
+	h.store.chunks = nil
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/regated.m4a"), content); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if tr.callCount() != calls {
+		t.Fatalf("run 2 re-decoded (%d calls after %d): the transcript cache was not hit", tr.callCount(), calls)
+	}
+	if !strings.Contains(h.logs.String(), "quality gate quarantined transcript") {
+		t.Errorf("a marker written under another window gate was trusted:\n%s", h.logs.String())
 	}
 }

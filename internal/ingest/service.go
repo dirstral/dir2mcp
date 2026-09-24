@@ -5316,8 +5316,9 @@ func (s *Service) screenOutputQuality(ctx context.Context, doc model.Document, k
 // transcriptDocGate picks the document-level gate for a transcript: the
 // reduced windowDocGate only when THIS run's decode screened every window
 // (coverage.ScreenedPerWindow, SPEC §8.2.2), else the full gate. A recording
-// decoded as one unscoped request, or a transcript restored from the cache
-// (possibly cached while gates were off), keeps every check.
+// decoded as one unscoped request, or a cache hit whose screening marker is
+// missing or was written under another window gate (for example text cached
+// while gates were off), keeps every check.
 func (s *Service) transcriptDocGate(coverage *TranscriptCoverage) *quality.Gate {
 	if s.qualityGate != nil && s.windowDocGate != nil && coverage != nil && coverage.ScreenedPerWindow {
 		return s.windowDocGate
@@ -6838,6 +6839,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
+	screenedPath := filepath.Join(cacheDir, base+".screened")
 	// #974: an operator asked for this document to be decoded again, so the cache
 	// is not consulted. The entry is rewritten below, so this costs one decode
 	// rather than leaving the document uncached forever.
@@ -6853,7 +6855,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
 			// text. A cache hit that dropped it would re-index the same PARTIAL
 			// transcript as a complete one on the next run, which is the whole defect.
-			return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
+			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), nil
 		}
 	}
 
@@ -6873,6 +6875,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	if !s.publishCachedCoverage(coveragePath, coverage) {
 		return string(transcriptBytes), words, coverage, nil
 	}
+	s.publishScreenedMarker(screenedPath, coverage)
 	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
 		return "", nil, nil, fmt.Errorf("write transcript cache: %w", err)
 	}
@@ -7096,6 +7099,45 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	return &coverage
 }
 
+// restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
+// transient ScreenedPerWindow fact from the entry's screening marker. The fact
+// is trusted only when the per-window gate is active now and the marker holds
+// this gate's fingerprint. Without the marker a cache hit re-screened a
+// window-screened transcript with the full gate, so the same recording was
+// indexed on one run and failed on the next (SPEC §8.2.2). Text cached while
+// gates were off has no marker, so it still gets every check.
+func (s *Service) restoreCachedCoverage(coveragePath, screenedPath string) *TranscriptCoverage {
+	coverage := readCachedCoverage(coveragePath)
+	if coverage == nil || s.windowGate == nil {
+		return coverage
+	}
+	marker, err := os.ReadFile(screenedPath)
+	coverage.ScreenedPerWindow = err == nil && string(marker) == s.windowGateFingerprint()
+	return coverage
+}
+
+// publishScreenedMarker writes the cache entry's screening marker when this
+// decode screened every window, and removes a stale one otherwise. It is
+// best-effort: without the marker a later cache hit runs the full gate, which
+// is the conservative outcome.
+func (s *Service) publishScreenedMarker(path string, coverage *TranscriptCoverage) {
+	if coverage == nil || !coverage.ScreenedPerWindow || s.windowGate == nil {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.getLogger().Printf("clear stale transcript screening marker (%s): %v", path, err)
+		}
+		return
+	}
+	if err := statefs.WriteFile(path, []byte(s.windowGateFingerprint())); err != nil {
+		s.getLogger().Printf("write transcript screening marker (%s): %v; a cache hit runs the full gate", path, err)
+	}
+}
+
+// windowGateFingerprint identifies the active per-window gate configuration, so
+// a marker written under other thresholds is not trusted.
+func (s *Service) windowGateFingerprint() string {
+	return fmt.Sprintf("window-gate %+v", s.windowGate.Config())
+}
+
 // publishCachedCoverage makes the cache entry's coverage sidecar match this
 // decode, and reports whether the transcript text may now be published alongside
 // it (SPEC §8.6.13).
@@ -7151,8 +7193,8 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 	return s.readOrComputeTranscript(ctx, doc, content, language)
 }
 
-// PurgeTranscriptCache removes the transcript cache entry (and its word-timing
-// and §8.6.13 coverage sidecars) for the given content+language, using the same active-STT key
+// PurgeTranscriptCache removes the transcript cache entry (and its word-timing,
+// §8.6.13 coverage and screening sidecars) for the given content+language, using the same active-STT key
 // readOrComputeTranscriptWithWords writes under. Callers that gate the returned
 // transcript (e.g. the MCP secret-pattern gate) use this so refused text is
 // never left persisted in {StateDir}/cache/transcribe. Missing files are
@@ -7167,7 +7209,7 @@ func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	// refused) translated text must not be left persisted after a purge.
 	translateBase := key + "-translate" + TranscriptLangSuffix("en")
 	for _, p := range []string{
-		base + ".txt", base + ".words.json", base + ".coverage.json",
+		base + ".txt", base + ".words.json", base + ".coverage.json", base + ".screened",
 		translateBase + ".txt", translateBase + ".words.json", translateBase + ".coverage.json",
 	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
