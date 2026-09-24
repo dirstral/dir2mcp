@@ -38,7 +38,7 @@ def test_response_json_round_trips():
 def test_a_club_reaches_the_wire_with_a_readable_label():
     """A club has no roster entry, so `build_response` must fall back to
     deriving its label from the id. Without this the wire carries
-    `team:san-francisco-giants` and no way to render it, and dir2mcp cannot
+    `team:harbor-city-gulls` and no way to render it, and dir2mcp cannot
     show a user what they filtered on.
     """
     doc_with_club = Document(
@@ -46,7 +46,7 @@ def test_a_club_reaches_the_wire_with_a_readable_label():
         annotations=[
             Annotation(
                 start_s=1.0, end_s=2.0, event="pitch",
-                entity_ids=("player:webb-logan", "team:san-francisco-giants"),
+                entity_ids=("player:webb-logan", "team:harbor-city-gulls"),
                 text="Pitch: Logan Webb to Freddie Freeman",
                 confidence=0.97, sources=("playbyplay",),
             )
@@ -54,8 +54,8 @@ def test_a_club_reaches_the_wire_with_a_readable_label():
     )
     payload = build_response(doc_with_club)
     by_id = {e["id"]: e for e in payload["entities"]}
-    assert by_id["team:san-francisco-giants"]["label"] == "San Francisco Giants"
+    assert by_id["team:harbor-city-gulls"]["label"] == "Harbor City Gulls"
     # and the annotation still references both, in order
     assert payload["annotations"][0]["entities"] == [
-        "player:webb-logan", "team:san-francisco-giants",
+        "player:webb-logan", "team:harbor-city-gulls",
     ]

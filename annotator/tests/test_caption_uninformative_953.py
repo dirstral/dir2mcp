@@ -73,7 +73,7 @@ def test_a_frame_with_no_content_is_uninformative(caption):
     "a restored television broadcast frame from July 20, 1969",
     "a black-and-white view of the lunar surface",
     "the camera is on the field behind home plate",
-    "a wide aerial view of Oracle Park during the afternoon",
+    "a wide aerial view of the ballpark during the afternoon",
 ])
 def test_a_frame_with_content_is_not_uninformative(caption):
     assert not scene_is_uninformative(caption)

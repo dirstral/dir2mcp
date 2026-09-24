@@ -1,12 +1,12 @@
 {
- "gamePk": 823215,
+ "gamePk": 700001,
  "gameData": {
   "teams": {
    "away": {
-    "name": "Washington Nationals"
+    "name": "Capital City Foxes"
    },
    "home": {
-    "name": "San Francisco Giants"
+    "name": "Harbor City Gulls"
    }
   }
  },
@@ -2347,7 +2347,7 @@
     {
      "result": {
       "eventType": "field_out",
-      "description": "Nationals challenged (play at 1st), call on the field was overturned: Victor Bericoto grounds out, shortstop Nasim Nuñez to first baseman Andrés Chaparro.",
+      "description": "Foxes challenged (play at 1st), call on the field was overturned: Victor Bericoto grounds out, shortstop Nasim Nuñez to first baseman Andrés Chaparro.",
       "rbi": 0,
       "awayScore": 2,
       "homeScore": 0
@@ -5286,7 +5286,7 @@
        "isPitch": false,
        "startTime": "2026-06-10T22:33:24.714Z",
        "details": {
-        "description": "Giants challenged (tag play), call on the field was upheld: Daylen Lile steals (7) 2nd base."
+        "description": "Gulls challenged (tag play), call on the field was upheld: Daylen Lile steals (7) 2nd base."
        }
       },
       {

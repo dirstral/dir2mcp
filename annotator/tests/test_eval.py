@@ -117,8 +117,8 @@ def _feed_with_clubs(top_inning: bool) -> dict:
     return {
         "gamePk": 1,
         "gameData": {"teams": {
-            "away": {"name": "Washington Nationals"},
-            "home": {"name": "San Francisco Giants"},
+            "away": {"name": "Capital City Foxes"},
+            "home": {"name": "Harbor City Gulls"},
         }},
         "liveData": {"plays": {"allPlays": [{
             "matchup": {"pitcher": {"id": 1, "fullName": "P"},
@@ -136,20 +136,20 @@ def _feed_with_clubs(top_inning: bool) -> dict:
 
 def test_parse_pitches_reads_both_clubs():
     ev = ground_truth.parse_pitches(_feed_with_clubs(top_inning=True))[0]
-    assert ev.away_team == "Washington Nationals"
-    assert ev.home_team == "San Francisco Giants"
+    assert ev.away_team == "Capital City Foxes"
+    assert ev.home_team == "Harbor City Gulls"
 
 
 def test_the_batting_club_follows_the_half_inning():
     """The visitors bat in the top half. This is the whole derivation, so it
     is worth pinning in both directions rather than trusting one case."""
     top = ground_truth.parse_pitches(_feed_with_clubs(top_inning=True))[0]
-    assert top.batting_team() == "Washington Nationals"
-    assert top.pitching_team() == "San Francisco Giants"
+    assert top.batting_team() == "Capital City Foxes"
+    assert top.pitching_team() == "Harbor City Gulls"
 
     bottom = ground_truth.parse_pitches(_feed_with_clubs(top_inning=False))[0]
-    assert bottom.batting_team() == "San Francisco Giants"
-    assert bottom.pitching_team() == "Washington Nationals"
+    assert bottom.batting_team() == "Harbor City Gulls"
+    assert bottom.pitching_team() == "Capital City Foxes"
 
 
 def test_a_feed_without_gameData_leaves_the_clubs_empty(events):
@@ -171,14 +171,14 @@ def test_a_feed_without_gameData_leaves_the_clubs_empty(events):
 # (`/api/v1.1/game/{game_pk}/feed/live`), projected down to the fields
 # `parse_pitches` reads and otherwise unedited:
 #
-#   gumbo_reference_game.json         game 823215, the reference game, all 84 plays
+#   gumbo_reference_game.json         game 700001, the reference game, all 84 plays
 #   gumbo_trailing_action.json game 776815, the one play in 8 games whose last
 #                             playEvent is not a pitch
 
 PILOT = Path(__file__).parent / "fixtures" / "gumbo_reference_game.json"
 TRAILING = Path(__file__).parent / "fixtures" / "gumbo_trailing_action.json"
 
-#: What game 823215 (Washington at San Francisco) actually holds. Counted from
+#: What game 700001 (Capital City at Harbor City) actually holds. Counted from
 #: the live statsapi payload, then projected down to the fields the parser
 #: reads; nothing here is chosen, it is what the game was.
 PILOT_OUTCOMES = {
@@ -272,7 +272,7 @@ def test_a_feed_without_an_eventType_leaves_the_outcome_empty(events):
 # Nothing here is computed or normalised. Each field is carried verbatim, so the
 # ranking a client gets is MLB's, not one this backend invented.
 
-#: The captivating index of every play of game 823215, counted from the live
+#: The captivating index of every play of game 700001, counted from the live
 #: statsapi payload. 43 plays score 0, so the field genuinely discriminates.
 PILOT_CAPTIVATING = {95: 1, 75: 1, 70: 1, 38: 4, 34: 4, 33: 17, 14: 13, 0: 43}
 PILOT_REVIEWS = 2

@@ -5,7 +5,7 @@ preprocessing, the pool, the OCR adapter) is generic and lives in
 `test_overlay.py`; what is pinned here is what the strings *mean*.
 
 Backend-free: no tesseract, no Pillow, no video. The OCR strings below are
-verbatim tesseract output from the pilot fixture (a Nationals at Giants
+verbatim tesseract output from the pilot fixture (a Foxes at Gulls
 broadcast), including its mistakes, so the parser is tested against what the
 engine actually returns rather than against clean text.
 """
@@ -98,7 +98,7 @@ def test_pitch_graphic_when_the_unit_is_garbled():
 
 
 def test_implausible_speeds_and_non_pitches_are_not_graphics():
-    _, pitches, _ = parse_overlay("WSH 2 SF 0 ATTENDANCE 41213")
+    _, pitches, _ = parse_overlay("CAP 2 HBR 0 ATTENDANCE 41213")
     assert pitches == []
 
 

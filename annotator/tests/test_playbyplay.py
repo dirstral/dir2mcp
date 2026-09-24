@@ -158,7 +158,7 @@ def test_a_missing_inning_is_omitted_rather_than_guessed(roster):
 # whichever role ranks first. As an entity it is exact, because `event`
 # already records the role the id is acting in.
 
-BOTH_CLUBS = {"away_team": "Washington Nationals", "home_team": "San Francisco Giants"}
+BOTH_CLUBS = {"away_team": "Capital City Foxes", "home_team": "Harbor City Gulls"}
 
 
 def _pitch_with_clubs(pitcher, batter, *, top_inning, **kw):
@@ -171,11 +171,11 @@ def _pitch_with_clubs(pitcher, batter, *, top_inning, **kw):
 
 def test_the_pitch_carries_the_fielding_club_and_the_at_bat_the_batting_club(roster):
     """Bottom half: the home side bats, so our rostered batter is a Giant and
-    the pitcher he faces is fielding for Washington."""
+    the pitcher he faces is fielding for Capital City."""
     ev = _pitch_with_clubs(OPP_PITCHER, RAMOS, top_inning=False)
     cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
     at_bat = next(c for c in cues if c.event == "at_bat")
-    assert at_bat.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert at_bat.entity_ids == ("player:ramos-heliot", "team:harbor-city-gulls")
 
 
 def test_the_half_inning_decides_which_club_is_batting(roster):
@@ -185,7 +185,7 @@ def test_the_half_inning_decides_which_club_is_batting(roster):
     ev = _pitch_with_clubs(WEBB, OPP_BATTER, top_inning=True)
     cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
     pitch = next(c for c in cues if c.event == "pitch")
-    assert pitch.entity_ids == ("player:webb-logan", "team:san-francisco-giants")
+    assert pitch.entity_ids == ("player:webb-logan", "team:harbor-city-gulls")
 
     # ... and in the bottom half the same pitcher would be fielding for the
     # visitors, so the club is genuinely derived rather than constant.
@@ -194,7 +194,7 @@ def test_the_half_inning_decides_which_club_is_batting(roster):
         c for c in PlayByPlayRecognizer([flipped], 0.0, roster).recognize(MEDIA)
         if c.event == "pitch"
     )
-    assert pitch.entity_ids == ("player:webb-logan", "team:washington-nationals")
+    assert pitch.entity_ids == ("player:webb-logan", "team:capital-city-foxes")
 
 
 def test_both_roles_in_one_pitch_get_opposite_clubs(roster):
@@ -203,8 +203,8 @@ def test_both_roles_in_one_pitch_get_opposite_clubs(roster):
     ev = _pitch_with_clubs(WEBB, RAMOS, top_inning=True)
     cues = PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA)
     by_event = {c.event: c.entity_ids for c in cues}
-    assert by_event["pitch"] == ("player:webb-logan", "team:san-francisco-giants")
-    assert by_event["at_bat"] == ("player:ramos-heliot", "team:washington-nationals")
+    assert by_event["pitch"] == ("player:webb-logan", "team:harbor-city-gulls")
+    assert by_event["at_bat"] == ("player:ramos-heliot", "team:capital-city-foxes")
 
 
 def test_the_club_stays_out_of_the_cue_text(roster):
@@ -212,8 +212,8 @@ def test_the_club_stays_out_of_the_cue_text(roster):
     retrieval regression that motivated this comes straight back."""
     ev = _pitch_with_clubs(WEBB, RAMOS, top_inning=True)
     for cue in PlayByPlayRecognizer([ev], 0.0, roster).recognize(MEDIA):
-        assert "Giants" not in cue.text
-        assert "Nationals" not in cue.text
+        assert "Gulls" not in cue.text
+        assert "Foxes" not in cue.text
 
 
 def test_a_feed_without_clubs_emits_exactly_what_it_did_before(roster):
@@ -229,9 +229,9 @@ def test_the_club_id_round_trips_through_the_emit_label_fallback():
     (`id.split(":")[-1].replace("-", " ").title()`). The slug has to survive
     that trip, or the wire carries an id nobody can read."""
     from dirstral_annotator.recognizers.playbyplay import team_id
-    tid = team_id("San Francisco Giants")
-    assert tid == "team:san-francisco-giants"
-    assert tid.split(":", 1)[-1].replace("-", " ").title() == "San Francisco Giants"
+    tid = team_id("Harbor City Gulls")
+    assert tid == "team:harbor-city-gulls"
+    assert tid.split(":", 1)[-1].replace("-", " ").title() == "Harbor City Gulls"
 
 
 def test_a_club_name_that_slugs_to_nothing_is_dropped():
@@ -258,7 +258,7 @@ def test_a_club_name_that_slugs_to_nothing_is_dropped():
 
 PILOT = Path(__file__).parent / "fixtures" / "gumbo_reference_game.json"
 
-#: Game 823215, Washington at San Francisco: what the feed records.
+#: Game 700001, Capital City at Harbor City: what the feed records.
 PILOT_HOME_RUNS = 6
 PILOT_STRIKEOUTS = 13
 PILOT_HOME_RUN_HITTERS = {
@@ -304,7 +304,7 @@ def test_the_outcome_becomes_its_own_event_keyed_on_the_batter(roster):
     """The whole fix in one assertion: the outcome is selectable."""
     cues = PlayByPlayRecognizer([_outcome("home_run")], 0.0, roster).recognize(MEDIA)
     homer = next(c for c in cues if c.event == "home_run")
-    assert homer.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert homer.entity_ids == ("player:ramos-heliot", "team:harbor-city-gulls")
     assert homer.start_s == 997.0 and homer.end_s == 1005.0  # the ending pitch
 
 
@@ -317,7 +317,7 @@ def test_the_outcome_cue_reads_as_a_sentence(roster):
     assert homer.text.startswith("Home run: Heliot Ramos vs Opp Ace")
     assert "bottom of the 9th" in homer.text
     assert "homers (9) on a fly ball" in homer.text
-    assert "Giants" not in homer.text  # the club stays an entity, as before
+    assert "Gulls" not in homer.text  # the club stays an entity, as before
 
 
 def test_the_outcome_is_an_extra_cue_and_changes_no_existing_one(roster):
@@ -485,13 +485,13 @@ def test_a_captivating_play_becomes_its_own_event(roster):
         [_notable(captivating_index=95)], 0.0, roster
     ).recognize(MEDIA)
     moment = next(c for c in cues if c.event == "captivating")
-    assert moment.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert moment.entity_ids == ("player:ramos-heliot", "team:harbor-city-gulls")
     assert moment.start_s == 997.0 and moment.end_s == 1005.0  # the ending pitch
     assert CAPTIVATING_IN_TEXT.search(moment.text).group(1) == "95"
     assert moment.text.startswith("Captivating moment")
     assert "Heliot Ramos" in moment.text and "bottom of the 9th" in moment.text
     assert "homers (9) on a fly ball" in moment.text
-    assert "Giants" not in moment.text  # the club stays an entity, as before
+    assert "Gulls" not in moment.text  # the club stays an entity, as before
 
 
 def test_a_play_the_feed_scores_zero_is_not_a_captivating_moment(roster):
@@ -520,7 +520,7 @@ def test_a_contested_call_becomes_its_own_event(roster):
     2 plays of the pilot game that went to a review."""
     cues = PlayByPlayRecognizer([_notable(has_review=True)], 0.0, roster).recognize(MEDIA)
     review = next(c for c in cues if c.event == "reviewed")
-    assert review.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert review.entity_ids == ("player:ramos-heliot", "team:harbor-city-gulls")
     assert review.text.startswith("Reviewed call")
     assert "homers (9) on a fly ball" in review.text
     without = PlayByPlayRecognizer([_notable()], 0.0, roster).recognize(MEDIA)
@@ -536,7 +536,7 @@ def test_a_scoring_play_states_the_runs_and_the_score(roster):
     ).recognize(MEDIA)
     scoring = next(c for c in cues if c.event == "scoring_play")
     assert scoring.text.startswith("Scoring play (4 RBI, score: away 3, home 9)")
-    assert "Nationals" not in scoring.text and "Giants" not in scoring.text
+    assert "Foxes" not in scoring.text and "Gulls" not in scoring.text
 
 
 def test_a_scoring_play_with_no_rbi_states_no_rbi(roster):
@@ -555,7 +555,7 @@ def test_a_batted_ball_carries_every_measurement_the_feed_took(roster):
     in the feed's own units, and a client ranks on it."""
     cues = PlayByPlayRecognizer([_notable(hit_data=HARD_HIT)], 0.0, roster).recognize(MEDIA)
     hit = next(c for c in cues if c.event == "batted_ball")
-    assert hit.entity_ids == ("player:ramos-heliot", "team:san-francisco-giants")
+    assert hit.entity_ids == ("player:ramos-heliot", "team:harbor-city-gulls")
     assert hit.text.startswith(
         "Batted ball: Heliot Ramos vs Opp Ace (bottom of the 9th): "
         "exit velocity 107 mph, launch angle 28 degrees, distance 421 ft, "
@@ -646,7 +646,7 @@ def test_no_new_event_can_take_a_role_event_name():
 
 # --- the pilot game, whole --------------------------------------------------
 
-#: Game 823215 again, counted off the feed: 84 plays, of which 43 score 0 on the
+#: Game 700001 again, counted off the feed: 84 plays, of which 43 score 0 on the
 #: captivating index, 2 went to a review and 15 scored a run; 66 of the 344
 #: pitches were hit, and the feed measured every one of them.
 PILOT_CAPTIVATING = 41

@@ -106,7 +106,7 @@ def test_two_requests_fetch_a_game_pk_once(monkeypatch, roster, media):
     """The path the measurement condemns: 2.9 s median per fetch, from a service
     the recognizer does not need to be live."""
     fetches = _counted(monkeypatch, "fetch_game")
-    pipeline = _pipeline(roster, media, _anchored(game_pk=823215))
+    pipeline = _pipeline(roster, media, _anchored(game_pk=700001))
 
     first = pipeline.cues_for(media)
     second = pipeline.cues_for(media)
@@ -169,7 +169,7 @@ def test_a_feed_that_stops_reading_cannot_break_a_later_request(
         return payload
 
     monkeypatch.setattr(ground_truth, "fetch_game", once_then_never)
-    pipeline = _pipeline(roster, media, _anchored(game_pk=823215))
+    pipeline = _pipeline(roster, media, _anchored(game_pk=700001))
 
     first = pipeline.cues_for(media)
     assert first
