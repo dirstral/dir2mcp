@@ -364,7 +364,7 @@ dir2mcp up --listen 0.0.0.0:8087
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |
 
-Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
+Running `dir2mcp` with no arguments, or any command with `--help` (or `-h`), prints usage to stdout and exits 0.
 `ask`, `search`, `open-file`, and `list-files` are legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
 
 ### Recovering from a failed embed run
