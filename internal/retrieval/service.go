@@ -1243,14 +1243,19 @@ func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
 // live, so a document re-created under an evicted path becomes visible again
 // (issue #687).
 func (s *Service) registerChunkMetadata(label uint64, metadata model.SearchHit) {
-	relPath := normalizeEvictPath(metadata.RelPath)
 	s.metaMu.Lock()
+	s.registerChunkMetadataLocked(label, metadata)
+	s.metaMu.Unlock()
+}
+
+// registerChunkMetadataLocked is registerChunkMetadata for a caller that holds
+// metaMu.
+func (s *Service) registerChunkMetadataLocked(label uint64, metadata model.SearchHit) {
 	s.chunkByLabel[label] = metadata
 	s.metadataRegistered = true
-	if relPath != "" {
+	if relPath := normalizeEvictPath(metadata.RelPath); relPath != "" {
 		delete(s.tombstonedRelPaths, relPath)
 	}
-	s.metaMu.Unlock()
 }
 
 // EvictDocument removes all in-memory chunk metadata for one document.
@@ -1471,20 +1476,23 @@ func (s *Service) pruneTombstonedHits(ctx context.Context, hits []model.SearchHi
 // chunk_id belongs to exactly one axis in production, so metadata is kept once in
 // chunkByLabel (issue #429 D1).
 func (s *Service) SetChunkMetadataForIndex(indexName string, label uint64, metadata model.SearchHit) {
-	s.registerChunkMetadata(label, metadata)
-	s.recordChunkAxis(label, indexName)
+	// One critical section for both updates: an eviction between them would
+	// drop the label and then see its axis recorded again, so index=auto would
+	// count a chunk that no longer exists.
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.registerChunkMetadataLocked(label, metadata)
+	s.recordChunkAxisLocked(label, indexName)
 }
 
-// recordChunkAxis counts a registered chunk under its axis, for index=auto.
-// Re-registering a label under the same axis changes nothing; under another
-// axis it moves the count.
-func (s *Service) recordChunkAxis(label uint64, axis string) {
+// recordChunkAxisLocked counts a registered chunk under its axis, for
+// index=auto. The caller holds metaMu. Re-registering a label under the same
+// axis changes nothing; under another axis it moves the count.
+func (s *Service) recordChunkAxisLocked(label uint64, axis string) {
 	axis = strings.ToLower(strings.TrimSpace(axis))
 	if axis != "text" && axis != "code" {
 		return
 	}
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
 	if prev, ok := s.axisByLabel[label]; ok {
 		if prev == axis {
 			return
