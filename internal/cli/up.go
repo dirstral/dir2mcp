@@ -646,14 +646,17 @@ func (a *App) probeEmbedProvider(emb model.Embedder, prof provider.Profile) erro
 		// a local server that is not started yet, and "indexing stalls" is a
 		// much worse way to find that out.
 		if a.stderr != nil {
-			where := strings.TrimSpace(prof.BaseURL)
+			// base_url can carry userinfo or a query token, and the wrapped
+			// cause repeats the request URL, so both go through the support
+			// bundle's credential redactor before they reach stderr.
+			where := redactBundleSecrets(strings.TrimSpace(prof.BaseURL))
 			if where == "" {
 				where = "its endpoint"
 			}
 			// The adapter's own message ("request failed") hides the useful
 			// part; the wrapped cause says "connection refused" or names the
 			// timeout.
-			detail := model.ProviderErrorDetail(err)
+			detail := redactBundleSecrets(model.ProviderErrorDetail(err))
 			writef(a.stderr, "WARNING: embedding provider %q is not reachable at %s (%s). The server starts anyway and indexing retries; if this is a local server, check that it is running.\n",
 				prof.Name, where, detail)
 		}

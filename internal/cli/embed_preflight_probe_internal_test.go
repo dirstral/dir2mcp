@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/providerfactory"
 )
 
 // probeStubEmbedder implements model.Embedder for the preflight-probe test: it
@@ -95,4 +97,55 @@ func TestProbeEmbedProvider(t *testing.T) {
 			t.Fatalf("nil embedder should be a no-op, got %v", err)
 		}
 	})
+}
+
+// closedLocalAddr returns a loopback host:port that nothing listens on: the
+// listener is opened to reserve a free port and closed before the return.
+func closedLocalAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return addr
+}
+
+// TestProbeEmbedProvider_RealOpenAIAdapterUnreachable drives the real
+// OpenAI-compatible adapter (the one `up` builds for a local Ollama or LM
+// Studio profile) against a closed port. The stub subtests above construct the
+// retryable error themselves, so they cannot see the adapter return a plain
+// error or Retryable=false; this one can. It also pins that the warning
+// redacts credentials in base_url and in the wrapped cause, which repeats the
+// request URL.
+func TestProbeEmbedProvider_RealOpenAIAdapterUnreachable(t *testing.T) {
+	addr := closedLocalAddr(t)
+	prof := provider.Profile{
+		Name:           "local",
+		Kind:           provider.KindOpenAI,
+		BaseURL:        "http://probeuser:probe-secret@" + addr + "/v1?api_key=probe-token",
+		EmbedTextModel: "nomic-embed-text",
+		CredentialLess: true,
+	}
+	emb, err := providerfactory.Embedder(prof)
+	if err != nil {
+		t.Fatalf("build adapter: %v", err)
+	}
+	var stderr bytes.Buffer
+	a := &App{stderr: &stderr}
+	if err := a.probeEmbedProvider(emb, prof); err != nil {
+		t.Fatalf("an unreachable local server blocked startup: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "is not reachable") || !strings.Contains(out, addr) {
+		t.Fatalf("want a warning that names the endpoint %s, got %q", addr, out)
+	}
+	for _, secret := range []string{"probeuser", "probe-secret", "probe-token"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("warning leaks %q: %q", secret, out)
+		}
+	}
 }
