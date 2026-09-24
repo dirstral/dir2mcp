@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -62,28 +61,6 @@ func configInitPayload(configPath string, created, apiKeySaved bool, nextSteps, 
 		payload["profile_settings"] = profileLines
 	}
 	return payload
-}
-
-// profileSettingsYAML returns the YAML lines that set the RAG values the
-// wizard's corpus profile changed, for an existing config file that is not
-// rewritten. It returns nil when the profile changed nothing.
-func profileSettingsYAML(before, after config.Config) []string {
-	var lines []string
-	if after.RAGKDefault != before.RAGKDefault {
-		lines = append(lines, fmt.Sprintf("  k_default: %d", after.RAGKDefault))
-	}
-	if after.RAGMaxContextChars != before.RAGMaxContextChars {
-		lines = append(lines, fmt.Sprintf("  max_context_chars: %d", after.RAGMaxContextChars))
-	}
-	if after.RAGSystemPrompt != before.RAGSystemPrompt {
-		// One double-quoted line: the loader reads no YAML block scalars, and it
-		// unquotes a double-quoted value with strconv.Unquote.
-		lines = append(lines, "  system_prompt: "+strconv.Quote(after.RAGSystemPrompt))
-	}
-	if len(lines) == 0 {
-		return nil
-	}
-	return append([]string{"rag:"}, lines...)
 }
 
 // writeProfileSettings tells the operator how to apply a profile to a config
@@ -269,7 +246,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	// the config, so a rewrite deleted every setting it cannot express (provider
 	// profiles, the embed binding, language routes, comments). A profile the
 	// wizard picked is printed as lines to add instead.
-	profileLines := profileSettingsYAML(before, cfg)
+	profileLines := setupwizard.ProfileSettingsYAML(before, cfg)
 	if code := a.writeConfigInitFile(global, configPath, created, cfg, chosenProfile, profileLines); code >= 0 {
 		return code
 	}

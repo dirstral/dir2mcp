@@ -2001,7 +2001,7 @@ func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, c
 	// LoadFile could not parse, which was replaced by the defaults.
 	if configExisted {
 		if !opts.jsonOutput {
-			writeProfileSettings(a.stdout, res.Profile, configPath, profileSettingsYAML(before, fileCfg))
+			writeProfileSettings(a.stdout, res.Profile, configPath, setupwizard.ProfileSettingsYAML(before, fileCfg))
 		}
 	} else if err := config.SaveFile(configPath, fileCfg); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
