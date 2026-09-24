@@ -1994,8 +1994,16 @@ func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, c
 			fileCfg = existing
 		}
 	}
+	before := fileCfg
 	setupwizard.ApplyCorpusProfile(&fileCfg, res.Profile)
-	if err := config.SaveFile(configPath, fileCfg); err != nil {
+	// An existing file is never rewritten (see runConfigInit): a rewrite deleted
+	// every setting the flat saved form cannot express. That includes a file
+	// LoadFile could not parse, which was replaced by the defaults.
+	if configExisted {
+		if !opts.jsonOutput {
+			writeProfileSettings(a.stdout, res.Profile, configPath, profileSettingsYAML(before, fileCfg))
+		}
+	} else if err := config.SaveFile(configPath, fileCfg); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
 		return exitGeneric
 	}
