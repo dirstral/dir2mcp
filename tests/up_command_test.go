@@ -730,11 +730,13 @@ func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 }
 
 // upTempDir is t.TempDir for a test that runs `up`, which leaves a sqlite
-// store in the dir. On Windows a closed sqlite handle can hold the file for a
-// short time after Close, and t.TempDir's cleanup then fails the test with
-// "The process cannot access the file because it is being used by another
-// process". The removal retries for up to two seconds there, as
-// tests/embedqueue does; a handle that stays open still fails the test.
+// store in the dir. On a Windows runner something outside dir2mcp can hold
+// meta.sqlite after `up` has closed it (a file scanner, most likely), and
+// t.TempDir's cleanup then fails the test with "The process cannot access the
+// file because it is being used by another process". A 2 s retry was not
+// enough there. On macOS, lsof shows no handle to meta.sqlite once `up`
+// returns, so dir2mcp itself does not leak it. The removal retries for up to
+// 10 s on Windows; a handle held longer still fails the test.
 func upTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "dir2mcp-up-")
@@ -743,8 +745,8 @@ func upTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() {
 		err := os.RemoveAll(dir)
-		for i := 0; err != nil && runtime.GOOS == "windows" && i < 40; i++ {
-			time.Sleep(50 * time.Millisecond)
+		for i := 0; err != nil && runtime.GOOS == "windows" && i < 100; i++ {
+			time.Sleep(100 * time.Millisecond)
 			err = os.RemoveAll(dir)
 		}
 		if err != nil {
