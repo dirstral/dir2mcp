@@ -116,7 +116,7 @@ func statsModelsOverHTTP(t *testing.T, mcpURL string) map[string]interface{} {
 // operator reads that OCR is active on a corpus where no document is extracted
 // at all.
 func TestUpStatsReportsNoExtractionEngineWhenExtractionIsOff(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	// A credential is present on purpose: it makes an OCR profile resolve, so the
 	// pre-fix answer is a real model id rather than an empty string.
 	t.Setenv("MISTRAL_API_KEY", "test-key")

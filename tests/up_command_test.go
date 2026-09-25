@@ -41,7 +41,7 @@ type rootConnectionFile struct {
 }
 
 func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -50,9 +50,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
+		code := runUpUntilServing(t, app, []string{"up", "--listen", "127.0.0.1:0"}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -127,7 +125,7 @@ func assertRootConnectionFile(t *testing.T, connection rootConnectionFile) {
 }
 
 func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -166,7 +164,7 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 		t.Skip("file permission semantics differ on Windows")
 	}
 
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	// ensure there is something to upset loadDotEnvFiles
 	bad := filepath.Join(tmp, ".env")
 	if err := os.WriteFile(bad, []byte("FOO=bar"), 0); err != nil {
@@ -198,7 +196,7 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 // ingestor factory.  Previously runReindex always used config.Default(),
 // causing the ingest service to be unaware of any environment overrides.
 func TestReindexPassesConfigToNewIngestor(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	// Exercise a non-default value so we can distinguish default vs
 	// loaded. The provider clean break (#38) removed the MISTRAL_*
 	// env→Config mapping; DIR2MCP_DOCLING_COMMAND remains a loader-applied
@@ -230,7 +228,7 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 }
 
 func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -295,7 +293,7 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 }
 
 func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -313,17 +311,14 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{
+		code := runUpUntilServing(t, app, []string{
 			"up",
 			"--json",
 			"--auth",
 			"file:" + customTokenPath,
 			"--listen",
 			"127.0.0.1:0",
-		})
+		}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -372,7 +367,7 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 }
 
 func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -403,7 +398,7 @@ func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
 }
 
 func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -437,7 +432,7 @@ func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 }
 
 func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -446,9 +441,7 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up"})
+		code := runUpUntilServing(t, app, []string{"up"}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -465,7 +458,7 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 }
 
 func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -474,9 +467,7 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public"})
+		code := runUpUntilServing(t, app, []string{"up", "--public"}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -493,7 +484,7 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 }
 
 func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -515,7 +506,7 @@ func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
 }
 
 func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -537,7 +528,7 @@ func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
 }
 
 func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -546,9 +537,7 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"})
+		code := runUpUntilServing(t, app, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -556,7 +545,7 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 }
 
 func TestUpPublicRespectsExplicitListen(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -565,9 +554,7 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public", "--listen", "127.0.0.1:0"})
+		code := runUpUntilServing(t, app, []string{"up", "--public", "--listen", "127.0.0.1:0"}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -584,7 +571,7 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 }
 
 func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -593,9 +580,7 @@ func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public", "--json", "--read-only"})
+		code := runUpUntilServing(t, app, []string{"up", "--public", "--json", "--read-only"}, 2*time.Second)
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -744,13 +729,86 @@ func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 	}
 }
 
-// upRunWindow is how long these tests let `up` run before the context ends
-// it. The store init must finish inside it. A Windows runner flushes files far
-// more slowly, and its sqlite store init alone can take over two seconds, so
-// the window is four times longer there (as raceScaled does in tests/cli).
-func upRunWindow() time.Duration {
-	if runtime.GOOS == "windows" {
-		return 8 * time.Second
+// upTempDir is t.TempDir for a test that runs `up`, which leaves a sqlite
+// store in the dir. On a Windows runner something outside dir2mcp can hold
+// meta.sqlite after `up` has closed it (a file scanner, most likely), and
+// t.TempDir's cleanup then fails the test with "The process cannot access the
+// file because it is being used by another process". A 2 s retry was not
+// enough there. On macOS, lsof shows no handle to meta.sqlite once `up`
+// returns, so dir2mcp itself does not leak it. The removal retries for up to
+// 10 s on Windows; a handle held longer still fails the test.
+func upTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dir2mcp-up-")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
 	}
-	return 2 * time.Second
+	t.Cleanup(func() {
+		err := os.RemoveAll(dir)
+		for i := 0; err != nil && runtime.GOOS == "windows" && i < 100; i++ {
+			time.Sleep(100 * time.Millisecond)
+			err = os.RemoveAll(dir)
+		}
+		if err != nil {
+			t.Errorf("remove temp dir %s: %v", dir, err)
+		}
+	})
+	return dir
+}
+
+// runUpUntilServing runs `up` until it serves (connection.json names a URL),
+// lets it serve for serveWindow, and then stops it. It returns up's exit code,
+// also when up exits by itself first (a test that expects a startup failure).
+// The window starts only once up serves: a fixed deadline from the start let a
+// slow Windows runner spend the whole window in store init.
+func runUpUntilServing(t *testing.T, app *cli.App, args []string, serveWindow time.Duration) int {
+	t.Helper()
+	stateDir := ".dir2mcp"
+	for i, a := range args {
+		if a == "--state-dir" && i+1 < len(args) {
+			stateDir = args[i+1]
+		}
+	}
+	connectionPath := filepath.Join(stateDir, "connection.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan int, 1)
+	go func() { done <- app.RunWithContext(ctx, args) }()
+	startDeadline := time.After(2 * time.Minute)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case code := <-done:
+			return code
+		case <-startDeadline:
+			cancel()
+			<-done
+			t.Fatalf("up did not start serving within %s", 2*time.Minute)
+			return -1
+		case <-tick.C:
+			if connectionServing(connectionPath) {
+				select {
+				case code := <-done:
+					return code
+				case <-time.After(serveWindow):
+				}
+				cancel()
+				return <-done
+			}
+		}
+	}
+}
+
+// connectionServing reports whether connection.json exists and names a URL,
+// which `up` writes once it serves.
+func connectionServing(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var c struct {
+		URL string `json:"url"`
+	}
+	return json.Unmarshal(raw, &c) == nil && c.URL != ""
 }

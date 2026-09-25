@@ -84,9 +84,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
+		code := runUpUntilServing(t, app, []string{"up", "--listen", "127.0.0.1:0"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -174,9 +172,7 @@ func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
+		code := runUpUntilServing(t, app, []string{"up", "--listen", "127.0.0.1:0"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -233,15 +229,12 @@ func TestUpSupportsGlobalDirAndStateDirFlags(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{
+		code := runUpUntilServing(t, app, []string{
 			"--dir", rootDir,
 			"--state-dir", stateDir,
 			"up",
 			"--listen", "127.0.0.1:0",
-		})
+		}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -321,15 +314,12 @@ func TestUpTLSConnectionURLUsesHTTPS(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{
+		code := runUpUntilServing(t, app, []string{
 			"up",
 			"--listen", "127.0.0.1:0",
 			"--tls-cert", certPath,
 			"--tls-key", keyPath,
-		})
+		}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -360,15 +350,12 @@ func TestUpWarnsAboutFacilitatorTokenConflict(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{
+		code := runUpUntilServing(t, app, []string{
 			"up",
 			"--listen", "127.0.0.1:0",
 			"--x402-facilitator-token-file", tokenPath,
 			"--x402-facilitator-token", "ignored",
-		})
+		}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -625,17 +612,14 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{
+		code := runUpUntilServing(t, app, []string{
 			"up",
 			"--json",
 			"--auth",
 			"file:" + customTokenPath,
 			"--listen",
 			"127.0.0.1:0",
-		})
+		}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -697,10 +681,7 @@ func TestUpJSONPreloadErrorEmitsWarningEvent(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{"up", "--json", "--listen", "127.0.0.1:0"})
+		code := runUpUntilServing(t, app, []string{"up", "--json", "--listen", "127.0.0.1:0"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -818,9 +799,7 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up"})
+		code := runUpUntilServing(t, app, []string{"up"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -846,9 +825,7 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public"})
+		code := runUpUntilServing(t, app, []string{"up", "--public"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -918,9 +895,7 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"})
+		code := runUpUntilServing(t, app, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -969,15 +944,12 @@ func TestUpX402OnAllowsMissingFields(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{
+		code := runUpUntilServing(t, app, []string{
 			"up",
 			"--x402", "on",
 			"--listen", "127.0.0.1:0",
 			"--json",
-		})
+		}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -1017,9 +989,7 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public", "--listen", "127.0.0.1:0"})
+		code := runUpUntilServing(t, app, []string{"up", "--public", "--listen", "127.0.0.1:0"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -1045,9 +1015,7 @@ func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
-		defer cancel()
-		code := app.RunWithContext(ctx, []string{"up", "--public", "--json", "--read-only"})
+		code := runUpUntilServing(t, app, []string{"up", "--public", "--json", "--read-only"}, raceScaled(2*time.Second))
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
@@ -1242,4 +1210,61 @@ func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 	if err := ci.Reindex(context.Background()); err == nil {
 		t.Fatal("expected error when store and capturedHash are nil")
 	}
+}
+
+// runUpUntilServing runs `up` until it serves (connection.json names a URL),
+// lets it serve for serveWindow, and then stops it. It returns up's exit code,
+// also when up exits by itself first (a test that expects a startup failure).
+// The window starts only once up serves: a fixed deadline from the start let a
+// slow Windows runner spend the whole window in store init.
+func runUpUntilServing(t *testing.T, app *cli.App, args []string, serveWindow time.Duration) int {
+	t.Helper()
+	stateDir := ".dir2mcp"
+	for i, a := range args {
+		if a == "--state-dir" && i+1 < len(args) {
+			stateDir = args[i+1]
+		}
+	}
+	connectionPath := filepath.Join(stateDir, "connection.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan int, 1)
+	go func() { done <- app.RunWithContext(ctx, args) }()
+	startDeadline := time.After(raceScaled(60 * time.Second))
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case code := <-done:
+			return code
+		case <-startDeadline:
+			cancel()
+			<-done
+			t.Fatalf("up did not start serving within %s", raceScaled(60*time.Second))
+			return -1
+		case <-tick.C:
+			if connectionServing(connectionPath) {
+				select {
+				case code := <-done:
+					return code
+				case <-time.After(serveWindow):
+				}
+				cancel()
+				return <-done
+			}
+		}
+	}
+}
+
+// connectionServing reports whether connection.json exists and names a URL,
+// which `up` writes once it serves.
+func connectionServing(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var c struct {
+		URL string `json:"url"`
+	}
+	return json.Unmarshal(raw, &c) == nil && c.URL != ""
 }
