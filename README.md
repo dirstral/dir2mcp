@@ -229,6 +229,37 @@ or winget package yet.
 2. Extract `dir2mcp.exe` into a folder on your `PATH`.
 3. Open a new terminal and run `dir2mcp version`.
 
+Quickstart in PowerShell (fully local, with [Ollama](https://ollama.com)):
+
+```powershell
+ollama pull nomic-embed-text; ollama pull qwen2.5:7b
+cd $HOME\notes                      # any folder you want to ask about
+@'
+providers:
+  local:
+    kind: openai
+    base_url: http://127.0.0.1:11434/v1
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: qwen2.5:7b
+model:
+  embed: {provider: local}
+  chat: {provider: local}
+'@ | Set-Content -Encoding utf8 .dir2mcp.yaml
+dir2mcp up                          # the server stays in this terminal
+```
+
+With a cloud key instead, set it for the session and skip the file:
+`$env:MISTRAL_API_KEY = "..."`, then `dir2mcp up`.
+
+`up` keeps this terminal. Open a second terminal in the same folder to ask:
+
+```powershell
+cd $HOME\notes
+dir2mcp ask "When is the budget meeting?"
+dir2mcp down                        # stops the server in the first terminal
+```
+
 What CI proves on Windows: the `windows` job in `.github/workflows/go.yml` runs
 the Go test suite on `windows-latest` (amd64). One end-to-end test in that suite
 runs `up --foreground` on a folder with nested directories, then `status`,

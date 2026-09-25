@@ -4,6 +4,7 @@ package cli
 
 import (
 	"fmt"
+	"math"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,7 +16,9 @@ import (
 // #418). It reports ok=false when the process is gone or its times cannot be
 // read. Callers then fall back to a bare liveness check.
 func processStartToken(pid int) (string, bool) {
-	if pid <= 0 {
+	// A pid outside the DWORD range would alias another process after the
+	// uint32 conversion below.
+	if pid <= 0 || uint64(pid) > math.MaxUint32 {
 		return "", false
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))

@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -16,7 +17,9 @@ import (
 // access-denied error means the process exists but belongs to another user;
 // the check treats that as alive, the same as EPERM on unix.
 func processIsAlive(pid int) bool {
-	if pid <= 0 {
+	// A pid outside the Windows DWORD range would alias another process after
+	// the uint32 conversion below, so it is never alive.
+	if pid <= 0 || uint64(pid) > math.MaxUint32 {
 		return false
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))

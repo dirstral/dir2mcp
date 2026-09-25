@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"syscall"
 )
@@ -15,7 +16,9 @@ import (
 // signal; ESRCH means "no such process", EPERM means "exists but not
 // owned by us" (which we treat as "alive enough to leave alone").
 func processIsAlive(pid int) bool {
-	if pid <= 0 {
+	// kill(2) takes a 32-bit pid_t, so a larger pid would alias another
+	// process (even this one) after truncation. It is never alive.
+	if pid <= 0 || pid > math.MaxInt32 {
 		return false
 	}
 	proc, err := os.FindProcess(pid)
