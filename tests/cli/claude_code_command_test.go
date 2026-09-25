@@ -24,6 +24,10 @@ printf '%s\n' "$*" >> "$state/calls.log"
 case "$2" in
 add-json)
   name="$5"
+  if [ -n "$FAKE_CLAUDE_FAIL_ADD" ]; then
+    echo "Invalid MCP server configuration"
+    exit 1
+  fi
   if [ -f "$state/server-$name" ]; then
     echo "MCP server $name already exists in $4 config"
     exit 1
@@ -129,14 +133,21 @@ func TestClaudeCodeInstallCallsAddJSONWithHTTPEntry(t *testing.T) {
 	calls := fakeClaudeCalls(t, fake)
 	// The token must not reach the argv of the claude process.
 	assertNoToken(t, "tok-cc-install", append([]string{stdout, stderr}, calls...)...)
-	if len(calls) != 2 {
-		t.Fatalf("want remove + add-json calls, got %q", calls)
+	// Probe (clear, add, remove) under a temporary name, then replace.
+	if len(calls) != 5 {
+		t.Fatalf("want 5 calls (probe clear/add/remove, remove, add-json), got %q", calls)
 	}
-	if calls[0] != "mcp remove notes-dir2mcp --scope user" {
-		t.Fatalf("first call = %q, want the pre-add remove", calls[0])
+	wantPrefixes := []string{
+		"mcp remove notes-dir2mcp-dir2mcp-probe --scope user",
+		"mcp add-json --scope user notes-dir2mcp-dir2mcp-probe {",
+		"mcp remove notes-dir2mcp-dir2mcp-probe --scope user",
+		"mcp remove notes-dir2mcp --scope user",
+		"mcp add-json --scope user notes-dir2mcp {",
 	}
-	if !strings.HasPrefix(calls[1], "mcp add-json --scope user notes-dir2mcp {") {
-		t.Fatalf("second call = %q, want add-json", calls[1])
+	for i, want := range wantPrefixes {
+		if !strings.HasPrefix(calls[i], want) {
+			t.Fatalf("call %d = %q, want prefix %q", i, calls[i], want)
+		}
 	}
 
 	entry := readFakeEntry(t, fake, "notes-dir2mcp")
@@ -229,6 +240,59 @@ func TestClaudeCodeInstallRejectsANonBearerToken(t *testing.T) {
 		if calls := fakeClaudeCalls(t, fake); len(calls) != 0 {
 			t.Errorf("token %q: claude was called %q, want no call", bad, calls)
 		}
+	}
+}
+
+// TestClaudeCodeFailedReinstallKeepsTheOldRegistration pins that a replace
+// that claude refuses leaves the existing registration in place: install adds
+// the entry under a probe name first and touches the old entry only after
+// claude accepts it.
+func TestClaudeCodeFailedReinstallKeepsTheOldRegistration(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-keep")
+	fake := installFakeClaude(t, tmp)
+	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
+		t.Fatalf("first install exit code = %d stderr=%s", code, stderr)
+	}
+	before, err := os.ReadFile(filepath.Join(fake, "server-notes"))
+	if err != nil {
+		t.Fatalf("first install did not register: %v", err)
+	}
+
+	t.Setenv("FAKE_CLAUDE_FAIL_ADD", "1")
+	code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes")
+	if code == 0 {
+		t.Fatal("reinstall succeeded, want a failure from the refused add-json")
+	}
+	if !strings.Contains(stderr, "existing registration is unchanged") {
+		t.Errorf("stderr = %q, want it to say the registration is unchanged", stderr)
+	}
+	after, err := os.ReadFile(filepath.Join(fake, "server-notes"))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("the old registration changed or is gone (err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(fake, "server-notes-dir2mcp-probe")); !os.IsNotExist(err) {
+		t.Errorf("a probe entry is left behind (stat err %v)", err)
+	}
+}
+
+// TestClaudeCodeInstallRejectsUnicodeWhitespaceAroundTheToken pins that the
+// token is checked as the helper reads it. strings.TrimSpace drops U+00A0 but
+// the helper's tr does not, so such a file would send an invalid header.
+func TestClaudeCodeInstallRejectsUnicodeWhitespaceAroundTheToken(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-nbsp")
+	if err := os.WriteFile(tokenPath, []byte("tok-cc-nbsp\u00a0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := installFakeClaude(t, tmp)
+	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes")
+	if code == 0 || !strings.Contains(stderr, "not a valid bearer token") {
+		t.Fatalf("exit=%d stderr=%q, want the bearer-token refusal", code, stderr)
+	}
+	assertNoToken(t, "tok-cc-nbsp", stdout, stderr)
+	if calls := fakeClaudeCalls(t, fake); len(calls) != 0 {
+		t.Errorf("claude was called %q, want no call", calls)
 	}
 }
 

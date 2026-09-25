@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -176,14 +177,30 @@ var bearerTokenSyntax = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
 // checkBearerToken rejects a token that is not a valid RFC 6750 bearer
 // credential. The error never quotes the token.
 func checkBearerToken(token string) error {
-	if !bearerTokenSyntax.MatchString(strings.TrimSpace(token)) {
+	if !bearerTokenSyntax.MatchString(token) {
 		return errors.New("the auth token is not a valid bearer token (RFC 6750: letters, digits and -._~+/ with optional trailing =); set a token of that form, or remove the token file to have one generated")
 	}
 	return nil
 }
 
+// helperTokenWhitespace is the whitespace the helper's tr deletes. The check
+// trims exactly these, not every Unicode space as strings.TrimSpace does: a
+// token file that ends in, say, U+00A0 would pass a TrimSpace check while the
+// helper sends the U+00A0 in the header.
+const helperTokenWhitespace = " \t\r\n"
+
+// checkTokenFile checks the token as the helper reads it: the raw file with
+// only the helper's whitespace trimmed.
+func checkTokenFile(tokenPath string) error {
+	raw, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return fmt.Errorf("read token file %s: %w", tokenPath, err)
+	}
+	return checkBearerToken(strings.Trim(string(raw), helperTokenWhitespace))
+}
+
 func claudeCodeEntryJSON(t claudeCodeTarget) (string, error) {
-	if err := checkBearerToken(t.token); err != nil {
+	if err := checkTokenFile(t.tokenPath); err != nil {
 		return "", err
 	}
 	raw, err := json.Marshal(claudeCodeEntry{
@@ -294,6 +311,14 @@ func (a *App) runClaudeCodeInstall(ctx context.Context, global globalOptions, ar
 		)
 		return exitGeneric
 	}
+	// Probe first: claude must accept the entry under a temporary name before
+	// the existing registration is touched. If it refuses the entry, the old
+	// registration still works.
+	if err := probeClaudeCodeEntry(ctx, bin, t, entryJSON); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, err.Error(),
+			"The existing registration is unchanged.")
+		return exitGeneric
+	}
 	// `claude mcp add-json` refuses a name that exists. Remove our entry first
 	// so a second install replaces it (for example after the port changes).
 	replaced, err := removeClaudeCodeServer(ctx, bin, t.name, t.scope)
@@ -320,6 +345,26 @@ func (a *App) runClaudeCodeInstall(ctx context.Context, global globalOptions, ar
 	writef(a.stdout, "added MCP server %q to Claude Code (%s scope)\n", t.name, t.scope)
 	writef(a.stdout, "start a new Claude Code session, then run /mcp to see the server\n")
 	return exitSuccess
+}
+
+// claudeCodeProbeSuffix names the temporary entry probeClaudeCodeEntry adds.
+const claudeCodeProbeSuffix = "-dir2mcp-probe"
+
+// probeClaudeCodeEntry adds the entry under a temporary name and removes it
+// again. It clears a probe that an earlier, interrupted install left behind.
+func probeClaudeCodeEntry(ctx context.Context, bin string, t claudeCodeTarget, entryJSON string) error {
+	probe := t
+	probe.name = t.name + claudeCodeProbeSuffix
+	if _, err := removeClaudeCodeServer(ctx, bin, probe.name, t.scope); err != nil {
+		return err
+	}
+	if out, err := runClaudeCodeCLI(ctx, bin, claudeCodeAddArgs(probe, entryJSON)...); err != nil {
+		return fmt.Errorf("claude mcp add-json failed: %v: %s", err, out)
+	}
+	if _, err := removeClaudeCodeServer(ctx, bin, probe.name, t.scope); err != nil {
+		return fmt.Errorf("remove the probe entry %q: %w", probe.name, err)
+	}
+	return nil
 }
 
 func (a *App) runClaudeCodeUninstall(ctx context.Context, global globalOptions, args []string) int {
@@ -374,7 +419,7 @@ func (a *App) runClaudeCodeDoctor(ctx context.Context, global globalOptions, arg
 	tokenErr := error(nil)
 	if strings.TrimSpace(t.token) == "" {
 		tokenErr = fmt.Errorf("token file is empty")
-	} else if err := checkBearerToken(t.token); err != nil {
+	} else if err := checkTokenFile(t.tokenPath); err != nil {
 		tokenErr = err
 	}
 	ok := cliErr == nil && registeredErr == nil && urlErr == nil && reachErr == nil && tokenErr == nil
