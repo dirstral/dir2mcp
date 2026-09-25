@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -160,12 +161,31 @@ type claudeCodeEntry struct {
 }
 
 // claudeCodeHeadersHelper returns the shell command that prints
-// {"Authorization":"Bearer <token>"} from the token file.
+// {"Authorization":"Bearer <token>"} from the token file. It deletes every
+// whitespace character, as the server trims the token, and a valid bearer
+// token holds none (see bearerTokenSyntax).
 func claudeCodeHeadersHelper(tokenPath string) string {
-	return `printf '{"Authorization":"Bearer %s"}' "$(cat ` + shellQuote(tokenPath) + `)"`
+	return `printf '{"Authorization":"Bearer %s"}' "$(tr -d ' \t\r\n' < ` + shellQuote(tokenPath) + `)"`
+}
+
+// bearerTokenSyntax is the RFC 6750 b64token grammar that a Bearer credential
+// must match. The helper prints the token into a JSON string without escaping,
+// and a b64token holds no character that JSON must escape.
+var bearerTokenSyntax = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
+
+// checkBearerToken rejects a token that is not a valid RFC 6750 bearer
+// credential. The error never quotes the token.
+func checkBearerToken(token string) error {
+	if !bearerTokenSyntax.MatchString(strings.TrimSpace(token)) {
+		return errors.New("the auth token is not a valid bearer token (RFC 6750: letters, digits and -._~+/ with optional trailing =); set a token of that form, or remove the token file to have one generated")
+	}
+	return nil
 }
 
 func claudeCodeEntryJSON(t claudeCodeTarget) (string, error) {
+	if err := checkBearerToken(t.token); err != nil {
+		return "", err
+	}
 	raw, err := json.Marshal(claudeCodeEntry{
 		Type:          "http",
 		URL:           t.connection.URL,
@@ -354,6 +374,8 @@ func (a *App) runClaudeCodeDoctor(ctx context.Context, global globalOptions, arg
 	tokenErr := error(nil)
 	if strings.TrimSpace(t.token) == "" {
 		tokenErr = fmt.Errorf("token file is empty")
+	} else if err := checkBearerToken(t.token); err != nil {
+		tokenErr = err
 	}
 	ok := cliErr == nil && registeredErr == nil && urlErr == nil && reachErr == nil && tokenErr == nil
 	if global.jsonOutput {

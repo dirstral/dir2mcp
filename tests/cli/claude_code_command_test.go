@@ -150,7 +150,7 @@ func TestClaudeCodeInstallCallsAddJSONWithHTTPEntry(t *testing.T) {
 	if _, static := headers["Authorization"]; static {
 		t.Fatalf("the entry must not hold a static Authorization header: %v", headers)
 	}
-	wantHelper := `printf '{"Authorization":"Bearer %s"}' "$(cat '` + tokenPath + `')"`
+	wantHelper := `printf '{"Authorization":"Bearer %s"}' "$(tr -d ' \t\r\n' < '` + tokenPath + `')"`
 	if entry["headersHelper"] != wantHelper {
 		t.Fatalf("headersHelper:\n got %v\nwant %s", entry["headersHelper"], wantHelper)
 	}
@@ -179,6 +179,56 @@ func TestClaudeCodeHeadersHelperPrintsAuthorization(t *testing.T) {
 	}
 	if headers["Authorization"] != "Bearer tok-cc-helper" {
 		t.Fatalf("helper Authorization = %q", headers["Authorization"])
+	}
+}
+
+// TestClaudeCodeHeadersHelperTrimsWhitespace pins that a token file with
+// surrounding whitespace (an editor's trailing newline, a pasted space) gives
+// the same header the server accepts: the server trims the token too.
+func TestClaudeCodeHeadersHelperTrimsWhitespace(t *testing.T) {
+	tmp := t.TempDir()
+	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-trim")
+	if err := os.WriteFile(tokenPath, []byte("  tok-cc-trim\r\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := installFakeClaude(t, tmp)
+	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
+		t.Fatalf("install exit code = %d stderr=%s", code, stderr)
+	}
+	helper, _ := readFakeEntry(t, fake, "notes")["headersHelper"].(string)
+	out, err := exec.Command("/bin/sh", "-c", helper).Output()
+	if err != nil {
+		t.Fatalf("run helper: %v", err)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(out, &headers); err != nil {
+		t.Fatalf("helper output is not a JSON object: %v raw=%q", err, out)
+	}
+	if headers["Authorization"] != "Bearer tok-cc-trim" {
+		t.Fatalf("helper Authorization = %q", headers["Authorization"])
+	}
+}
+
+// TestClaudeCodeInstallRejectsANonBearerToken pins that a token outside the
+// RFC 6750 b64token grammar is refused before any claude call. Such a token is
+// not a valid Bearer credential, and the helper prints it into JSON unescaped.
+// The error must not quote the token.
+func TestClaudeCodeInstallRejectsANonBearerToken(t *testing.T) {
+	for _, bad := range []string{`tok"quote`, `tok\slash`, "tok with space", "tok\x01ctl"} {
+		tmp := t.TempDir()
+		stateDir, _ := writeClaudeStateFixture(t, tmp, bad)
+		fake := installFakeClaude(t, tmp)
+		code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes")
+		if code == 0 {
+			t.Fatalf("token %q: install succeeded, want a refusal", bad)
+		}
+		if !strings.Contains(stderr, "not a valid bearer token") {
+			t.Errorf("token %q: stderr = %q, want the bearer-token error", bad, stderr)
+		}
+		assertNoToken(t, bad, stdout, stderr)
+		if calls := fakeClaudeCalls(t, fake); len(calls) != 0 {
+			t.Errorf("token %q: claude was called %q, want no call", bad, calls)
+		}
 	}
 }
 
