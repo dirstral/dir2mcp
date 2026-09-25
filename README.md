@@ -34,7 +34,8 @@ again from [`assets/demo/demo.tape`](assets/demo/demo.tape).
 ## Try it in two minutes
 
 ```bash
-brew tap dirstral/tap && brew trust dirstral/tap
+brew tap dirstral/tap
+brew trust dirstral/tap         # Homebrew 6 and later only; skip it on older Homebrew
 brew install dirstral/tap/dir2mcp
 cd ~/notes                      # any folder you want to ask about
 ```
@@ -144,7 +145,7 @@ brew trust dirstral/tap      # required on Homebrew 6.x: third-party taps are un
 brew install dirstral/tap/dir2mcp
 ```
 
-On Homebrew 6.x a freshly tapped third-party formula is refused until the tap is trusted, so `brew install dirstral/tap/dir2mcp` on a clean machine fails without the `brew trust` step above. (On older Homebrew the trust step is a harmless no-op.)
+On Homebrew 6.x a freshly tapped third-party formula is refused until the tap is trusted, so `brew install dirstral/tap/dir2mcp` on a clean machine fails without the `brew trust` step above. Homebrew before 6.x has no `brew trust` command: it stops with "Unknown command: brew trust". Skip that step there; the install works without it.
 
 Then verify:
 
