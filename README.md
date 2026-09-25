@@ -23,6 +23,14 @@ local if you want: embeddings and answers can come from Ollama or any
 OpenAI-compatible server, and `dir2mcp doctor` verifies that nothing leaves the
 machine.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Terminal demo: a folder holds three Markdown notes. dir2mcp up starts the server with a local Ollama config. dir2mcp ask &quot;When is the budget meeting?&quot; answers &quot;Thursday at 10:00 in room 4B&quot; and cites meetings.md lines 1 to 6." width="720" />
+</p>
+
+This is a real run against an Ollama server (`nomic-embed-text` and
+`qwen2.5:7b-instruct-q4_K_M`), with no cloud account. `make demo` records it
+again from [`assets/demo/demo.tape`](assets/demo/demo.tape).
+
 ## Try it in two minutes
 
 ```bash
@@ -1648,6 +1656,7 @@ make cyclo        # gocyclo -over 15 ./internal/ (install: go install github.com
 make build        # build dir2mcp binary
 make build-elevenlabs-bridge  # build ElevenLabs bridge wrapper binary
 make benchmark    # run retrieval benchmarks
+make demo         # record assets/demo.gif again (needs vhs and an Ollama with nomic-embed-text and qwen2.5:7b)
 ```
 
 Release automation:
