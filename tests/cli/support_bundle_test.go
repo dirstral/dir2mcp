@@ -51,7 +51,8 @@ func TestSupportBundle_AssemblesDiagnosticsArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat bundle: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// Windows has no POSIX mode bits, so the owner-only check is unix-only.
+	if perm := info.Mode().Perm(); !posixModesUnsupported() && perm != 0o600 {
 		t.Errorf("bundle perms = %o, want 0o600 (diagnostics include server.log)", perm)
 	}
 

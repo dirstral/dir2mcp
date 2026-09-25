@@ -4,12 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestPandocExtractor_Extract_ReturnsStdoutMarkdown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
+	}
 	// A stub `pandoc` that ignores its args and echoes fixed Markdown to stdout,
 	// exactly as pandoc streams `-t gfm` output. No real pandoc binary required.
 	dir := t.TempDir()
@@ -28,6 +32,9 @@ func TestPandocExtractor_Extract_ReturnsStdoutMarkdown(t *testing.T) {
 }
 
 func TestPandocExtractor_Extract_EmptyOutputIsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
+	}
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "pandoc")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -39,6 +46,9 @@ func TestPandocExtractor_Extract_EmptyOutputIsError(t *testing.T) {
 }
 
 func TestPandocExtractor_Extract_NonZeroExitIsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
+	}
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "pandoc")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho 'boom' >&2\nexit 2\n"), 0o755); err != nil {
@@ -55,6 +65,9 @@ func TestPandocExtractor_Extract_NonZeroExitIsError(t *testing.T) {
 }
 
 func TestPandocExtractor_Extract_TimesOut(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
+	}
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "pandoc")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {

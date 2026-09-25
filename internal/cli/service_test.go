@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -173,6 +174,9 @@ func TestRenderLaunchdPlist(t *testing.T) {
 // redirection, and the INI-specific escaping (%→%%, space-quoted ExecStart)
 // that is the analog of the plist XML escaping. Unit-tested on every platform.
 func TestRenderSystemdUnit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("service backends (launchd, systemd) are unix-only; Windows has no dir2mcp service")
+	}
 	spec := serviceSpec{
 		Label:      "com.dirstral.dir2mcp-demo-abc123",
 		BinaryPath: "/usr/local/bin/dir2mcp",
@@ -351,6 +355,9 @@ func TestPersistentCredentialInDotenv(t *testing.T) {
 // envVarRefs found in the current environment is written to .env.local so
 // the launchd service can read it after a reboot.
 func TestPersistCredentialsFromEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("service backends (launchd, systemd) are unix-only; Windows has no dir2mcp service")
+	}
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env.local")
 
@@ -827,6 +834,9 @@ func TestLaunchctlBootoutReportsAbsent_723(t *testing.T) {
 // byte-for-byte and with its original permissions, not the half-installed
 // replacement.
 func TestUnitTxn_RollbackRestoresPriorDefinition_724(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("service backends (launchd, systemd) are unix-only; Windows has no dir2mcp service")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "com.dirstral.demo.service")
 	const prior = "[Service]\nExecStart=/old/dir2mcp up\n"
@@ -874,6 +884,9 @@ func TestUnitTxn_RollbackRestoresPriorDefinition_724(t *testing.T) {
 // mode the backend asked for, so a stray 0600 plist cannot silently narrow the
 // permissions of every future install.
 func TestUnitTxn_ReplacementDoesNotInheritPriorMode_724(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("service backends (launchd, systemd) are unix-only; Windows has no dir2mcp service")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "com.dirstral.demo.service")
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {

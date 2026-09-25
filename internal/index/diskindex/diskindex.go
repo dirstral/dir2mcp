@@ -45,6 +45,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -372,13 +373,19 @@ func writeRecords(w io.Writer, start int64, recs []pendingRecord) ([]int64, int6
 // after the truncation the in-memory state already matches the file again; only
 // the mmap view has to be dropped. Caller holds the write lock.
 func (d *DiskIndex) rollbackAppend(f *os.File, start int64, cause error) error {
+	// Drop the mmap view before the truncate. Windows refuses to truncate a
+	// file below a mapped view (ERROR_USER_MAPPED_FILE). A failed unmap must
+	// not skip the truncate, though: the view is dropped either way, and on
+	// unix the truncate still succeeds, so the file stays at its pre-append
+	// length. Every failure is joined into the returned error.
+	ierr := d.invalidateReaderLocked()
 	if terr := f.Truncate(start); terr != nil {
-		return errors.Join(cause, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
+		return errors.Join(cause, ierr, fmt.Errorf("diskindex: rollback truncate to %d: %w", start, terr))
 	}
 	if serr := syncFile(f); serr != nil {
-		return errors.Join(cause, fmt.Errorf("diskindex: rollback sync: %w", serr))
+		return errors.Join(cause, ierr, fmt.Errorf("diskindex: rollback sync: %w", serr))
 	}
-	if ierr := d.invalidateReaderLocked(); ierr != nil {
+	if ierr != nil {
 		return errors.Join(cause, ierr)
 	}
 	return cause
@@ -441,6 +448,12 @@ func (d *DiskIndex) stageTombstones(chunkIDs []uint64) ([]pendingRecord, error) 
 
 // ensureAppendEnd initialises d.appendEnd from the open file, writing the header
 // on a fresh/empty file. Caller holds the write lock.
+// skipDirSync is true on Windows. Windows cannot flush a directory handle
+// opened for read: the call fails with "Access is denied". NTFS journals
+// directory entries itself, so the file sync is the whole durability step
+// there.
+var skipDirSync = runtime.GOOS == "windows"
+
 // syncDir fsyncs the directory holding path so a newly created file's directory
 // entry is durable. Syncing the file alone leaves a window where the contents
 // are on stable storage but the name is not, so a crash can lose a segment the
@@ -448,6 +461,9 @@ func (d *DiskIndex) stageTombstones(chunkIDs []uint64) ([]pendingRecord, error) 
 // directory for read report no error rather than failing an otherwise good
 // write.
 func syncDir(path string) error {
+	if skipDirSync {
+		return nil
+	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return nil
@@ -867,13 +883,15 @@ func (d *DiskIndex) Load(ctx context.Context, path string) error {
 	// This runs INSIDE the critical section: truncating outside it lets a
 	// concurrent durable append land past end between the scan and the truncate,
 	// and the truncate would then silently destroy it.
+	// The mmap view goes first: Windows refuses to truncate a file below a
+	// mapped view.
+	if err := d.invalidateReaderLocked(); err != nil {
+		return err
+	}
 	if torn {
 		if err := os.Truncate(path, end); err != nil {
 			return fmt.Errorf("diskindex: truncate torn segment tail at %d: %w", end, err)
 		}
-	}
-	if err := d.invalidateReaderLocked(); err != nil {
-		return err
 	}
 	identity, idErr := readIdentitySidecar(identitySidecarPath(path))
 	if idErr != nil && end == 0 {

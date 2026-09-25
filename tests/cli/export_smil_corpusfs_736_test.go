@@ -122,6 +122,7 @@ func writeS3TTMLConfig(t *testing.T, dir, prefix string) string {
 // so the rendered SMIL is distinguishable. It returns the record file path.
 func stubFFprobeOnPATH(t *testing.T) string {
 	t.Helper()
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	dir := t.TempDir()
 	record := filepath.Join(dir, "probed.txt")
 	script := `#!/bin/sh

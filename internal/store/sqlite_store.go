@@ -4278,6 +4278,9 @@ func normalizeRelPath(relPath string) (string, error) {
 		normalized == "." ||
 		normalized == ".." ||
 		strings.HasPrefix(normalized, "../") ||
+		// Rooted without a volume. On Windows, filepath.IsAbs reports false
+		// for "/etc/passwd"; on unix IsAbs above already rejects it.
+		strings.HasPrefix(normalized, "/") ||
 		relpath.HasDotDotSegment(normalized) {
 		return "", errors.New(relPathErrorMessage)
 	}

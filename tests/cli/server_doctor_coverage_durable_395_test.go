@@ -136,6 +136,7 @@ func TestServerDoctor_ExtractionCoverage_NoExtractorOnlySkippedDocs(t *testing.T
 // per-format router indexing uses, pandoc tier included. The doctor must not keep
 // warning about a format the operator has just covered.
 func TestServerDoctor_ExtractionCoverage_PandocClosesTheGap(t *testing.T) {
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "auto")

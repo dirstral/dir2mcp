@@ -31,12 +31,40 @@ builds:
     # is reproducible rather than stamped with the wall-clock build time.
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # Windows builds are a separate build id on purpose. The brews and nix
+  # publishers below consume only the dir2mcp-archive archives, which come from
+  # the dir2mcp build (darwin/linux). A Windows zip can then never reach a
+  # Homebrew formula or the nix flake. Keep flags and ldflags equal to the
+  # dir2mcp build above.
+  - id: dir2mcp-windows
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/dir2mcp
+    binary: dir2mcp
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/dirstral/dir2mcp/internal/buildinfo.Version={{.Version}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
 
 archives:
   - id: dir2mcp-archive
     ids:
       - dir2mcp
     formats: [tar.gz]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  # Windows users expect a .zip. The archive holds dir2mcp.exe.
+  - id: dir2mcp-windows-archive
+    ids:
+      - dir2mcp-windows
+    formats: [zip]
     name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 

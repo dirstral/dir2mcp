@@ -14,6 +14,7 @@ import (
 // path. Naming it "pandoc" makes the functional check probe it.
 func writePandocStub(t *testing.T, name, body string) string {
 	t.Helper()
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	p := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatalf("write stub: %v", err)

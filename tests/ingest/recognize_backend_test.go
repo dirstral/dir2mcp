@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -27,9 +26,11 @@ func healthyStub(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func pidAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
-}
+// managedBackendUnixOnly is the skip reason for the tests that launch a
+// managed backend. The backend runs its command through `sh -c` and stops the
+// whole process group; Windows has neither. pidAlive lives in the
+// recognize_pid_*_test.go files.
+const managedBackendUnixOnly = "managed recognize backend uses sh -c and unix process groups; not supported on Windows"
 
 // waitFor polls cond up to 5s. The managed-backend lifecycle is asynchronous
 // (SIGTERM + reap), so assertions on process death must poll.
@@ -46,6 +47,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 func TestRecognizeBackend_ManagedLifecycle_LaunchHealthyAndKilledOnShutdown(t *testing.T) {
+	skipOnWindows(t, managedBackendUnixOnly)
 	t.Parallel()
 	stub := healthyStub(t)
 	root := t.TempDir()
@@ -74,6 +76,7 @@ func TestRecognizeBackend_ManagedLifecycle_LaunchHealthyAndKilledOnShutdown(t *t
 }
 
 func TestRecognizeBackend_CommandExitsBeforeHealthy_FailsStartup(t *testing.T) {
+	skipOnWindows(t, managedBackendUnixOnly)
 	t.Parallel()
 	// A stub that is never healthy, and a command that exits immediately.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -96,6 +99,7 @@ func TestRecognizeBackend_CommandExitsBeforeHealthy_FailsStartup(t *testing.T) {
 }
 
 func TestRecognizeBackend_NeverHealthy_TimesOutAndTerminatesChild(t *testing.T) {
+	skipOnWindows(t, managedBackendUnixOnly)
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

@@ -103,7 +103,7 @@ client/bridge-layer regressions (the "Failed to call tool" class). (Manual gate:
 needs a live daemon + the corpus's provider credentials, so it is not part of
 `make ci`.)
 
-The release workflow will build binaries for `darwin/linux × amd64/arm64`, publish a GitHub release with checksums, and push updated formulas to `Dirstral/homebrew-tap` automatically.
+The release workflow will build binaries for `darwin/linux × amd64/arm64` (tar.gz) and `windows × amd64/arm64` (zip), publish a GitHub release with checksums, and push updated formulas to `Dirstral/homebrew-tap` automatically. The Homebrew formula and the nix derivation take only the darwin/linux archives; Windows ships as release zips only.
 
 Requires `HOMEBREW_TAP_GITHUB_TOKEN` to be set as a repository secret (a PAT with `repo` scope on `Dirstral/homebrew-tap`).
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -15,6 +16,9 @@ import (
 // actually probes it; any other name is treated as a wrapper (not probed).
 func writePandocStub(t *testing.T, name, body string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
+	}
 	dir := t.TempDir()
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
@@ -35,6 +39,9 @@ func TestResolvePandocBinary_CommandBeatsPath(t *testing.T) {
 }
 
 func TestResolvePandocBinary_FallsBackToPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
+	}
 	// Prepend a temp dir containing a `pandoc` to PATH so resolution is
 	// deterministic regardless of whether the host has a real pandoc.
 	stubDir := t.TempDir()

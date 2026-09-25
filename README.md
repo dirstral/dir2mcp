@@ -31,6 +31,9 @@ brew install dirstral/tap/dir2mcp
 cd ~/notes                      # any folder you want to ask about
 ```
 
+On Windows, get the zip from Releases instead; see [Windows](#windows) for what
+works there and what does not.
+
 **Fully local, no account** (with [Ollama](https://ollama.com)):
 
 ```bash
@@ -225,6 +228,78 @@ Add the input and the module to your config. **nix-darwin:**
 ```
 
 Optional knobs: `stateDir`, `listen`, `extraArgs` (e.g. `[ "--public" "--auth" "auto" ]`), and `package` (defaults to this flake's lean build). On macOS, launchd has no native `EnvironmentFile`, so the module sources `environmentFile` via a small wrapper script at start; on Linux it is wired to systemd's native `EnvironmentFile=`. Either way the secret values stay outside the world-readable nix store.
+
+### Windows
+
+Each release has a Windows zip for amd64 and arm64 on the
+[Releases](https://github.com/dirstral/dir2mcp/releases) page. There is no Scoop
+or winget package yet.
+
+1. Download `dir2mcp_<version>_windows_amd64.zip` (or `_windows_arm64.zip`).
+2. Extract `dir2mcp.exe` into a folder on your `PATH`.
+3. Open a new terminal and run `dir2mcp version`.
+
+Quickstart in PowerShell (fully local, with [Ollama](https://ollama.com)):
+
+```powershell
+ollama pull nomic-embed-text; ollama pull qwen2.5:7b
+cd $HOME\notes                      # any folder you want to ask about
+@'
+providers:
+  local:
+    kind: openai
+    base_url: http://127.0.0.1:11434/v1
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: qwen2.5:7b
+model:
+  embed: {provider: local}
+  chat: {provider: local}
+'@ | Set-Content -Encoding utf8 .dir2mcp.yaml
+dir2mcp up                          # the server stays in this terminal
+```
+
+With a cloud key instead, set it for the session and skip the file:
+`$env:MISTRAL_API_KEY = "..."`, then `dir2mcp up`.
+
+`up` keeps this terminal. Open a second terminal in the same folder to ask:
+
+```powershell
+cd $HOME\notes
+dir2mcp ask "When is the budget meeting?"
+dir2mcp down                        # stops the server in the first terminal
+```
+
+What CI proves on Windows: the `windows` job in `.github/workflows/go.yml` runs
+the Go test suite on `windows-latest` (amd64). One end-to-end test in that suite
+runs `up --foreground` on a folder with nested directories, then `status`,
+`list-files`, `ask`, `open-file`, `install claude` and `down`. `ask` returns an
+answer with citations. Citations and `list-files` use forward-slash paths such
+as `docs/sub/policy.md`, the same as on macOS and Linux.
+
+Limits on Windows:
+
+- `up` stays in the foreground. Windows has no background (daemon) mode, and
+  `up --daemon` fails with an error. Keep the terminal open, or stop the server
+  with `dir2mcp down` from a second terminal.
+- `down` ends the server at once through TerminateProcess. Windows has no
+  SIGTERM, so there is no graceful shutdown. The sqlite store uses
+  transactions, so the index stays consistent, and the next `up` continues from
+  it.
+- `dir2mcp service` is not available. To start the server at logon, add a Task
+  Scheduler task that runs `dir2mcp up --foreground` in the corpus folder.
+- `install claude` writes `%APPDATA%\Claude\claude_desktop_config.json`. The
+  entry runs `mcp-remote` through `bunx` or `npx`. We did not test this entry
+  with Claude Desktop on Windows.
+- `dir2mcp-full` (bundled docling) is a Homebrew formula only. On Windows,
+  install docling yourself, use a docling-serve container, or use Mistral OCR.
+- A managed recognition backend (`recognize.serve_command`) needs a POSIX `sh`.
+  On Windows, start the backend yourself and set only `recognize.serve_url`.
+- Owner-only file modes (0600) do not apply on Windows. Files in `.dir2mcp`
+  get the access rules of their parent folder, so keep the corpus in your user
+  profile.
+- The arm64 zip is built, but CI does not test it: the CI job has no Windows
+  arm64 runner.
 
 Build-from-source remains available as an alternative:
 

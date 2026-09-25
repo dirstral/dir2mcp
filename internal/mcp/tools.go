@@ -1108,10 +1108,13 @@ func isArchiveMemberSource(doc model.Document) bool {
 // here runs on. A padded value such as " /etc/passwd" passes the store's own
 // rel_path validation, so the untrimmed test let it through as a relative path
 // and the listing then advertised an absolute-looking path.
+//
+// The leading-slash test matters on Windows, where filepath.IsAbs reports false
+// for "/etc/passwd". On unix it adds nothing to IsAbs.
 func normalizedListRelPath(relPath string) (string, bool) {
 	trimmed := strings.TrimSpace(relPath)
 	normalized := filepath.ToSlash(filepath.Clean(trimmed))
-	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(trimmed) {
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(trimmed) || strings.HasPrefix(normalized, "/") {
 		return "", false
 	}
 	return normalized, true
@@ -3518,7 +3521,7 @@ func (s *Server) resolveDocumentPath(relPath string) (string, error) {
 		return "", err
 	}
 	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
-	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) || strings.HasPrefix(normalized, "/") {
 		return "", model.ErrPathOutsideRoot
 	}
 	// Apply the corpus path-exclusion policy that normal ingestion enforces

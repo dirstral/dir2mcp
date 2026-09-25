@@ -69,6 +69,7 @@ var subtreeRemovedPaths = []string{
 func startSubtreeWatcher(t *testing.T, ctx context.Context, root string) *store.SQLiteStore {
 	t.Helper()
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

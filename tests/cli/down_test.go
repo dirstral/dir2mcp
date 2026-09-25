@@ -74,6 +74,36 @@ func TestDown_StalePidFile_CleansUp(t *testing.T) {
 	}
 }
 
+// TestDown_OutOfRangePid_NeverAliasesALiveProcess pins that a pid above the
+// OS pid range is dead. kill(2) on unix and OpenProcess on Windows take a
+// 32-bit pid, so 1<<32 plus this test's pid would truncate to this very
+// process: a corrupt pid file would then make `down` stop the caller.
+func TestDown_OutOfRangePid_NeverAliasesALiveProcess(t *testing.T) {
+	root, stateDir := newDownFixture(t)
+	aliased := (1 << 32) + os.Getpid()
+	pidPath := filepath.Join(stateDir, "server.pid")
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", aliased)), 0o600); err != nil {
+		t.Fatalf("seed pid file: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, root, func() {
+		if code := app.RunWithContext(context.Background(), []string{"--json", "down"}); code != 0 {
+			t.Fatalf("exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+	var payload struct {
+		Stopped bool   `json:"stopped"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal stdout: %v raw=%s", err, stdout.String())
+	}
+	if payload.Reason != "stale_pid" || payload.Stopped {
+		t.Fatalf("reason=%q stopped=%t, want stale_pid and nothing stopped", payload.Reason, payload.Stopped)
+	}
+}
+
 // TestDown_MalformedPidFile_RecoversAndReports: a non-integer pid file
 // is treated as residue — removed, reported, exit 0.
 func TestDown_MalformedPidFile_RecoversAndReports(t *testing.T) {

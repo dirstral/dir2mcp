@@ -207,6 +207,12 @@ func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
 	// `go test`-built binaries are dev builds (no GoReleaser ldflags),
 	// so identity.AutoServerName uses the dir2mcp-dev- prefix here.
 	want := identity.AutoServerName(resolvedTmp, true)
+	if runtime.GOOS == "windows" {
+		// On Windows EvalSymlinks expands 8.3 short names (RUNNER~1), while
+		// the server derives its name from the working directory as given.
+		// Hash the unresolved path there, the one the server sees.
+		want = identity.AutoServerName(absTmp, true)
+	}
 	if !strings.Contains(out, want) {
 		t.Fatalf("banner registration hint missing %q.\nstdout=%s", want, out)
 	}
