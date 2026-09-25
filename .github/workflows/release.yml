@@ -31,6 +31,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # `make ci` runs the Python annotator suite, so the release gate needs the
+      # interpreter CI uses. Without this step it ran on the runner's system
+      # python3 and failed a test that CI passes (the v0.11.0 release).
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: annotator/pyproject.toml
+
       - name: Install gocyclo
         uses: ./.github/actions/go-install-retry
         with:
