@@ -207,6 +207,7 @@ func TestScan_OversizeFileForgetsItsGroupKey(t *testing.T) {
 	assertLivePaths(t, ret, []string{"ghost.txt"}, "before the scan")
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

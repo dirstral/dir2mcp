@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -2299,6 +2300,7 @@ func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
 	if err != nil {
 		return Config{}, SecretSourceMetadata{}, fmt.Errorf("read snapshot file %s: %w", path, err)
 	}
+	raw = stripUTF8BOM(raw)
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return Default(), SecretSourceMetadata{}, nil
 	}
@@ -2515,6 +2517,14 @@ func finalizeLoadedConfig(cfg Config, overrideEnv map[string]string, applyEnv bo
 	return cfg, nil
 }
 
+// stripUTF8BOM removes a leading UTF-8 byte order mark. Windows PowerShell 5.1
+// writes one with `Set-Content -Encoding utf8`, and YAML allows it. Without
+// this, the BOM became part of the first key, and that key was dropped with no
+// error.
+func stripUTF8BOM(raw []byte) []byte {
+	return bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
+}
+
 // applyFileOverrides reads the YAML file at path and overlays its flat
 // keys onto cfg, and decodes the providers:/model: subtree into
 // cfg.providersDoc (SPEC 0.7.0 §16.2).
@@ -2527,6 +2537,7 @@ func applyFileOverrides(cfg *Config, path string) error {
 	if err != nil {
 		return fmt.Errorf("read config file %s: %w", path, err)
 	}
+	raw = stripUTF8BOM(raw)
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return nil
 	}

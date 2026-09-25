@@ -69,6 +69,7 @@ func TestForegroundIgnoresUnverifiedDaemonMarker(t *testing.T) {
 // The daemon child skips the server.log tee, so the absence of the file is the
 // evidence here.
 func TestForegroundHonoursVerifiedDaemonHandshake(t *testing.T) {
+	skipOnWindows(t, "daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
@@ -115,6 +116,7 @@ func TestForegroundHonoursVerifiedDaemonHandshake(t *testing.T) {
 // child any more. Before the fix the marker was reusable for ever, because
 // nothing was consumed and nothing was compared.
 func TestDaemonHandshakeIsSingleUse(t *testing.T) {
+	skipOnWindows(t, "daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")

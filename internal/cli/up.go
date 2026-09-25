@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if shouldDaemonize(a, opts) {
 		return a.runUpAsDaemonParent(ctx, opts)
 	}
+	a.noteForegroundOnlyPlatform(opts)
 
 	cfg, auth, tlsCertFile, tlsKeyFile, nonInteractiveMode, code := a.prepareUpConfig(opts)
 	if code != exitSuccess {
@@ -1970,6 +1972,7 @@ func (a *App) maybeFirstRunSetup(opts upOptions) int {
 	res, rerr := setupwizard.Run(setupwizard.Input{
 		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
 		ConfigExisted: configExisted,
+		Ollama:        setupwizard.ProbeOllama(context.Background(), setupwizard.OllamaURL()),
 	})
 	if errors.Is(rerr, huh.ErrUserAborted) {
 		return exitSuccess // fall through to the standard preflight error
@@ -1996,12 +1999,18 @@ func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, c
 	}
 	before := fileCfg
 	setupwizard.ApplyCorpusProfile(&fileCfg, res.Profile)
-	// An existing file is never rewritten (see runConfigInit): a rewrite deleted
-	// every setting the flat saved form cannot express. That includes a file
-	// LoadFile could not parse, which was replaced by the defaults.
-	if configExisted {
+	profileLines := setupwizard.ProfileSettingsYAML(before, fileCfg)
+	if res.Route == setupwizard.RouteLocal {
+		if code := a.writeLocalConfigFile(opts.jsonOutput, opts.quiet, configPath, !configExisted, res.Local, profileLines); code >= 0 {
+			return code
+		}
+	} else if configExisted {
+		// An existing file is never rewritten (see runConfigInit): a rewrite
+		// deleted every setting the flat saved form cannot express. That
+		// includes a file LoadFile could not parse, which was replaced by the
+		// defaults.
 		if !opts.jsonOutput {
-			writeProfileSettings(a.stdout, res.Profile, configPath, setupwizard.ProfileSettingsYAML(before, fileCfg))
+			writeProfileSettings(a.stdout, res.Profile, configPath, profileLines)
 		}
 	} else if err := config.SaveFile(configPath, fileCfg); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
@@ -2281,6 +2290,19 @@ func shouldDaemonize(a *App, opts upOptions) bool {
 		return false
 	}
 	return true
+}
+
+// noteForegroundOnlyPlatform tells an interactive user why `up` stays in the
+// terminal on a platform without daemon mode (Windows). On unix it prints
+// nothing, because there an interactive `up` daemonizes before this point.
+func (a *App) noteForegroundOnlyPlatform(opts upOptions) {
+	if isDaemonSupported() || opts.foreground || opts.jsonOutput || opts.quiet {
+		return
+	}
+	if os.Getenv(daemonChildEnv) != "" || !writerIsTerminal(a.stdout) {
+		return
+	}
+	writef(a.stderr, "note: background mode is not available on %s; the server runs in this terminal. Stop it here, or run `dir2mcp down` from another terminal.\n", runtime.GOOS)
 }
 
 // writerIsTerminal reports whether w corresponds to a terminal file

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -272,6 +273,11 @@ func TestRecognize_LocalizedPathIsAbsolute(t *testing.T) {
 		t.Fatalf("getwd: %v", err)
 	}
 	rel, err := filepath.Rel(cwd, media)
+	if err != nil && runtime.GOOS == "windows" {
+		// The temp dir and the checkout can sit on different volumes (C: and
+		// D: on a CI runner). No relative path spans two volumes.
+		t.Skipf("cannot express %q relative to the test CWD: %v", media, err)
+	}
 	if err != nil {
 		t.Fatalf("rel: %v", err)
 	}

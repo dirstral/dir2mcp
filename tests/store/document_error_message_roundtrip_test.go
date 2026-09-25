@@ -138,6 +138,7 @@ func newTempSQLiteStore(t *testing.T, ctx context.Context) *store.SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

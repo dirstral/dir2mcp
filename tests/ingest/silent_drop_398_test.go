@@ -152,6 +152,7 @@ func runArchiveIngestSnapshot(t *testing.T, archiveName string, archiveData []by
 		t.Fatalf("write archive: %v", err)
 	}
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

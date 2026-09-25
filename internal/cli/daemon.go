@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -414,27 +413,8 @@ func WritePIDRecordForTest(path string, pid int, startToken string) error {
 	return writePIDRecord(path, pid, startToken, false)
 }
 
-// processIsAlive reports whether a process with the given pid is currently
-// alive and signalable by the calling user. It uses POSIX signal 0, which
-// performs the kernel's permission/existence check without delivering a
-// signal; ESRCH means "no such process", EPERM means "exists but not
-// owned by us" (which we treat as "alive enough to leave alone").
-func processIsAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	// Treat EPERM (process exists, signal blocked) as alive so we don't
-	// blow away a pid file for a process we shouldn't touch.
-	return errors.Is(err, syscall.EPERM)
-}
+// processIsAlive lives in process_unix.go and process_windows.go: the
+// liveness check needs a different system call on each platform.
 
 // waitForConnectionFile blocks until the daemon child has written a fully
 // populated connection.json (URL is set), the timeout expires, or the
@@ -499,6 +479,9 @@ func WaitForConnectionReady(path string, childPid int, timeout time.Duration) (b
 // when even SIGKILL leaves the process alive (which only happens when
 // the process is owned by another user or is in an uninterruptible kernel
 // state — both extreme).
+//
+// On Windows there is no SIGTERM. The first stop request ends the process at
+// once through TerminateProcess (see process_windows.go).
 func stopDaemon(pid int) error {
 	if !processIsAlive(pid) {
 		return nil
@@ -507,8 +490,8 @@ func stopDaemon(pid int) error {
 	if err != nil {
 		return fmt.Errorf("find process %d: %w", pid, err)
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("send SIGTERM to %d: %w", pid, err)
+	if err := requestProcessStop(proc); err != nil {
+		return err
 	}
 	deadline := time.Now().Add(daemonShutdownGrace)
 	for time.Now().Before(deadline) {
@@ -518,8 +501,8 @@ func stopDaemon(pid int) error {
 		time.Sleep(daemonShutdownPoll)
 	}
 	// Escalate.
-	if err := proc.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("send SIGKILL to %d: %w", pid, err)
+	if err := forceProcessStop(proc); err != nil {
+		return err
 	}
 	// One more brief grace window for the kernel to reap.
 	for i := 0; i < 5; i++ {
@@ -528,5 +511,5 @@ func stopDaemon(pid int) error {
 		}
 		time.Sleep(daemonShutdownPoll)
 	}
-	return fmt.Errorf("process %d still alive after SIGKILL", pid)
+	return fmt.Errorf("process %d still alive after %s", pid, forceStopName)
 }

@@ -401,6 +401,21 @@ func (a *App) serviceContextAndManager(global globalOptions, name string) (servi
 	return sc, cfg, mgr, exitSuccess
 }
 
+// serviceUnsupportedMessage is the error text `dir2mcp service` reports on a
+// platform without a service backend. On Windows it also names the manual
+// alternative, because dir2mcp has no Windows service backend.
+func serviceUnsupportedMessage(goos string) string {
+	msg := fmt.Sprintf("dir2mcp service is not supported on %s (macOS/launchd and Linux/systemd only)", goos)
+	if goos == "windows" {
+		msg += "; run `dir2mcp up --foreground` in a terminal, or add a Task Scheduler task that runs that command at logon"
+	}
+	return msg
+}
+
+// ServiceUnsupportedMessageForTest exposes serviceUnsupportedMessage to the
+// external tests package. Test-only surface.
+func ServiceUnsupportedMessageForTest(goos string) string { return serviceUnsupportedMessage(goos) }
+
 // emitServiceJSON marshals payload as JSON to stdout, returning the
 // appropriate exit code.
 func (a *App) emitServiceJSON(payload map[string]interface{}) int {

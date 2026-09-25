@@ -87,7 +87,9 @@ func startGatedServer(t *testing.T, ret model.Retriever) (string, config.Config,
 	t.Cleanup(fac.Close)
 	cfg := baseX402Config(t, fac.URL)
 	cfg.X402.Mode = x402.ModeRequired
-	srv := httptest.NewServer(mcp.NewServer(cfg, ret).Handler())
+	mcpSrv := mcp.NewServer(cfg, ret)
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	t.Cleanup(srv.Close)
 	return srv.URL + cfg.MCPPath, cfg, f
 }
@@ -312,7 +314,9 @@ func TestX402Cancel657_RetrySettlementRunsOnAnUncancellableContext(t *testing.T)
 	defer fac.Close()
 	cfg := baseX402Config(t, fac.URL)
 	cfg.X402.Mode = x402.ModeRequired
-	srv := httptest.NewServer(mcp.NewServer(cfg, okRetriever{}, mcp.WithX402Client(probe)).Handler())
+	mcpSrv := mcp.NewServer(cfg, okRetriever{}, mcp.WithX402Client(probe))
+	t.Cleanup(func() { _ = mcpSrv.Close() })
+	srv := httptest.NewServer(mcpSrv.Handler())
 	defer srv.Close()
 	mcpURL := srv.URL + cfg.MCPPath
 	sid := parityInitSession(t, mcpURL)

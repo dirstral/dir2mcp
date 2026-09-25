@@ -91,6 +91,7 @@ func seedTranscripts(t *testing.T, dir string, reps ...seedRep) *store.SQLiteSto
 	t.Helper()
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(dir, ".dir2mcp", "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

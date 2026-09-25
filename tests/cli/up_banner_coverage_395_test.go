@@ -232,6 +232,7 @@ func routingJSONFromBundle(t *testing.T, dir string) []struct {
 // row, so a maintainer sees it without a live daemon). The reason is the redacted
 // resolution source, never the binary path.
 func TestRoutingDecisions_PandocSecondaryEngineActive(t *testing.T) {
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	tmp := t.TempDir()
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
@@ -268,6 +269,7 @@ func TestRoutingDecisions_PandocSecondaryEngineActive(t *testing.T) {
 // Under a docling/mistral pin pandoc is ineligible: no row, even when a pandoc
 // binary is present, because the policy never activates it.
 func TestRoutingDecisions_NoPandocRowUnderOtherPin(t *testing.T) {
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	tmp := t.TempDir()
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
@@ -288,6 +290,7 @@ func TestRoutingDecisions_NoPandocRowUnderOtherPin(t *testing.T) {
 // Under the pandoc pin the OCR row already names pandoc as the primary; a second
 // Pandoc row would be a duplicate and is omitted.
 func TestRoutingDecisions_NoDuplicateRowWhenPandocIsPrimary(t *testing.T) {
+	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
 	tmp := t.TempDir()
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
@@ -334,6 +337,7 @@ func (c *askCountingCounter) ExtractableExtensionCounts(_ context.Context, _ str
 }
 
 func TestStartupCoverage_DaemonChildNeverRunsTheProbe_949(t *testing.T) {
+	skipOnWindows(t, "daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
 	cfg := config.Config{}
 	cfg.IngestExtractor = "mistral" // reads no .odt, so the counts below are uncovered
 

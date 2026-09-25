@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -649,10 +650,10 @@ func (a *App) printUsage() {
 		{"export", "render a transcript as VTT/SRT/TTML subtitles (export --format vtt|srt|ttml <path>)"},
 		{"bridge", "run helper adapters (for example ElevenLabs webhooks)"},
 		{"config", "view or edit configuration"},
-		{"install", "install dir2mcp into a client (e.g. dir2mcp install claude)"},
-		{"uninstall", "remove dir2mcp from a client (e.g. dir2mcp uninstall claude)"},
-		{"doctor", "run client integration diagnostics (e.g. dir2mcp doctor claude)"},
-		{"print-config", "print the MCP-server JSON snippet for a client"},
+		{"install", "install dir2mcp into a client: claude (Desktop), claude-code, cursor"},
+		{"uninstall", "remove dir2mcp from a client (e.g. dir2mcp uninstall cursor)"},
+		{"doctor", "run client integration diagnostics (e.g. dir2mcp doctor claude-code)"},
+		{"print-config", "print the client config for manual setup (never prints the token for claude-code or cursor)"},
 		{"support-bundle", "collect logs + config + status into a shareable tar.gz"},
 		{"service", "auto-start the daemon at login (macOS launchd): install|uninstall|status"},
 		{"version", "print build version"},
@@ -1652,6 +1653,9 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	if opts.daemon && opts.jsonOutput {
 		return upOptions{}, fmt.Errorf("--daemon is incompatible with --json (NDJSON event stream requires the foreground process to remain attached)")
 	}
+	if opts.daemon && !isDaemonSupported() {
+		return upOptions{}, fmt.Errorf("--daemon is not supported on %s; run `dir2mcp up` in its own terminal, where the server stays in the foreground", runtime.GOOS)
+	}
 	return opts, nil
 }
 
@@ -2059,7 +2063,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameOverRetrying(tmp, path); err != nil {
 		// os.Rename fails on Windows when the destination already exists.
 		// Remove the existing file and retry once to support Windows.
 		_ = os.Remove(path)
@@ -2069,6 +2073,30 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		}
 	}
 	return nil
+}
+
+// windowsRenameAttempts and windowsRenameBackoff bound the Windows rename
+// retry in renameOverRetrying: about one second in total.
+const (
+	windowsRenameAttempts = 40
+	windowsRenameBackoff  = 25 * time.Millisecond
+)
+
+// renameOverRetrying renames tmp over path. On unix it is one os.Rename. On
+// Windows, a rename over a file that another handle holds open fails for a
+// short time with an access or sharing error, for example while `status`
+// reads corpus.json or a second writer replaces it. The retry waits for that
+// handle to close, so a concurrent reader does not make the write fail.
+func renameOverRetrying(tmp, path string) error {
+	err := os.Rename(tmp, path)
+	if runtime.GOOS != "windows" {
+		return err
+	}
+	for i := 1; err != nil && i < windowsRenameAttempts; i++ {
+		time.Sleep(windowsRenameBackoff)
+		err = os.Rename(tmp, path)
+	}
+	return err
 }
 
 // newNDJSONEmitter constructs an ndjsonEmitter that writes events to out

@@ -49,6 +49,7 @@ func TestWatch_EvictsChunksWhenFileGrowsPastSizeCap(t *testing.T) {
 	}
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -130,6 +131,7 @@ func TestWatch_EvictsChunksWhenPathBecomesGitignored(t *testing.T) {
 	}
 
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

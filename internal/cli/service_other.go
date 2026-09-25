@@ -3,13 +3,14 @@
 package cli
 
 import (
-	"fmt"
+	"errors"
 	"runtime"
 )
 
 // newServiceManager reports that login auto-start is not wired for this
 // platform. macOS (launchd) and Linux (systemd user units) are supported;
-// this stub covers every other GOOS.
+// this stub covers every other GOOS. The message text comes from
+// serviceUnsupportedMessage in service.go.
 func newServiceManager() (serviceManager, error) {
-	return nil, fmt.Errorf("dir2mcp service is not supported on %s (macOS/launchd and Linux/systemd only)", runtime.GOOS)
+	return nil, errors.New(serviceUnsupportedMessage(runtime.GOOS))
 }

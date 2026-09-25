@@ -23,6 +23,14 @@ local if you want: embeddings and answers can come from Ollama or any
 OpenAI-compatible server, and `dir2mcp doctor` verifies that nothing leaves the
 machine.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Terminal demo: a folder holds three Markdown notes. dir2mcp up starts the server with a local Ollama config. dir2mcp ask &quot;When is the budget meeting?&quot; answers &quot;Thursday at 10:00 in room 4B&quot; and cites meetings.md lines 1 to 6." width="720" />
+</p>
+
+This is a real run against an Ollama server (`nomic-embed-text` and
+`qwen2.5:7b-instruct-q4_K_M`), with no cloud account. `make demo` records it
+again from [`assets/demo/demo.tape`](assets/demo/demo.tape).
+
 ## Try it in two minutes
 
 ```bash
@@ -31,10 +39,20 @@ brew install dirstral/tap/dir2mcp
 cd ~/notes                      # any folder you want to ask about
 ```
 
+On Windows, get the zip from Releases instead; see [Windows](#windows) for what
+works there and what does not.
+
 **Fully local, no account** (with [Ollama](https://ollama.com)):
 
 ```bash
 ollama pull nomic-embed-text && ollama pull qwen2.5:7b
+dir2mcp up        # the first run asks how to run the models: pick "Locally with Ollama"
+```
+
+The setup finds Ollama, lists its models and writes `.dir2mcp.yaml`. To script
+it (no terminal), write the same file yourself:
+
+```bash
 cat > .dir2mcp.yaml <<'EOF'
 providers:
   local:
@@ -57,7 +75,8 @@ export MISTRAL_API_KEY=...
 dir2mcp up
 ```
 
-Then ask from the terminal, or hand the folder to Claude Desktop:
+Then ask from the terminal, or hand the folder to Claude Code, Cursor or
+Claude Desktop:
 
 ```console
 $ dir2mcp ask "When is the budget meeting?"
@@ -66,7 +85,9 @@ The quarterly budget meeting is on Thursday. [notes.md:L1-L3]
   Citations
   [1] notes.md  chunk=2 span=L1-L3
 
-$ dir2mcp install claude        # restart Claude Desktop, then ask it about the folder
+$ dir2mcp install claude-code   # Claude Code: start a new session, then ask about the folder
+$ dir2mcp install cursor        # Cursor: the server shows in Settings > MCP
+$ dir2mcp install claude        # Claude Desktop: restart it, then ask about the folder
 ```
 
 `dir2mcp status` shows what was indexed, and names every file it skipped with
@@ -215,6 +236,78 @@ Add the input and the module to your config. **nix-darwin:**
 ```
 
 Optional knobs: `stateDir`, `listen`, `extraArgs` (e.g. `[ "--public" "--auth" "auto" ]`), and `package` (defaults to this flake's lean build). On macOS, launchd has no native `EnvironmentFile`, so the module sources `environmentFile` via a small wrapper script at start; on Linux it is wired to systemd's native `EnvironmentFile=`. Either way the secret values stay outside the world-readable nix store.
+
+### Windows
+
+Each release has a Windows zip for amd64 and arm64 on the
+[Releases](https://github.com/dirstral/dir2mcp/releases) page. There is no Scoop
+or winget package yet.
+
+1. Download `dir2mcp_<version>_windows_amd64.zip` (or `_windows_arm64.zip`).
+2. Extract `dir2mcp.exe` into a folder on your `PATH`.
+3. Open a new terminal and run `dir2mcp version`.
+
+Quickstart in PowerShell (fully local, with [Ollama](https://ollama.com)):
+
+```powershell
+ollama pull nomic-embed-text; ollama pull qwen2.5:7b
+cd $HOME\notes                      # any folder you want to ask about
+@'
+providers:
+  local:
+    kind: openai
+    base_url: http://127.0.0.1:11434/v1
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: qwen2.5:7b
+model:
+  embed: {provider: local}
+  chat: {provider: local}
+'@ | Set-Content -Encoding utf8 .dir2mcp.yaml
+dir2mcp up                          # the server stays in this terminal
+```
+
+With a cloud key instead, set it for the session and skip the file:
+`$env:MISTRAL_API_KEY = "..."`, then `dir2mcp up`.
+
+`up` keeps this terminal. Open a second terminal in the same folder to ask:
+
+```powershell
+cd $HOME\notes
+dir2mcp ask "When is the budget meeting?"
+dir2mcp down                        # stops the server in the first terminal
+```
+
+What CI proves on Windows: the `windows` job in `.github/workflows/go.yml` runs
+the Go test suite on `windows-latest` (amd64). One end-to-end test in that suite
+runs `up --foreground` on a folder with nested directories, then `status`,
+`list-files`, `ask`, `open-file`, `install claude` and `down`. `ask` returns an
+answer with citations. Citations and `list-files` use forward-slash paths such
+as `docs/sub/policy.md`, the same as on macOS and Linux.
+
+Limits on Windows:
+
+- `up` stays in the foreground. Windows has no background (daemon) mode, and
+  `up --daemon` fails with an error. Keep the terminal open, or stop the server
+  with `dir2mcp down` from a second terminal.
+- `down` ends the server at once through TerminateProcess. Windows has no
+  SIGTERM, so there is no graceful shutdown. The sqlite store uses
+  transactions, so the index stays consistent, and the next `up` continues from
+  it.
+- `dir2mcp service` is not available. To start the server at logon, add a Task
+  Scheduler task that runs `dir2mcp up --foreground` in the corpus folder.
+- `install claude` writes `%APPDATA%\Claude\claude_desktop_config.json`. The
+  entry runs `mcp-remote` through `bunx` or `npx`. We did not test this entry
+  with Claude Desktop on Windows.
+- `dir2mcp-full` (bundled docling) is a Homebrew formula only. On Windows,
+  install docling yourself, use a docling-serve container, or use Mistral OCR.
+- A managed recognition backend (`recognize.serve_command`) needs a POSIX `sh`.
+  On Windows, start the backend yourself and set only `recognize.serve_url`.
+- Owner-only file modes (0600) do not apply on Windows. Files in `.dir2mcp`
+  get the access rules of their parent folder, so keep the corpus in your user
+  profile.
+- The arm64 zip is built, but CI does not test it: the CI job has no Windows
+  arm64 runner.
 
 Build-from-source remains available as an alternative:
 
@@ -418,20 +511,49 @@ dir2mcp up --listen 0.0.0.0:8087
 | `export` | Render a transcript as VTT/SRT/TTML subtitles (`export --format vtt\|srt\|ttml <path>`) |
 | `bridge` | Run helper adapters (for example the ElevenLabs webhook bridge) |
 | `support-bundle` | Collect logs + config + status into a shareable `tar.gz` (owner-only; credentials always redacted, local paths/endpoints redacted unless `--include-content` — see [What a support bundle discloses](#what-a-support-bundle-discloses)) |
-| `config init` | Interactive setup wizard (on a TTY): prompts for provider API keys, where to store them (`.env.local` or the OS keychain), and a corpus profile, then writes `.dir2mcp.yaml` when it does not exist. An existing `.dir2mcp.yaml` is never rewritten: credentials still go to `.env.local` or the keychain, and a chosen profile is printed as the lines to add. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config when none exists. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
+| `config init` | Interactive setup wizard (on a TTY). It first asks how to run the models. **Locally with Ollama**: it probes Ollama (`OLLAMA_HOST`, else `127.0.0.1:11434`), lists the installed embedding and chat models, asks for no key, and binds a `local` provider. **With a cloud key**: pick Mistral, OpenAI or Gemini and paste that one key (each gives embeddings and answers alone), optionally more providers, and where to store keys (`.env.local` or the OS keychain). Then a corpus profile. It writes `.dir2mcp.yaml` when it does not exist. An existing `.dir2mcp.yaml` is never rewritten: credentials still go to `.env.local` or the keychain, and a chosen profile is printed as the lines to add. Non-interactive (`--non-interactive`/`--json`/`--quiet`/no TTY) just writes a baseline config when none exists. `dir2mcp up` also launches this wizard on first run when started interactively (a TTY, and not `--json`/`--non-interactive`/read-only) and no embedding provider resolves. |
 | `config print` | Print effective config |
 | `config set-secret <ENV_VAR>` | Store a provider credential in the OS keychain (encrypted at rest) instead of a plaintext `.env.local` |
 | `config rm-secret <ENV_VAR>` | Remove a credential from the OS keychain |
 | `config secrets` | Show which provider credentials are present in the keychain / environment (never prints values) |
-| `install <client>` | Install dir2mcp into a supported MCP client (e.g. `dir2mcp install claude`) |
-| `uninstall <client>` | Remove dir2mcp from a supported MCP client |
+| `install <client>` | Install dir2mcp into a supported MCP client: `claude-code`, `cursor`, or `claude` (Claude Desktop). See [Connect an MCP client](#connect-an-mcp-client) |
+| `uninstall <client>` | Remove dir2mcp from a supported MCP client. Other servers in the client config stay as they are |
 | `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures); add `--deep` to actively probe the embedding credential |
-| `print-config <client>` | Print the MCP-server JSON snippet a client expects |
+| `print-config <client>` | Print what a client needs for a manual setup: the `claude mcp add-json` command for `claude-code`, the `mcp.json` snippet for `cursor` and `claude`. For `claude-code` and `cursor` the output never contains the token |
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments, or any command with `--help` (or `-h`), prints usage to stdout and exits 0.
 `ask`, `search`, `open-file`, and `list-files` are legacy compatibility shims; new client/orchestrator UX belongs in `dirstral-cli`.
+
+### Connect an MCP client
+
+Start the daemon first (`dir2mcp up`). Each client command reads the URL and the
+bearer token from `.dir2mcp/connection.json` and `.dir2mcp/secret.token`, so run
+it in the folder you serve, or pass `--state-dir`. The server name defaults to
+the [server identity](#server-identity); use `--name` to choose another.
+
+| Client | Install | What it changes |
+|---|---|---|
+| Claude Code | `dir2mcp install claude-code [--scope user\|local]` | Calls `claude mcp add-json` with an HTTP entry for the daemon URL. The entry holds no token: its `headersHelper` reads the token file at each connection. The default scope is `user` (all projects); `local` is the current project only. dir2mcp refuses `--scope project`, because that scope writes into `.mcp.json` in your working tree |
+| Cursor | `dir2mcp install cursor [--config-path PATH]` | Adds a `url` + `headers` entry to `~/.cursor/mcp.json`. For a project config, pass `--config-path .cursor/mcp.json` and keep that file out of version control |
+| Claude Desktop | `dir2mcp install claude [--config-path PATH]` | Adds a `bunx mcp-remote` bridge entry to `claude_desktop_config.json` |
+
+Claude Code and Cursor speak Streamable HTTP to the daemon directly, so they
+need no bridge. Claude Code keeps its servers in `~/.claude.json`, a file that
+Claude Code itself also rewrites; dir2mcp uses the `claude` CLI and does not
+edit that file. The token is not in `~/.claude.json` and not on any command
+line, and a new token takes effect at the next connection. When `claude` is not
+on `PATH`, `install claude-code` exits non-zero and prints the command to run.
+That command also holds no token.
+
+Every file edit is atomic, writes mode `0600` (the entry holds the token), keeps
+all other servers and unknown keys, and replaces only the dir2mcp entry, so a
+second install is safe. `dir2mcp doctor <client>` checks that the entry
+exists, that it uses the current daemon URL, and that the daemon answers. For
+Cursor it also checks that the entry holds the current token. `dir2mcp uninstall
+<client>` removes only the dir2mcp entry. When the daemon URL or token changes,
+run `install` again.
 
 ### Recovering from a failed embed run
 
@@ -1534,6 +1656,7 @@ make cyclo        # gocyclo -over 15 ./internal/ (install: go install github.com
 make build        # build dir2mcp binary
 make build-elevenlabs-bridge  # build ElevenLabs bridge wrapper binary
 make benchmark    # run retrieval benchmarks
+make demo         # record assets/demo.gif again (needs vhs and an Ollama with nomic-embed-text and qwen2.5:7b)
 ```
 
 Release automation:

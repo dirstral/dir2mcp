@@ -303,7 +303,8 @@ func TestReindex_AfterCrash_RecoversEveryLeftoverGeneration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat %s: %v", path, err)
 		}
-		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		// Windows has no POSIX mode bits, so the owner-only check is unix-only.
+		if perm := info.Mode().Perm(); !posixModesUnsupported() && perm&0o077 != 0 {
 			t.Errorf("recovered %s must stay owner-only; got mode %o", name, perm)
 		}
 	}
