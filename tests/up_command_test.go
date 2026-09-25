@@ -41,7 +41,7 @@ type rootConnectionFile struct {
 }
 
 func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -127,7 +127,7 @@ func assertRootConnectionFile(t *testing.T, connection rootConnectionFile) {
 }
 
 func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -166,7 +166,7 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 		t.Skip("file permission semantics differ on Windows")
 	}
 
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	// ensure there is something to upset loadDotEnvFiles
 	bad := filepath.Join(tmp, ".env")
 	if err := os.WriteFile(bad, []byte("FOO=bar"), 0); err != nil {
@@ -198,7 +198,7 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 // ingestor factory.  Previously runReindex always used config.Default(),
 // causing the ingest service to be unaware of any environment overrides.
 func TestReindexPassesConfigToNewIngestor(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	// Exercise a non-default value so we can distinguish default vs
 	// loaded. The provider clean break (#38) removed the MISTRAL_*
 	// env→Config mapping; DIR2MCP_DOCLING_COMMAND remains a loader-applied
@@ -230,7 +230,7 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 }
 
 func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -295,7 +295,7 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 }
 
 func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -372,7 +372,7 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 }
 
 func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -403,7 +403,7 @@ func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
 }
 
 func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -437,7 +437,7 @@ func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 }
 
 func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -465,7 +465,7 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 }
 
 func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -493,7 +493,7 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 }
 
 func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -515,7 +515,7 @@ func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
 }
 
 func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -537,7 +537,7 @@ func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
 }
 
 func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -556,7 +556,7 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 }
 
 func TestUpPublicRespectsExplicitListen(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -584,7 +584,7 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 }
 
 func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := upTempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -753,4 +753,29 @@ func upRunWindow() time.Duration {
 		return 8 * time.Second
 	}
 	return 2 * time.Second
+}
+
+// upTempDir is t.TempDir for a test that runs `up`, which leaves a sqlite
+// store in the dir. On Windows a closed sqlite handle can hold the file for a
+// short time after Close, and t.TempDir's cleanup then fails the test with
+// "The process cannot access the file because it is being used by another
+// process". The removal retries for up to two seconds there, as
+// tests/embedqueue does; a handle that stays open still fails the test.
+func upTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dir2mcp-up-")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		err := os.RemoveAll(dir)
+		for i := 0; err != nil && runtime.GOOS == "windows" && i < 40; i++ {
+			time.Sleep(50 * time.Millisecond)
+			err = os.RemoveAll(dir)
+		}
+		if err != nil {
+			t.Errorf("remove temp dir %s: %v", dir, err)
+		}
+	})
+	return dir
 }
