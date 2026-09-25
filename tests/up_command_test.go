@@ -50,7 +50,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
 		if code != 0 {
@@ -313,7 +313,7 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -446,7 +446,7 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up"})
 		if code != 0 {
@@ -474,7 +474,7 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public"})
 		if code != 0 {
@@ -546,7 +546,7 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"})
 		if code != 0 {
@@ -565,7 +565,7 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public", "--listen", "127.0.0.1:0"})
 		if code != 0 {
@@ -593,7 +593,7 @@ func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), upRunWindow())
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"up", "--public", "--json", "--read-only"})
 		if code != 0 {
@@ -742,4 +742,15 @@ func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 	if err := ci.Reindex(context.Background()); err == nil {
 		t.Fatal("expected error when store and capturedHash are nil")
 	}
+}
+
+// upRunWindow is how long these tests let `up` run before the context ends
+// it. The store init must finish inside it. A Windows runner flushes files far
+// more slowly, and its sqlite store init alone can take over two seconds, so
+// the window is four times longer there (as raceScaled does in tests/cli).
+func upRunWindow() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 8 * time.Second
+	}
+	return 2 * time.Second
 }
