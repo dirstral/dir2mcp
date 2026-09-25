@@ -41,7 +41,7 @@ import json, sys
 ix = json.load(sys.stdin).get("snapshot", {}).get("indexing", {})
 total = ix.get("chunks_total", 0)
 sys.exit(0 if ix.get("running") is False and total > 0 and ix.get("embedded_ok") == total else 1)
-'; then
+' 2>/dev/null; then
       return 0
     fi
     sleep 1

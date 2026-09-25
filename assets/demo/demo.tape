@@ -39,7 +39,10 @@ Sleep 3s
 
 # Indexing takes a few seconds. Wait off camera, then clear the screen.
 Hide
-Type "demo_wait && clear"
+# VHS Wait reads the screen, not the exit status, and a failed demo_wait would
+# still leave a prompt. So a failure ends the recording shell: no prompt comes
+# back, this Wait times out, vhs fails, and the make demo trap cleans up.
+Type "demo_wait && clear || exit 1"
 Enter
 Wait@150s /^\$\s*$/
 Show
