@@ -1970,6 +1970,7 @@ func (a *App) maybeFirstRunSetup(opts upOptions) int {
 	res, rerr := setupwizard.Run(setupwizard.Input{
 		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
 		ConfigExisted: configExisted,
+		Ollama:        setupwizard.ProbeOllama(context.Background(), setupwizard.OllamaURL()),
 	})
 	if errors.Is(rerr, huh.ErrUserAborted) {
 		return exitSuccess // fall through to the standard preflight error
@@ -1996,12 +1997,18 @@ func (a *App) persistFirstRunSetup(opts upOptions, configPath, envPath string, c
 	}
 	before := fileCfg
 	setupwizard.ApplyCorpusProfile(&fileCfg, res.Profile)
-	// An existing file is never rewritten (see runConfigInit): a rewrite deleted
-	// every setting the flat saved form cannot express. That includes a file
-	// LoadFile could not parse, which was replaced by the defaults.
-	if configExisted {
+	profileLines := setupwizard.ProfileSettingsYAML(before, fileCfg)
+	if res.Route == setupwizard.RouteLocal {
+		if code := a.writeLocalConfigFile(opts.jsonOutput, opts.quiet, configPath, !configExisted, res.Local, profileLines); code >= 0 {
+			return code
+		}
+	} else if configExisted {
+		// An existing file is never rewritten (see runConfigInit): a rewrite
+		// deleted every setting the flat saved form cannot express. That
+		// includes a file LoadFile could not parse, which was replaced by the
+		// defaults.
 		if !opts.jsonOutput {
-			writeProfileSettings(a.stdout, res.Profile, configPath, setupwizard.ProfileSettingsYAML(before, fileCfg))
+			writeProfileSettings(a.stdout, res.Profile, configPath, profileLines)
 		}
 	} else if err := config.SaveFile(configPath, fileCfg); err != nil {
 		writeCLIError(a.stderr, opts.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))

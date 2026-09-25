@@ -32,7 +32,11 @@ func (a *App) emitConfigCreatedMessage(global globalOptions, configPath string, 
 // writeConfigInitFile writes a new config file and reports the outcome. An
 // existing file is left unchanged and the profile's lines are printed instead.
 // It returns a terminal exit code, or -1 to continue.
-func (a *App) writeConfigInitFile(global globalOptions, configPath string, created bool, cfg config.Config, profile setupwizard.Profile, profileLines []string) int {
+func (a *App) writeConfigInitFile(global globalOptions, configPath string, created bool, cfg config.Config, ans wizardAnswers, profileLines []string) int {
+	if ans.local != nil {
+		return a.writeLocalConfigFile(global.jsonOutput, global.quiet, configPath, created, *ans.local, profileLines)
+	}
+	profile := ans.profile
 	if created {
 		if err := config.SaveFile(configPath, cfg); err != nil {
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
@@ -42,6 +46,34 @@ func (a *App) writeConfigInitFile(global globalOptions, configPath string, creat
 	a.emitConfigCreatedMessage(global, configPath, created)
 	if !created && !global.quiet && !global.jsonOutput {
 		writeProfileSettings(a.stdout, profile, configPath, profileLines)
+	}
+	return -1
+}
+
+// writeLocalConfigFile finishes the wizard's local route. A new config file is
+// written with the local provider binding and the profile's lines; an existing
+// file is left unchanged and the lines to add are printed. It returns a
+// terminal exit code, or -1 to continue.
+func (a *App) writeLocalConfigFile(jsonOutput, quiet bool, configPath string, created bool, local setupwizard.LocalSetup, profileLines []string) int {
+	s := a.sty(false)
+	if created {
+		if err := setupwizard.WriteNewLocalConfig(configPath, local, profileLines); err != nil {
+			writeCLIError(a.stderr, jsonOutput, exitGeneric, fmt.Sprintf("save config file: %v", err))
+			return exitGeneric
+		}
+		if !quiet && !jsonOutput {
+			writef(a.stdout, "%s created %s for local models: %s (embeddings) and %s (answers) at %s\n",
+				s.Success.Render("✓"), configPath, local.EmbedModel, local.ChatModel, local.BaseURL)
+		}
+		return -1
+	}
+	if !quiet && !jsonOutput {
+		writef(a.stdout, "%s left %s unchanged: setup never rewrites an existing file\n", s.Success.Render("✓"), configPath)
+		writef(a.stdout, "To use the local models, add these lines to %s:\n\n", configPath)
+		for _, line := range append(setupwizard.LocalProviderYAML(local), profileLines...) {
+			writeln(a.stdout, line)
+		}
+		writeln(a.stdout)
 	}
 	return -1
 }
@@ -237,17 +269,18 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 	// --quiet / --non-interactive paths skip the form and keep prior behavior.
 	envPath := filepath.Join(filepath.Dir(configPath), ".env.local")
 	before := cfg
-	savedKeys, chosenProfile, dest, exitCode := a.runConfigInitWizard(global, configPath, envPath, !created, &cfg)
+	ans, exitCode := a.runConfigInitWizard(global, configPath, envPath, !created, &cfg)
 	if exitCode >= 0 {
 		return exitCode
 	}
+	savedKeys, chosenProfile, dest := ans.savedKeys, ans.profile, ans.dest
 
 	// An existing file is never rewritten. The saved form is a flat subset of
 	// the config, so a rewrite deleted every setting it cannot express (provider
 	// profiles, the embed binding, language routes, comments). A profile the
 	// wizard picked is printed as lines to add instead.
 	profileLines := setupwizard.ProfileSettingsYAML(before, cfg)
-	if code := a.writeConfigInitFile(global, configPath, created, cfg, chosenProfile, profileLines); code >= 0 {
+	if code := a.writeConfigInitFile(global, configPath, created, cfg, ans, profileLines); code >= 0 {
 		return code
 	}
 	a.emitWizardSummary(global, envPath, savedKeys, dest, chosenProfile)
@@ -257,19 +290,7 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 
 	apiKeySaved := containsString(savedKeys, "MISTRAL_API_KEY")
 
-	// Base the credential hint on whether an embed provider actually resolves
-	// (honoring .env.local and any configured provider), not just the current
-	// process env — otherwise we nag for MISTRAL_API_KEY even when setup is
-	// already usable (e.g. key in .env.local, or Gemini/OpenAI configured).
-	nextSteps := []string{}
-	if !a.embedProviderResolves(global) {
-		nextSteps = append(nextSteps, "Set env: export MISTRAL_API_KEY=<your-key>")
-		// Name the exact file the loader reads first (the one beside the config
-		// file), not "this directory": with a custom --config the two differ
-		// and the vague hint sent operators to the wrong file (#677).
-		nextSteps = append(nextSteps, fmt.Sprintf("Or add MISTRAL_API_KEY=<key> to %s", envPath))
-	}
-	nextSteps = append(nextSteps, "Run: dir2mcp up")
+	nextSteps := a.configInitNextSteps(global, ans, created, configPath, envPath)
 
 	if global.jsonOutput {
 		payload := configInitPayload(configPath, created, apiKeySaved, nextSteps, profileLines)
@@ -297,37 +318,73 @@ func (a *App) runConfigInit(global globalOptions, args []string) int {
 // exitCode: a negative exitCode means "continue" (form ran, was skipped, or the
 // user aborted into a baseline write); a non-negative exitCode is terminal and
 // the caller should return it.
-func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (savedKeys []string, profile setupwizard.Profile, dest setupwizard.SecretDest, exitCode int) {
+func (a *App) runConfigInitWizard(global globalOptions, configPath, envPath string, configExisted bool, cfg *config.Config) (ans wizardAnswers, exitCode int) {
 	exitCode = -1
-	dest = setupwizard.DestFile
+	ans.dest = setupwizard.DestFile
 	if !a.setupWizardEligible(global) {
-		return savedKeys, profile, dest, exitCode
+		return ans, exitCode
 	}
 
 	res, err := setupwizard.Run(setupwizard.Input{
 		ExistingKeys:  setupwizard.DetectExistingKeys(envPath),
 		ConfigExisted: configExisted,
+		Ollama:        setupwizard.ProbeOllama(context.Background(), setupwizard.OllamaURL()),
 	})
 	switch {
 	case errors.Is(err, huh.ErrUserAborted):
 		writeln(a.stderr, "setup cancelled; writing baseline config only")
 	case err != nil:
 		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("setup wizard: %v", err))
-		return savedKeys, profile, dest, exitGeneric
+		return ans, exitGeneric
 	default:
 		setupwizard.ApplyCorpusProfile(cfg, res.Profile)
-		profile = res.Profile
-		dest = res.Destination
-		savedKeys, err = setupwizard.PersistKeys(envPath, res.Keys, secretWriter(dest))
+		ans.profile = res.Profile
+		ans.dest = res.Destination
+		if res.Route == setupwizard.RouteLocal {
+			local := res.Local
+			ans.local = &local
+		}
+		ans.savedKeys, err = setupwizard.PersistKeys(envPath, res.Keys, secretWriter(ans.dest))
 		if err != nil {
 			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("save credentials: %v", err))
-			return savedKeys, profile, dest, exitGeneric
+			return ans, exitGeneric
 		}
-		if dest == setupwizard.DestFile {
+		if ans.dest == setupwizard.DestFile {
 			a.protectSecretsFromGit(filepath.Dir(configPath))
 		}
 	}
-	return savedKeys, profile, dest, exitCode
+	return ans, exitCode
+}
+
+// configInitNextSteps lists what the operator does after config init. The
+// local route needs no key; on an existing file it needs the printed lines.
+func (a *App) configInitNextSteps(global globalOptions, ans wizardAnswers, created bool, configPath, envPath string) []string {
+	// Base the credential hint on whether an embed provider actually resolves
+	// (honoring .env.local and any configured provider), not just the current
+	// process env — otherwise we nag for MISTRAL_API_KEY even when setup is
+	// already usable (e.g. key in .env.local, or Gemini/OpenAI configured).
+	nextSteps := []string{}
+	if ans.local != nil && !created {
+		nextSteps = append(nextSteps, fmt.Sprintf("Add the lines above to %s", configPath))
+	} else if ans.local == nil && !a.embedProviderResolves(global) {
+		nextSteps = append(nextSteps, "Set env: export MISTRAL_API_KEY=<your-key>")
+		// Name the exact file the loader reads first (the one beside the config
+		// file), not "this directory": with a custom --config the two differ
+		// and the vague hint sent operators to the wrong file (#677).
+		nextSteps = append(nextSteps, fmt.Sprintf("Or add MISTRAL_API_KEY=<key> to %s", envPath))
+	}
+	nextSteps = append(nextSteps, "Run: dir2mcp up")
+	return nextSteps
+}
+
+// wizardAnswers is what the config init wizard produced: the saved credential
+// names, the profile, where the credentials went, and the local model binding
+// when the user picked the local route.
+type wizardAnswers struct {
+	savedKeys []string
+	profile   setupwizard.Profile
+	dest      setupwizard.SecretDest
+	local     *setupwizard.LocalSetup
 }
 
 // protectSecretsFromGit appends .env.local and the state dir to .gitignore when

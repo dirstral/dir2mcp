@@ -76,20 +76,29 @@ type ProviderKeySpec struct {
 	Optional    bool // shown only when the user opts into optional providers
 }
 
-// MistralEnvVar is the required embedding/OCR/answer credential.
+// MistralEnvVar is the Mistral credential, the default cloud provider.
 const MistralEnvVar = "MISTRAL_API_KEY"
 
-// ProviderKeys is the ordered set of credentials the wizard offers. The required
-// Mistral key and the rerank-enabling Cohere key are always shown; the rest are
-// revealed only when the user asks to configure optional providers, so the
-// common path stays a two-field form.
+// ProviderKeys is the ordered set of credentials the wizard can collect. The
+// cloud route asks for exactly one of the non-Optional keys (the provider the
+// user picks); each of those alone gives embeddings and answers. The Optional
+// keys are revealed only when the user asks for more providers. The local route
+// asks for no key at all.
 var ProviderKeys = []ProviderKeySpec{
-	{EnvVar: MistralEnvVar, Title: "Mistral API key", Description: "Required — embeddings, PDF/OCR extraction, and answers."},
-	{EnvVar: "COHERE_API_KEY", Title: "Cohere API key", Description: "Recommended — enables reranking (sharper citations)."},
-	{EnvVar: "OPENAI_API_KEY", Title: "OpenAI API key", Description: "Optional — alternate chat/embedding provider.", Optional: true},
-	{EnvVar: "ANTHROPIC_API_KEY", Title: "Anthropic API key", Description: "Optional — alternate chat provider.", Optional: true},
-	{EnvVar: "GEMINI_API_KEY", Title: "Gemini API key", Description: "Optional — chat, embeddings, and audio.", Optional: true},
-	{EnvVar: "ELEVENLABS_API_KEY", Title: "ElevenLabs API key", Description: "Optional — speech-to-text / text-to-speech.", Optional: true},
+	{EnvVar: MistralEnvVar, Title: "Mistral API key", Description: "Embeddings, PDF/OCR extraction and answers."},
+	{EnvVar: "OPENAI_API_KEY", Title: "OpenAI API key", Description: "Embeddings and answers."},
+	{EnvVar: "GEMINI_API_KEY", Title: "Gemini API key", Description: "Embeddings, answers and audio."},
+	{EnvVar: "COHERE_API_KEY", Title: "Cohere API key", Description: "Optional: enables reranking (sharper citations).", Optional: true},
+	{EnvVar: "ANTHROPIC_API_KEY", Title: "Anthropic API key", Description: "Optional: an alternate chat provider.", Optional: true},
+	{EnvVar: "ELEVENLABS_API_KEY", Title: "ElevenLabs API key", Description: "Optional: speech-to-text and text-to-speech.", Optional: true},
+}
+
+// cloudProviderLabels names the cloud route's choices, keyed by env var. The
+// order of the choices is the ProviderKeys order.
+var cloudProviderLabels = map[string]string{
+	MistralEnvVar:    "Mistral (the default)",
+	"OPENAI_API_KEY": "OpenAI",
+	"GEMINI_API_KEY": "Gemini",
 }
 
 // Profile is a named retrieval preset the wizard can apply to the config.
@@ -223,10 +232,13 @@ const (
 	DestKeychain SecretDest = "keychain"
 )
 
-// Result holds the user's answers from the setup form: the collected
-// credentials (keyed by env var, empty entries dropped), the chosen corpus
-// profile, and where to persist the credentials.
+// Result holds the user's answers from the setup form: the route, the local
+// model binding (local route only), the collected credentials (keyed by env
+// var, empty entries dropped), the chosen corpus profile, and where to persist
+// the credentials.
 type Result struct {
+	Route       Route
+	Local       LocalSetup
 	Keys        map[string]string
 	Profile     Profile
 	Destination SecretDest
@@ -234,72 +246,253 @@ type Result struct {
 
 // Input parameterizes the setup form with what is already known about the
 // environment so the form can adapt: which credentials are already set (so the
-// field can say "leave blank to keep" and the required check can pass), and
-// whether a config already exists (so a "keep current settings" profile option
-// is offered and pre-selected).
+// field can say "leave blank to keep" and the required check can pass), whether
+// a config already exists (so a "keep current settings" profile option is
+// offered and pre-selected), and what ProbeOllama found (so the local route can
+// list the installed models).
 type Input struct {
 	ExistingKeys  map[string]bool
 	ConfigExisted bool
+	Ollama        OllamaProbe
+}
+
+// FormState holds the form's answers. BuildForm binds its fields to these, and
+// Result turns them into a Result, so the flow can be tested without a TTY.
+type FormState struct {
+	Route         string
+	CloudProvider string // env var of the chosen cloud provider
+	Keys          map[string]*string
+	ConfigureMore bool
+	EmbedModel    string
+	ChatModel     string
+	Profile       string
+	Dest          string
+	Save          bool
+}
+
+// NewFormState returns the form's starting answers for in. The route starts on
+// local when Ollama answered, or when no cloud key is set either; it starts on
+// cloud when only a cloud key is available.
+func NewFormState(in Input) *FormState {
+	st := &FormState{
+		Route:         string(RouteLocal),
+		CloudProvider: MistralEnvVar,
+		Keys:          make(map[string]*string, len(ProviderKeys)),
+		EmbedModel:    PreferredModel(in.Ollama.Embed, []string{DefaultEmbedModel}, DefaultEmbedModel),
+		ChatModel:     PreferredModel(in.Ollama.Chat, []string{"qwen2.5", "llama3", "mistral", "gemma"}, DefaultChatModel),
+		Profile:       string(ProfileGeneral),
+		Dest:          string(DestFile),
+		Save:          true,
+	}
+	for _, spec := range ProviderKeys {
+		st.Keys[spec.EnvVar] = new(string)
+	}
+	if !in.Ollama.Reachable {
+		for _, spec := range ProviderKeys {
+			if !spec.Optional && in.ExistingKeys[spec.EnvVar] {
+				st.Route = string(RouteCloud)
+				st.CloudProvider = spec.EnvVar
+				break
+			}
+		}
+	}
+	if in.ConfigExisted {
+		st.Profile = string(ProfileKeep)
+	}
+	return st
+}
+
+// Result turns the answers into a Result. Declining the final "Save" gives
+// huh.ErrUserAborted, so callers treat it like Ctrl-C.
+func (st *FormState) Result(in Input) (Result, error) {
+	if !st.Save {
+		return Result{}, huh.ErrUserAborted
+	}
+	res := Result{Route: Route(st.Route), Profile: Profile(st.Profile), Destination: SecretDest(st.Dest), Keys: map[string]string{}}
+	if res.Route == RouteLocal {
+		base := in.Ollama.BaseURL
+		if base == "" {
+			base = DefaultOllamaURL
+		}
+		res.Local = LocalSetup{
+			BaseURL:    strings.TrimRight(base, "/") + "/v1",
+			EmbedModel: strings.TrimSpace(st.EmbedModel),
+			ChatModel:  strings.TrimSpace(st.ChatModel),
+		}
+		res.Destination = DestFile
+		return res, nil
+	}
+	for _, spec := range ProviderKeys {
+		chosen := spec.EnvVar == st.CloudProvider
+		if !chosen && (!spec.Optional || !st.ConfigureMore) {
+			continue
+		}
+		if v := strings.TrimSpace(*st.Keys[spec.EnvVar]); v != "" {
+			res.Keys[spec.EnvVar] = v
+		}
+	}
+	return res, nil
 }
 
 // keyDescription augments a provider field's static description with a note when
 // the credential is already present in the environment / .env.local.
 func keyDescription(spec ProviderKeySpec, existing map[string]bool) string {
 	if existing[spec.EnvVar] {
-		return spec.Description + " (already set — leave blank to keep)"
+		return spec.Description + " (already set: leave blank to keep)"
 	}
 	return spec.Description
 }
 
-// BuildForm constructs the huh form, binding each field to the provided
-// pointers. Optional provider inputs live in a group hidden until the user
-// confirms they want to configure more providers. Kept separate from Run so the
-// field/grouping layout can be reasoned about (and the form built) apart from
-// the interactive execution.
-func BuildForm(
-	keyValues map[string]*string,
-	configureMore *bool,
-	profile *string,
-	dest *string,
-	save *bool,
-	in Input,
-) *huh.Form {
-	required := []huh.Field{}
-	optional := []huh.Field{}
-	for _, spec := range ProviderKeys {
-		input := huh.NewInput().
-			Title(spec.Title).
-			Description(keyDescription(spec, in.ExistingKeys)).
-			EchoMode(huh.EchoModePassword).
-			Value(keyValues[spec.EnvVar])
-		// Mistral is required: reject an empty value unless it is already set
-		// (in which case a blank field means "keep the existing key").
-		if spec.EnvVar == MistralEnvVar && !in.ExistingKeys[MistralEnvVar] {
-			input = input.Validate(func(s string) error {
+// BuildForm constructs the huh form, binding each field to st. The first
+// question is the route. The local route shows the Ollama models and asks for
+// no key. The cloud route asks for one provider and that provider's key, and
+// hides the optional providers until the user asks for them. Kept separate
+// from Run so the field/grouping layout can be reasoned about (and the form
+// built) apart from the interactive execution.
+func BuildForm(st *FormState, in Input) *huh.Form {
+	local := func() bool { return st.Route == string(RouteLocal) }
+	groups := []*huh.Group{routeGroup(st, in)}
+	groups = append(groups, localGroups(st, in, local)...)
+	groups = append(groups, cloudGroups(st, in, local)...)
+	groups = append(groups,
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Where to store credentials?").
+				Description("Keychain is encrypted at rest; .env.local also works for the background service.").
+				Options(
+					huh.NewOption(".env.local file", string(DestFile)),
+					huh.NewOption("OS keychain (encrypted)", string(DestKeychain)),
+				).
+				Value(&st.Dest),
+		).WithHideFunc(local),
+		profileGroup(st, in),
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Save these settings?").
+				Affirmative("Save").
+				Negative("Cancel").
+				Value(&st.Save),
+		),
+	)
+	return huh.NewForm(groups...).WithTheme(brandTheme())
+}
+
+// routeGroup asks how dir2mcp should run its models.
+func routeGroup(st *FormState, in Input) *huh.Group {
+	localLabel := "Locally with Ollama: no account, nothing leaves this machine"
+	if in.Ollama.Reachable {
+		localLabel += " (Ollama found)"
+	}
+	return huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("How should dir2mcp run its models?").
+			Options(
+				huh.NewOption(localLabel, string(RouteLocal)),
+				huh.NewOption("With a cloud API key: Mistral, OpenAI or Gemini", string(RouteCloud)),
+			).
+			Value(&st.Route),
+	)
+}
+
+// localGroups are the local route's questions: the two models, as a list when
+// Ollama answered, else as text fields with the README's defaults and a note on
+// how to start Ollama.
+func localGroups(st *FormState, in Input, local func() bool) []*huh.Group {
+	fields := []huh.Field{}
+	if !in.Ollama.Reachable {
+		base := in.Ollama.BaseURL
+		if base == "" {
+			base = DefaultOllamaURL
+		}
+		fields = append(fields, huh.NewNote().
+			Title("Ollama is not answering at "+base).
+			Description("Install it from https://ollama.com, then run:\n  ollama pull "+DefaultEmbedModel+"\n  ollama pull "+DefaultChatModel+"\nThe config is saved now; indexing starts when Ollama is up."))
+	}
+	fields = append(fields,
+		modelField("Embedding model", "Turns your files into vectors for search.", in.Ollama.Embed, &st.EmbedModel),
+		modelField("Chat model", "Writes the answers.", in.Ollama.Chat, &st.ChatModel),
+	)
+	return []*huh.Group{huh.NewGroup(fields...).WithHideFunc(func() bool { return !local() })}
+}
+
+// modelField is a list of the installed models, or a text field when there are
+// none to list.
+func modelField(title, description string, models []string, value *string) huh.Field {
+	if len(models) == 0 {
+		return huh.NewInput().Title(title).Description(description).Value(value).
+			Validate(func(s string) error {
 				if strings.TrimSpace(s) == "" {
-					return errors.New("required — paste your Mistral API key (or pre-set MISTRAL_API_KEY)")
+					return errors.New("a model name is required")
 				}
 				return nil
 			})
-		}
-		if spec.Optional {
-			optional = append(optional, input)
-		} else {
-			required = append(required, input)
+	}
+	options := make([]huh.Option[string], 0, len(models))
+	for _, m := range models {
+		options = append(options, huh.NewOption(m, m))
+	}
+	return huh.NewSelect[string]().Title(title).Description(description).Options(options...).Value(value)
+}
+
+// cloudGroups are the cloud route's questions: the provider, that provider's
+// key (required unless it is already set), and the optional providers behind a
+// confirm.
+func cloudGroups(st *FormState, in Input, local func() bool) []*huh.Group {
+	choices := []huh.Option[string]{}
+	for _, spec := range ProviderKeys {
+		if !spec.Optional {
+			choices = append(choices, huh.NewOption(cloudProviderLabels[spec.EnvVar], spec.EnvVar))
 		}
 	}
+	groups := []*huh.Group{huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Cloud provider").
+			Description("Its key alone gives embeddings and answers.").
+			Options(choices...).
+			Value(&st.CloudProvider),
+	).WithHideFunc(local)}
+	optional := []huh.Field{}
+	for _, spec := range ProviderKeys {
+		input := keyInput(spec, in, st.Keys[spec.EnvVar])
+		if spec.Optional {
+			optional = append(optional, input)
+			continue
+		}
+		envVar := spec.EnvVar
+		groups = append(groups, huh.NewGroup(input,
+			huh.NewConfirm().
+				Title("Configure optional providers?").
+				Description("Cohere reranking, Anthropic, ElevenLabs.").
+				Value(&st.ConfigureMore),
+		).WithHideFunc(func() bool { return local() || st.CloudProvider != envVar }))
+	}
+	groups = append(groups, huh.NewGroup(optional...).
+		WithHideFunc(func() bool { return local() || !st.ConfigureMore }))
+	return groups
+}
 
-	providerGroup := huh.NewGroup(append(
-		required,
-		huh.NewConfirm().
-			Title("Configure optional chat / audio providers?").
-			Description("OpenAI, Anthropic, Gemini, ElevenLabs.").
-			Value(configureMore),
-	)...)
+// keyInput is a masked field for one credential. A cloud provider's key is
+// required when it is not set already; an optional key never is.
+func keyInput(spec ProviderKeySpec, in Input, value *string) *huh.Input {
+	input := huh.NewInput().
+		Title(spec.Title).
+		Description(keyDescription(spec, in.ExistingKeys)).
+		EchoMode(huh.EchoModePassword).
+		Value(value)
+	if !spec.Optional && !in.ExistingKeys[spec.EnvVar] {
+		title := spec.Title
+		input = input.Validate(func(s string) error {
+			if strings.TrimSpace(s) == "" {
+				return fmt.Errorf("required: paste your %s, or go back and pick the local route", title)
+			}
+			return nil
+		})
+	}
+	return input
+}
 
-	optionalGroup := huh.NewGroup(optional...).
-		WithHideFunc(func() bool { return !*configureMore })
-
+// profileGroup asks for the corpus profile.
+func profileGroup(st *FormState, in Input) *huh.Group {
 	options := []huh.Option[string]{}
 	if in.ConfigExisted {
 		options = append(options, huh.NewOption("Keep current settings (don't change retrieval)", string(ProfileKeep)))
@@ -309,35 +502,13 @@ func BuildForm(
 		huh.NewOption("Legal / citations (strict grounding)", string(ProfileLegal)),
 		huh.NewOption("Source code", string(ProfileCode)),
 	)
-	profileGroup := huh.NewGroup(
+	return huh.NewGroup(
 		huh.NewSelect[string]().
 			Title("Corpus profile").
 			Description("Tunes retrieval for this kind of content.").
 			Options(options...).
-			Value(profile),
+			Value(&st.Profile),
 	)
-
-	destGroup := huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Where to store credentials?").
-			Description("Keychain is encrypted at rest; .env.local also works for the background service.").
-			Options(
-				huh.NewOption(".env.local file", string(DestFile)),
-				huh.NewOption("OS keychain (encrypted)", string(DestKeychain)),
-			).
-			Value(dest),
-	)
-
-	confirmGroup := huh.NewGroup(
-		huh.NewConfirm().
-			Title("Save these settings?").
-			Affirmative("Save").
-			Negative("Cancel").
-			Value(save),
-	)
-
-	return huh.NewForm(providerGroup, optionalGroup, destGroup, profileGroup, confirmGroup).
-		WithTheme(brandTheme())
 }
 
 // PromptSecret runs a single masked, brand-themed input and returns the entered
@@ -386,33 +557,11 @@ func Confirm(title, description string, defaultYes bool) (bool, error) {
 // (.env.local) and config patching. Declining the final "Save" confirm surfaces
 // as huh.ErrUserAborted so callers treat it like Ctrl-C.
 func Run(in Input) (Result, error) {
-	keyValues := make(map[string]*string, len(ProviderKeys))
-	for _, spec := range ProviderKeys {
-		keyValues[spec.EnvVar] = new(string)
-	}
-	var configureMore bool
-	save := true
-	profile := string(ProfileGeneral)
-	if in.ConfigExisted {
-		profile = string(ProfileKeep)
-	}
-	dest := string(DestFile)
-
-	form := BuildForm(keyValues, &configureMore, &profile, &dest, &save, in)
-	if err := form.Run(); err != nil {
+	st := NewFormState(in)
+	if err := BuildForm(st, in).Run(); err != nil {
 		return Result{}, err
 	}
-	if !save {
-		return Result{}, huh.ErrUserAborted
-	}
-
-	keys := make(map[string]string)
-	for env, ptr := range keyValues {
-		if v := strings.TrimSpace(*ptr); v != "" {
-			keys[env] = v
-		}
-	}
-	return Result{Keys: keys, Profile: Profile(profile), Destination: SecretDest(dest)}, nil
+	return st.Result(in)
 }
 
 // PersistKeys writes each non-empty collected credential via write (a dotenv
