@@ -178,9 +178,14 @@ release-smoke:
 # It needs vhs (brew install vhs) and an Ollama server with nomic-embed-text and
 # qwen2.5:7b. The default endpoint is http://127.0.0.1:11434/v1. Set
 # DEMO_OLLAMA_URL and DEMO_CHAT_MODEL in the environment to use another one.
+# The recipe owns the demo root: the EXIT trap stops the demo daemon and
+# removes the root even when vhs fails part way, which skips the tape's own
+# cleanup.
 demo: build
 	@command -v vhs >/dev/null 2>&1 || (echo "vhs is required. Install: brew install vhs" && exit 1)
-	vhs assets/demo/demo.tape
+	@root="$$(mktemp -d /tmp/dir2mcp-demo.XXXXXX)"; \
+	trap 'if [ -d "$$root/notes" ]; then (cd "$$root/notes" && HOME="$$root/home" "$(CURDIR)/dir2mcp" down >/dev/null 2>&1); fi; rm -rf "$$root"' EXIT; \
+	DEMO_ROOT="$$root" vhs assets/demo/demo.tape
 
 clean:
 	rm -f dir2mcp coverage.out

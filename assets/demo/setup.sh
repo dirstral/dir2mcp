@@ -7,7 +7,9 @@
 # model with DEMO_CHAT_MODEL.
 
 DEMO_REPO="$(pwd)"
-DEMO_ROOT="$(mktemp -d /tmp/dir2mcp-demo.XXXXXX)"
+# `make demo` creates DEMO_ROOT and removes it on exit, also when the
+# recording fails. A direct `vhs` run makes its own.
+DEMO_ROOT="${DEMO_ROOT:-$(mktemp -d /tmp/dir2mcp-demo.XXXXXX)}"
 export HOME="$DEMO_ROOT/home"
 mkdir -p "$HOME"
 export PATH="$DEMO_REPO:$PATH"
@@ -28,15 +30,20 @@ model:
   chat: {provider: local}
 EOF
 
-# demo_wait blocks until the daemon has embedded every chunk.
+# demo_wait blocks until indexing has stopped and EVERY chunk is embedded
+# (embedded_ok == chunks_total > 0). embedded_pending=0 alone is not enough: a
+# chunk whose embedding failed is not pending either, and the question could
+# then miss its note. It gives up after 60 s; the tape waits longer than that.
 demo_wait() {
-  local s
-  for _ in $(seq 1 120); do
-    s="$(dir2mcp --json status 2>/dev/null)"
-    case "$s" in
-      *'"running":false'*'"embedded_pending":0,'*)
-        case "$s" in *'"chunks_total":0,'*) ;; *) return 0 ;; esac ;;
-    esac
+  for _ in $(seq 1 60); do
+    if dir2mcp --json status 2>/dev/null | python3 -c '
+import json, sys
+ix = json.load(sys.stdin).get("snapshot", {}).get("indexing", {})
+total = ix.get("chunks_total", 0)
+sys.exit(0 if ix.get("running") is False and total > 0 and ix.get("embedded_ok") == total else 1)
+'; then
+      return 0
+    fi
     sleep 1
   done
   echo "demo_wait: indexing did not finish" >&2

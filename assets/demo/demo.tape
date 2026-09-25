@@ -41,7 +41,7 @@ Sleep 3s
 Hide
 Type "demo_wait && clear"
 Enter
-Wait@90s /^\$\s*$/
+Wait@150s /^\$\s*$/
 Show
 
 Type 'dir2mcp ask "When is the budget meeting?"'
@@ -49,6 +49,8 @@ Enter
 Wait+Screen@90s /Citations/
 Sleep 4s
 
+# The normal-path cleanup. `make demo` also stops the daemon and removes
+# DEMO_ROOT on exit, so a failed recording leaves nothing behind.
 Hide
 Type 'dir2mcp down; cd / && rm -rf "$DEMO_ROOT"'
 Enter
