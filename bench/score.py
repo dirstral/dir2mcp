@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+import posixpath
 import re
 import sys
 from collections import Counter
@@ -111,10 +112,19 @@ def inline_tags(answer):
     return out
 
 
+def _norm_rel(rel):
+    """The rel_path as the corpus stores it: forward slashes, no leading "./".
+
+    The WHOLE path is compared with the gold path, not its basename, so a
+    citation to other/Normans.md does not count as one to Normans.md.
+    """
+    return posixpath.normpath((rel or "").strip().replace("\\", "/"))
+
+
 def supports(tag, q, span_level=True):
     """True when the tag names the gold file and, at span level, its range holds the gold line."""
     rel, start, end = tag
-    if not q.get("gold_rel_path") or os.path.basename(rel) != q["gold_rel_path"]:
+    if not q.get("gold_rel_path") or _norm_rel(rel) != q["gold_rel_path"]:
         return False
     if not span_level:
         return True

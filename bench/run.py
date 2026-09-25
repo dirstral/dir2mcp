@@ -57,12 +57,25 @@ def read_status(binary, work, config, env):
 
 
 def index_done(st):
-    """True when the index run stopped and no chunk waits for an embedding."""
+    """True when the index run stopped with the WHOLE corpus indexed.
+
+    That is: no errors, and every chunk embedded (embedded_ok == chunks_total).
+    embedded_pending == 0 alone also holds for a chunk whose embedding failed,
+    and a run with errors describes a partial corpus. A stopped run with errors
+    is not "done"; wait_for_index stops on it at once.
+    """
     if not st:
         return False
     ix = (st.get("snapshot") or {}).get("indexing") or {}
-    return (ix.get("running") is False and ix.get("embedded_pending", 1) == 0
-            and ix.get("chunks_total", 0) > 0)
+    total = ix.get("chunks_total", 0)
+    return (ix.get("running") is False and ix.get("errors", 1) == 0
+            and total > 0 and ix.get("embedded_ok") == total)
+
+
+def index_failed(st):
+    """True when the index run stopped with errors, so it will never be done."""
+    ix = ((st or {}).get("snapshot") or {}).get("indexing") or {}
+    return ix.get("running") is False and ix.get("errors", 0) > 0
 
 
 def wait_for_index(binary, work, config, env, proc, timeout):
@@ -76,6 +89,8 @@ def wait_for_index(binary, work, config, env, proc, timeout):
             last = st
             if index_done(st):
                 return st
+            if index_failed(st):
+                raise SystemExit(f"indexing stopped with errors; the corpus is partial, so no scores: {json.dumps(st)[:400]}")
         time.sleep(3)
     raise SystemExit(f"index did not finish in {timeout}s; last status: {json.dumps(last)[:400]}")
 

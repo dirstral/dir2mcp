@@ -59,6 +59,12 @@ class InlineTags(unittest.TestCase):
 
 
 class Supports(unittest.TestCase):
+    def test_whole_path_not_basename(self):
+        q = {"gold_rel_path": "Normans.md", "gold_line": 3}
+        self.assertFalse(score.supports(("other/Normans.md", 1, 5), q))
+        self.assertFalse(score.supports(("other/Normans.md", None, None), q, span_level=False))
+        self.assertTrue(score.supports(("./Normans.md", 1, 5), q))
+
     def test_span_and_file(self):
         gold = q("1", "answerable", ["x"], "a.md", 5)
         self.assertTrue(score.supports(("a.md", 3, 7), gold))
