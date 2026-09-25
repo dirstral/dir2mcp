@@ -127,6 +127,8 @@ Requires `HOMEBREW_TAP_GITHUB_TOKEN` to be set as a repository secret (a PAT wit
 
 - `dir2mcp` has no `help` subcommand; usage is printed when `dir2mcp` is invoked without arguments, or with `-h`/`-help`/`--help` anywhere before a `--` terminator.
 - `--public` requires auth unless `--force-insecure` is explicitly set.
+- The client name `claude` means Claude Desktop. Claude Code is `claude-code`,
+  and Cursor is `cursor` (`install`, `uninstall`, `doctor`, `print-config`).
 - x402 mode semantics:
   - `off`: disabled
   - `on`: fail-open on incomplete config
