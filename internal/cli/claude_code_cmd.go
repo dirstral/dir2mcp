@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -263,10 +264,25 @@ func removeClaudeCodeServer(ctx context.Context, bin, name, scope string) (bool,
 	return false, fmt.Errorf("claude mcp remove failed: %v: %s", err, out)
 }
 
+// claudeCodePlatformError refuses install and print-config on Windows. The
+// entry's headers helper is a POSIX shell command (printf, tr), and nothing has
+// tested how Claude Code on Windows runs it. uninstall and doctor only call the
+// claude CLI, so they stay available there.
+func claudeCodePlatformError() error {
+	if runtime.GOOS == "windows" {
+		return errors.New("claude-code install and print-config are not supported on Windows: the auth helper is a POSIX shell command; use `dir2mcp install cursor`, or run dir2mcp on macOS or Linux")
+	}
+	return nil
+}
+
 func (a *App) runClaudeCodePrintConfig(global globalOptions, args []string) int {
 	t, code := a.resolveClaudeCodeTarget(global, "print-config claude-code", args, true)
 	if code != exitSuccess {
 		return code
+	}
+	if err := claudeCodePlatformError(); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
+		return exitConfigInvalid
 	}
 	entryJSON, err := claudeCodeEntryJSON(t)
 	if err != nil {
@@ -296,6 +312,10 @@ func (a *App) runClaudeCodeInstall(ctx context.Context, global globalOptions, ar
 	t, code := a.resolveClaudeCodeTarget(global, "install claude-code", args, true)
 	if code != exitSuccess {
 		return code
+	}
+	if err := claudeCodePlatformError(); err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
+		return exitConfigInvalid
 	}
 	entryJSON, err := claudeCodeEntryJSON(t)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -63,6 +64,7 @@ exit 0
 // on the developer machine is never called.
 func installFakeClaude(t *testing.T, tmp string) string {
 	t.Helper()
+	skipClaudeCodeOnWindows(t)
 	binDir := filepath.Join(tmp, "bin")
 	stateDir := filepath.Join(tmp, "fake-claude-state")
 	for _, d := range []string{binDir, stateDir} {
@@ -341,6 +343,7 @@ func TestClaudeCodeInstallRejectsProjectScope(t *testing.T) {
 }
 
 func TestClaudeCodeInstallWithoutClaudePrintsCommand(t *testing.T) {
+	skipClaudeCodeOnWindows(t)
 	tmp := t.TempDir()
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-nocli")
 	t.Setenv("PATH", filepath.Join(tmp, "empty-bin"))
@@ -436,6 +439,7 @@ func TestClaudeCodeDoctorReportsRegistration(t *testing.T) {
 }
 
 func TestClaudeCodePrintConfigNeverPrintsToken(t *testing.T) {
+	skipClaudeCodeOnWindows(t)
 	tmp := t.TempDir()
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-print")
 
@@ -499,5 +503,33 @@ func TestClaudeCodeDoctorFlagsStaleURL(t *testing.T) {
 	assertNoToken(t, "tok-cc-stale", stdout, stderr)
 	if !strings.Contains(stdout, `registered url "http://127.0.0.1:9882/mcp" does not match the daemon url`) {
 		t.Fatalf("unexpected doctor output: %s", stdout)
+	}
+}
+
+// skipClaudeCodeOnWindows skips a test that needs a POSIX shell: the fake
+// claude CLI is a sh script, and the entry's headers helper is a shell
+// command. On Windows, install and print-config refuse instead
+// (TestClaudeCodeRefusedOnWindows).
+func skipClaudeCodeOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell: the fake claude CLI and the headers helper are sh; install claude-code is refused on Windows")
+	}
+}
+
+// TestClaudeCodeRefusedOnWindows pins that install and print-config for
+// Claude Code refuse on Windows with a clear error and exit code, rather than
+// register a helper that has no POSIX shell to run in.
+func TestClaudeCodeRefusedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only behavior")
+	}
+	tmp := t.TempDir()
+	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-win")
+	for _, cmd := range [][]string{{"install", "claude-code"}, {"print-config", "claude-code"}} {
+		code, _, stderr := runCLI(t, append([]string{"--state-dir", stateDir}, cmd...)...)
+		if code == 0 || !strings.Contains(stderr, "not supported on Windows") {
+			t.Errorf("%v: exit=%d stderr=%q, want the Windows refusal", cmd, code, stderr)
+		}
 	}
 }

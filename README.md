@@ -296,6 +296,9 @@ Limits on Windows:
   it.
 - `dir2mcp service` is not available. To start the server at logon, add a Task
   Scheduler task that runs `dir2mcp up --foreground` in the corpus folder.
+- `install claude-code` and `print-config claude-code` are refused: the auth
+  helper they register is a POSIX shell command, and it is not tested with
+  Claude Code on Windows. Use `install cursor`, or run dir2mcp on macOS or Linux.
 - `install claude` writes `%APPDATA%\Claude\claude_desktop_config.json`. The
   entry runs `mcp-remote` through `bunx` or `npx`. We did not test this entry
   with Claude Desktop on Windows.
