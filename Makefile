@@ -26,7 +26,7 @@ build-elevenlabs-bridge:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-annotator check ci benchmark inspector-smoke conformance demo
+.PHONY: all clean clean-all help fmt fmt-check vet lint cyclo ineffassign misspell test test-race test-release-tools test-bench test-annotator check ci benchmark bench-e2e inspector-smoke conformance demo
 
 all: check
 
@@ -45,11 +45,13 @@ help:
 	@echo "  test   - run go test"
 	@echo "  test-race - run go test -race on the concurrency-sensitive packages (needs CGO)"
 	@echo "  test-annotator - run the Python annotator suite in its own venv"
-	@echo "  check  - fmt-check + vet + lint + cyclo + ineffassign + misspell + test + test-annotator + build"
-	@echo "  ci     - fmt-check + vet + cyclo + ineffassign + misspell + test + test-annotator (CI-safe default)"
+	@echo "  test-bench - run the unit tests of the end-to-end benchmark scorer"
+	@echo "  check  - fmt-check + vet + lint + cyclo + ineffassign + misspell + test + test-bench + test-annotator + build"
+	@echo "  ci     - fmt-check + vet + cyclo + ineffassign + misspell + test + test-bench + test-annotator (CI-safe default)"
 	@echo "  build-elevenlabs-bridge - build the ElevenLabs webhook bridge binary"
 	@echo "  conformance      - run black-box conformance tests (tests/conformance/)"
 	@echo "  benchmark        - run the large-corpus retrieval benchmark"
+	@echo "  bench-e2e        - run the end-to-end answer and citation benchmark (bench/)"
 	@echo "  inspector-smoke  - build and run MCP inspector headless smoke test"
 	@echo "  demo             - render the README terminal demo (assets/demo.gif); needs vhs and a local Ollama"
 
@@ -110,6 +112,10 @@ test-race:
 test-release-tools:
 	cd scripts && python3 -m unittest discover -p 'test_*.py'
 
+# Unit tests for the end-to-end benchmark scorer (bench/). No network, no daemon.
+test-bench:
+	cd bench && python3 -m unittest discover -p 'test_*.py'
+
 conformance:
 	go test ./tests/conformance/...
 
@@ -144,13 +150,19 @@ test-annotator: $(ANNOTATOR_STAMP)
 # `check` is the documented local merge-readiness gate, so it has to cover the
 # whole repository: the annotator suite is part of it, and the formatting step
 # reports rather than rewrites.
-check: fmt-check vet lint cyclo ineffassign misspell test test-release-tools test-annotator build
+check: fmt-check vet lint cyclo ineffassign misspell test test-release-tools test-bench test-annotator build
 
-ci: fmt-check vet cyclo ineffassign misspell test test-release-tools test-annotator
+ci: fmt-check vet cyclo ineffassign misspell test test-release-tools test-bench test-annotator
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
 	go test -bench BenchmarkSearchBothLargeCorpus -run ^$$ -benchmem ./internal/retrieval
+
+# End-to-end answer and citation benchmark (bench/README.md). It needs the
+# providers in BENCH_CONFIG to be reachable; it is not part of a gate.
+BENCH_CONFIG ?= bench/config.local.yaml
+bench-e2e: build
+	python3 bench/run.py --bin ./dir2mcp --config "$(BENCH_CONFIG)" $(ARGS)
 
 SMOKE_CORPUS ?= tests/testdata/smoke-corpus
 inspector-smoke: build
