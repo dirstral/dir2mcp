@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -79,7 +80,8 @@ func TestCursorInstallWritesHTTPEntryAndPreservesOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// POSIX modes do not apply on Windows, where os.Stat reports 0666.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Fatalf("config perms = %o, want 0600 (it holds a bearer token)", perm)
 	}
 }
