@@ -653,3 +653,41 @@ func TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008(t *
 			"rewriting an idle corpus, want it parked at 5", got)
 	}
 }
+
+// TestLockAtomicWritePath_SerializesOnePath pins the in-process serialization
+// that keeps concurrent writers of one state file from racing each other's
+// rename on Windows: a second lock on the same path, in any spelling, waits for
+// the first, and a lock on a different path does not.
+func TestLockAtomicWritePath_SerializesOnePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corpus.json")
+	unlock := lockAtomicWritePath(path)
+
+	other := make(chan struct{})
+	go func() {
+		defer close(other)
+		lockAtomicWritePath(filepath.Join(dir, "connection.json"))()
+	}()
+	select {
+	case <-other:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a lock on a different path waited for the lock on corpus.json")
+	}
+
+	same := make(chan struct{})
+	go func() {
+		defer close(same)
+		lockAtomicWritePath(filepath.Join(dir, "sub", "..", "corpus.json"))()
+	}()
+	select {
+	case <-same:
+		t.Fatal("a second lock on the same path did not wait for the first")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-same:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second lock on the same path did not get the lock after unlock")
+	}
+}

@@ -2063,6 +2063,8 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
+	unlock := lockAtomicWritePath(path)
+	defer unlock()
 	if err := renameOverRetrying(tmp, path); err != nil {
 		// os.Rename fails on Windows when the destination already exists.
 		// Remove the existing file and retry once to support Windows.
@@ -2073,6 +2075,25 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		}
 	}
 	return nil
+}
+
+// atomicWriteLocks holds one mutex for each destination path that
+// atomicWriteFile has replaced in this process. The set of paths is small and
+// fixed (the state files), so the map does not grow without bound.
+var atomicWriteLocks sync.Map // cleaned path -> *sync.Mutex
+
+// lockAtomicWritePath serializes the renames onto one destination path within
+// this process and returns the unlock function. On Windows, a rename over a
+// file fails while another rename onto the same file is in progress. With many
+// writers in one process (the corpus writer loop and the callers of
+// writeCorpusSnapshot), one writer could lose that race for longer than the
+// retry in renameOverRetrying allows, and the write failed. The retry still
+// covers handles from other processes, such as `status` while it reads the file.
+func lockAtomicWritePath(path string) func() {
+	v, _ := atomicWriteLocks.LoadOrStore(filepath.Clean(path), &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // windowsRenameAttempts and windowsRenameBackoff bound the Windows rename
