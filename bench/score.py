@@ -28,6 +28,7 @@ from prepare import DEFAULT_WORK, normalize  # noqa: E402
 ABSTAIN_PATTERNS = [
     r"\binsufficient evidence to answer\b",
     r"\bno relevant context found\b",
+    r"\bi could not verify the answer against the retrieved passages\b",
     r"\b(?:does|do|did) not (?:contain|provide|include|mention|specify|say|state|cover|"
     r"give|offer|address|discuss|describe|indicate|list|identify|name|have|explicitly)\b",
     r"\b(?:doesn't|don't) (?:contain|provide|include|mention|specify|say|state|cover|"
@@ -188,6 +189,7 @@ def score(results, questions):
             "tool_errors": sum(r["is_error"] for r in rows),
             "answerable_without_citations": sum(1 for r in ans if not r["citations"]),
             "server_evidence_insufficient": sum(1 for r in rows if r.get("evidence") == "insufficient"),
+            "server_faithfulness_unsupported": sum(1 for r in rows if r.get("faithfulness") == "unsupported"),
         },
         "answer_contains_gold": _ratio(len(correct), len(ans)),
         "answer_gold_token_recall_mean": (sum(token_recall(r["answer"], qmap[r["id"]]["answers"]) for r in ans) / len(ans)) if ans else None,
@@ -248,6 +250,7 @@ def render_markdown(report, run):
         f"| (e) Latency p50 / p95 / max (ms, n={lat['n']}) | {lat['p50']} / {lat['p95']} / {lat['max']} |",
         f"| Answerable questions with no citation | {c['answerable_without_citations']} |",
         f"| Answers that dir2mcp withheld (`evidence` = insufficient) | {c['server_evidence_insufficient']} |",
+        f"| Answers that dir2mcp withheld (`faithfulness` = unsupported) | {c['server_faithfulness_unsupported']} |",
     ]
     return "\n".join(lines) + "\n"
 
