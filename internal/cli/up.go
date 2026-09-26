@@ -876,6 +876,10 @@ func (a *App) initStoreAndIndices(ctx context.Context, cfg *config.Config, jsonO
 	st := a.storeForConfig(*cfg)
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		writeStoreInitError(a.stderr, jsonOutput, exitIndexLoadFailure, err, fmt.Sprintf("initialize metadata store: %v", err))
+		// Init can fail after it opened the database (for example a migration
+		// that runs out of time), so release the handle. The caller gets no
+		// store to close on this path.
+		_ = st.Close()
 		return nil, builtIndex{}, builtIndex{}, exitIndexLoadFailure
 	}
 
