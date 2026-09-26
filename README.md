@@ -35,8 +35,7 @@ again from [`assets/demo/demo.tape`](assets/demo/demo.tape).
 
 ```bash
 brew tap dirstral/tap
-brew trust dirstral/tap         # Homebrew 6 and later only; skip it on older Homebrew
-brew install dirstral/tap/dir2mcp
+brew install dirstral/tap/dir2mcp   # the full name trusts only this formula
 cd ~/notes                      # any folder you want to ask about
 ```
 
@@ -141,11 +140,10 @@ Install `dir2mcp` via Homebrew tap:
 
 ```bash
 brew tap dirstral/tap
-brew trust dirstral/tap      # required on Homebrew 6.x: third-party taps are untrusted by default
 brew install dirstral/tap/dir2mcp
 ```
 
-On Homebrew 6.x a freshly tapped third-party formula is refused until the tap is trusted, so `brew install dirstral/tap/dir2mcp` on a clean machine fails without the `brew trust` step above. Homebrew before 6.x has no `brew trust` command: it stops with "Unknown command: brew trust". Skip that step there; the install works without it.
+Install by the full name `dirstral/tap/dir2mcp`. Recent Homebrew does not load formulae from an untrusted third-party tap, but an install by the full name trusts that one formula only ("Trusted formula dirstral/tap/dir2mcp"), so you do not need to trust the whole tap. If your Homebrew still refuses the formula as untrusted, run `brew trust --formula dirstral/tap/dir2mcp` and install again. Older Homebrew has no trust check and installs it directly.
 
 Then verify:
 
