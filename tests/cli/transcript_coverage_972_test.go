@@ -611,7 +611,7 @@ func TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing(t
 }
 
 func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T) {
-	// Pins what the README states, on the banner's ACTUAL output rather than on
+	// Pins what docs/configuration.md states, on the banner's ACTUAL output rather than on
 	// the probe's count: a corpus whose transcripts merely assert nothing
 	// produces no Speech coverage section, and only `doctor` names them.
 	dir := t.TempDir()
@@ -625,7 +625,7 @@ func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T)
 		t.Errorf("the banner rendered a section for a no-assertion-only corpus:\n%s", got)
 	}
 
-	// doctor still names them, which is the half the README points at.
+	// doctor still names them, which is the half docs/configuration.md points at.
 	_ = st.Close()
 	check, _ := doctorCheckNamed(t, dir, "transcript_coverage")
 	if !strings.Contains(check.Detail, "assert nothing about coverage") {

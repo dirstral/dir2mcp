@@ -126,7 +126,7 @@ func (a *App) runUpAsDaemonParent(ctx context.Context, opts upOptions) int {
 		// and will bind shortly, so report it as a friendly success instead
 		// of the scary bind-failure path.
 		if IsDaemonStillStarting(err) {
-			// Deliberately no §7.7 coverage here, and the README says so. This
+			// Deliberately no §7.7 coverage here, and docs/configuration.md says so. This
 			// path returns while the child is still building the store, so any
 			// verdict would describe a corpus that does not exist yet — and
 			// "no uncovered formats" read off a half-built record is the kind

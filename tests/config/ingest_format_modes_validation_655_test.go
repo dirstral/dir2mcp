@@ -16,7 +16,7 @@ package tests
 // The canonical spec names the enum members without defining the behavior of any
 // member, so implementing one would author normative semantics this repository
 // does not own. These tests therefore pin the validation contract only, and the
-// README states plainly that the modes have no runtime effect yet.
+// docs/configuration.md states plainly that the modes have no runtime effect yet.
 
 import (
 	"os"
@@ -159,7 +159,7 @@ func TestIngestFormatModes_LoadFailsOnATypo(t *testing.T) {
 }
 
 // TestIngestFormatModes_LoadFailsOnANestedTypo covers the nested spelling the
-// canonical template and the README both use, which reaches the same gate through
+// canonical template and docs/configuration.md both use, which reaches the same gate through
 // the `ingest.archives` section.
 func TestIngestFormatModes_LoadFailsOnANestedTypo(t *testing.T) {
 	dir := t.TempDir()

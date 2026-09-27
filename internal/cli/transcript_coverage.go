@@ -197,7 +197,7 @@ func printTranscriptCoverageSection(out io.Writer, s styles, cov transcriptCover
 // exactly what the banner would have written.
 //
 // It exists because asserting the probe's count is not the same claim as
-// asserting what the banner prints, and the README documents the latter. A test
+// asserting what the banner prints, and docs/configuration.md documents the latter. A test
 // over the count alone would keep passing if the section started rendering for a
 // verdict that is not partial.
 func (a *App) RenderTranscriptCoverageSectionForTest(ctx context.Context, st interface{}, cfg config.Config) string {

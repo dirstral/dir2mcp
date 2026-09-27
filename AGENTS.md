@@ -26,7 +26,7 @@ dir2mcp is a single-binary Go service that indexes local directory content and s
 - `internal/x402` - payment types and facilitator HTTP client
 - `internal/store` - sqlite metadata storage
 - `tests` - integration/system tests by area
-- `docs/` - reference documentation (SPEC, VISION, ECOSYSTEM, x402 adapter spec)
+- `docs/` - user guides (install, configuration, cli, mcp-tools, security, deployment, x402) and pointer stubs for the normative docs (SPEC, VISION, ECOSYSTEM, x402 adapter spec)
 
 ## Git workflow
 

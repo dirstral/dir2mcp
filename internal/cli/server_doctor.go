@@ -998,7 +998,7 @@ func egressCheck(cfg config.Config) doctorCheck {
 				"(checked embed, chat, ocr, stt, rerank, tts)"}
 	}
 	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: fmt.Sprintf(
-		"corpus content egresses to third-party host(s): %s. For an on-prem/no-egress setup, see the README 'Fully local / no-egress' recipe.",
+		"corpus content egresses to third-party host(s): %s. For an on-prem/no-egress setup, see 'Fully local / no-egress setup' in docs/configuration.md.",
 		thirdPartyDestinations(hostOrder, byHost))}
 }
 

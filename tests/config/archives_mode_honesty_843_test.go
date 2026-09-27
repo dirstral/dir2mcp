@@ -50,6 +50,7 @@ func configRepoRoot(t *testing.T) string {
 }
 
 // TestArchivesMode_DefaultMatchesTheREADME pins the default against the document
+// (docs/configuration.md, moved out of the README)
 // that describes it, so the code and the prose cannot drift apart again. #843 is
 // exactly that drift: the template said one thing and the runtime did another.
 func TestArchivesMode_DefaultMatchesTheREADME(t *testing.T) {
@@ -58,15 +59,15 @@ func TestArchivesMode_DefaultMatchesTheREADME(t *testing.T) {
 		t.Fatalf("the default ingest.archives.mode must stay %q (SPEC §16.2 template); got %q", want, got)
 	}
 
-	readme, err := os.ReadFile(filepath.Join(configRepoRoot(t), "README.md"))
+	readme, err := os.ReadFile(filepath.Join(configRepoRoot(t), "docs", "configuration.md"))
 	if err != nil {
-		t.Fatalf("read README.md: %v", err)
+		t.Fatalf("read docs/configuration.md: %v", err)
 	}
 	text := string(readme)
 	if !strings.Contains(text, "mode: "+want+"         # off|shallow|deep") {
-		t.Errorf("README.md must show the default ingest.archives.mode as %q", want)
+		t.Errorf("docs/configuration.md must show the default ingest.archives.mode as %q", want)
 	}
-	// The README must retract the promise in the same place it shows the value.
+	// The page must retract the promise in the same place it shows the value.
 	for _, phrase := range []string{
 		"No accepted value changes behavior yet.",
 		"`ingest.archives.mode: deep` promises more than dir2mcp does",
@@ -74,7 +75,7 @@ func TestArchivesMode_DefaultMatchesTheREADME(t *testing.T) {
 		"`skip_reason=archive`",
 	} {
 		if !strings.Contains(text, phrase) {
-			t.Errorf("README.md must still state %q so the default does not read as a promise", phrase)
+			t.Errorf("docs/configuration.md must still state %q so the default does not read as a promise", phrase)
 		}
 	}
 }
@@ -176,7 +177,7 @@ func TestArchivesMode_OffInAHandWrittenConfigWarns(t *testing.T) {
 // the shipped default and `shallow` withholds nothing, so neither is a decision
 // the operator can improve on. A warning that fires on every start over a value
 // with no better alternative is one operators learn to skip. Their retraction is
-// the generated-config comment and the README instead.
+// the generated-config comment and docs/configuration.md instead.
 func TestArchivesMode_NonOffValuesDoNotWarn(t *testing.T) {
 	for _, value := range []string{"shallow", "deep"} {
 		got := loadWarnings(t, "root_dir: .\ningest:\n  archives:\n    mode: "+value+"\n")

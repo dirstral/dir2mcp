@@ -17,11 +17,11 @@ import (
 // The MCP Go SDK refuses a request that reaches a loopback-bound listener with a
 // non-loopback Host header (DNS-rebinding protection). A tunnel or a reverse
 // proxy forwards the public hostname by default, so it meets that refusal on
-// every request. README "Reverse proxy and tunnel: the Host header" tells the
+// every request. docs/deployment.md "Reverse proxy and tunnel: the Host header" tells the
 // operator to forward a loopback Host instead of disabling the guard.
 //
 // These cases pin the two facts that guidance rests on, so an SDK update that
-// changes either one fails here instead of silently making the README wrong
+// changes either one fails here instead of silently making that guide wrong
 // (issue #853).
 
 // localhostGuardDisabled reports whether an MCPGODEBUG value turns the SDK's

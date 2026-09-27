@@ -65,7 +65,7 @@ func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 
 func TestDaemonReady_TheStillStartingPathReportsNoCoverage(t *testing.T) {
 	// A run that returns while the daemon is still starting prints no coverage,
-	// and the README says so. Any verdict there would describe a corpus the
+	// and docs/configuration.md says so. Any verdict there would describe a corpus the
 	// child has not finished building, and "no uncovered formats" read off a
 	// half-built record is the false clean bill §7.7 exists to prevent.
 	//

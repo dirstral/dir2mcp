@@ -701,7 +701,7 @@ func (e *lcProbedEmbedder) TokenEmbeddingsAvailable(_ context.Context) (bool, st
 // refusal is the CORPUS-WIDE fall back, decided before any document is embedded.
 // Nothing is token-embedded, nothing is marked failed, every chunk embeds
 // chunk-then-embed, the once-per-run log names the provider's reason, and the
-// probe is asked once, not once per batch (#951 review: the README promised
+// probe is asked once, not once per batch (#951 review: the docs promised
 // this, the code marked chunks failed instead).
 func TestWorker_LateChunkProbe_RefusalFallsBackCorpusWide(t *testing.T) {
 	emb := &lcProbedEmbedder{refuseReason: `late chunking requires a mean-pooling model; "bge-small" serves pooling "cls"`}

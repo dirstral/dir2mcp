@@ -42,4 +42,4 @@ dir2mcp listens on `127.0.0.1` by default. `--public` refuses to start without
 authentication unless you set `--force-insecure`. The default
 `security.path_excludes` list keeps credential files (for example `.env`,
 `*.pem`, `*.key` and `id_rsa`) out of the index. `dir2mcp support-bundle` redacts
-credentials. See [What a support bundle discloses](README.md#what-a-support-bundle-discloses).
+credentials. See [What a support bundle discloses](docs/security.md#what-a-support-bundle-discloses).

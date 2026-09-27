@@ -89,7 +89,7 @@ a trusted network may be **credential-less** — no API key required.
 > 1. **docling-serve** (recommended) — run a [docling-serve](https://github.com/docling-project/docling-serve)
 >    container on the VPS and point `ingest.docling.serve_url` at it (e.g.
 >    `http://localhost:5001`). This is a distinct extractor, not a provider
->    profile; see [Document extraction over HTTP](../README.md#docling-extraction-over-http-docling-serve).
+>    profile; see [Document extraction over HTTP](configuration.md#docling-extraction-over-http-docling-serve).
 > 2. **A self-hosted `kind: mistral` `/v1/ocr` endpoint** — declare a
 >    `kind: mistral` profile whose `base_url` is the local OCR host and bind it
 >    via `model.ocr.provider` (shown below). dir2mcp will POST the bespoke
@@ -275,7 +275,7 @@ If you put a reverse proxy or a tunnel in front of a loopback-bound daemon,
 configure the proxy to forward a loopback `Host` header. Without that the MCP SDK
 answers `403 Forbidden: invalid Host header` to every request, including
 `initialize`. The recipes for cloudflared, ngrok, nginx, Caddy and Traefik are in
-[Reverse proxy and tunnel: the `Host` header](../README.md#reverse-proxy-and-tunnel-the-host-header).
+[Reverse proxy and tunnel: the `Host` header](deployment.md#reverse-proxy-and-tunnel-the-host-header).
 
 ---
 
