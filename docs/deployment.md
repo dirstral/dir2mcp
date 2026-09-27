@@ -40,7 +40,7 @@ cloudflared tunnel --url http://127.0.0.1:<PORT> --no-autoupdate \
 > DNS-rebinding protection for a loopback-bound server, and then refuses any
 > request whose `Host` header is not a loopback name. A tunnel forwards the
 > PUBLIC hostname by default, so without this flag **every request returns 403**
-> and the body does not say why. The flag makes the forwarded `Host` truthful and
+> with only `invalid Host header` in the body. The flag makes the forwarded `Host` truthful and
 > keeps the protection ON. Do not turn the protection off instead. Verified on a
 > live deployment (issue #853). For the full explanation, for nginx, Caddy and
 > Traefik, and for what each alternative costs, read

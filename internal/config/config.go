@@ -6159,8 +6159,9 @@ func (c Config) HierarchicalDocumentLevelEnabled() bool {
 
 // HierarchicalSectionLevelRequested reports whether the operator asked for
 // section-level summaries. Section windowing is not implemented yet, so callers
-// warn once and derive document-level summaries only — honest coverage rather
-// than a silent no-op (SPEC §9.7).
+// warn once and derive no section windows, honest coverage rather than a silent
+// no-op (SPEC §9.7). Document-level summaries still need `document` in the
+// levels (HierarchicalDocumentLevelEnabled); `[section]` alone derives none.
 func (c Config) HierarchicalSectionLevelRequested() bool {
 	if !c.RetrievalHierarchicalEnabled {
 		return false

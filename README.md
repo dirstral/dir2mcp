@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml"><img src="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml/badge.svg" alt="CI"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25+-00ADD8?logo=go" alt="Go 1.25+"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25.13+-00ADD8?logo=go" alt="Go 1.25.13+"></a>
   <a href="https://golangci-lint.run/"><img src="https://img.shields.io/badge/lint-golangci--lint-brightgreen?logo=go&logoColor=white" alt="golangci-lint"></a>
   <a href="https://pkg.go.dev/github.com/dirstral/dir2mcp"><img src="https://pkg.go.dev/badge/github.com/dirstral/dir2mcp.svg" alt="Go Reference"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -144,7 +144,7 @@ removes it. Details: [connect an MCP client](docs/cli.md#connect-an-mcp-client).
 | With bundled docling | `brew install dirstral/tap/dir2mcp-full` (about 6.3 GB) |
 | Nix | `nix run github:dirstral/dir2mcp -- version` |
 | Windows | zip from [Releases](https://github.com/dirstral/dir2mcp/releases); read the [Windows limits](docs/install.md#windows) |
-| From source | `git clone --recurse-submodules https://github.com/dirstral/dir2mcp && cd dir2mcp && make build` (Go 1.25+) |
+| From source | `git clone --recurse-submodules https://github.com/dirstral/dir2mcp && cd dir2mcp && make build` (Go 1.25.13+) |
 
 [docs/install.md](docs/install.md) has the lean and full tracks, the Nix
 service modules and the Windows details.
@@ -228,9 +228,9 @@ Guides in this repo:
 
 The normative specification lives in the
 [`dirstral-spec`](https://github.com/dirstral/dirstral-spec) submodule:
-[SPEC](dirstral-spec/docs/SPEC.md), [VISION](dirstral-spec/docs/VISION.md),
-[ECOSYSTEM](dirstral-spec/docs/ECOSYSTEM.md), and the
-[compatibility matrix](dirstral-spec/spec/versioning.md).
+[SPEC](https://github.com/dirstral/dirstral-spec/blob/main/docs/SPEC.md), [VISION](https://github.com/dirstral/dirstral-spec/blob/main/docs/VISION.md),
+[ECOSYSTEM](https://github.com/dirstral/dirstral-spec/blob/main/docs/ECOSYSTEM.md), and the
+[compatibility matrix](https://github.com/dirstral/dirstral-spec/blob/main/spec/versioning.md).
 [`dirstral-conformance`](https://github.com/dirstral/dirstral-conformance) is a
 black-box conformance suite for any server that claims the spec, and
 [`dirstral-cli`](https://github.com/dirstral/dirstral-cli) is a terminal client.
