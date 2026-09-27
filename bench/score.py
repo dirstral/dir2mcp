@@ -146,6 +146,11 @@ def _ratio(num, den):
 
 
 def score(results, questions):
+    """Score the answers in results against the gold data in questions.
+
+    Returns the report dict: counts, answer correctness, citation precision and
+    supporting rates, abstention rates and latency (see README "Metrics").
+    """
     qmap = {q["id"]: q for q in questions}
     rows = [r for r in results["results"] if r["id"] in qmap]
     ans = [r for r in rows if r["kind"] == "answerable"]
@@ -155,6 +160,7 @@ def score(results, questions):
     correct = [r for r in ans if not r["is_error"] and contains_gold(r["answer"], qmap[r["id"]]["answers"])]
 
     def citation_stats(items_of, match):
+        """Micro precision and supporting rates of one citation set over the answerable rows."""
         total = span = file_ = hit_span = hit_file = 0
         for r in ans:
             q = qmap[r["id"]]
@@ -178,6 +184,7 @@ def score(results, questions):
     returned = citation_stats(lambda r: [citation_tag(c) for c in r["citations"]], supports)
 
     def abst(rs):
+        """Share of the rows in rs that abstain; a tool error does not count as abstention."""
         return _ratio(sum(1 for r in rs if not r["is_error"] and abstained(r["answer"])), len(rs))
 
     lat = [r["latency_ms"] for r in rows]
@@ -219,6 +226,7 @@ def _fmt(r):
 
 
 def render_markdown(report, run):
+    """Render the report and the run metadata as the summary.md table."""
     c = report["counts"]
     lat = report["latency_ms"]
     il, rc = report["inline_citations"], report["returned_citations"]
