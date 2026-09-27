@@ -63,6 +63,8 @@ func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 	}
 }
 
+// TestDaemonReady_TheStillStartingPathReportsNoCoverage pins that a daemon start
+// which returns before the store is built prints no coverage verdict.
 func TestDaemonReady_TheStillStartingPathReportsNoCoverage(t *testing.T) {
 	// A run that returns while the daemon is still starting prints no coverage,
 	// and docs/configuration.md says so. Any verdict there would describe a corpus the

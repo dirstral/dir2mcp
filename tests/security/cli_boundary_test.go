@@ -111,27 +111,30 @@ func assertCommandSurface(t *testing.T, commands, expected map[string]struct{}) 
 	}
 }
 
+// TestRepoSplitBoundary_CLILegacyShimDocs pins that docs/cli.md and the usage
+// text mark ask, search, open-file and list-files as legacy compatibility shims
+// and send new client UX to dirstral-cli.
 func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 	root := repoRoot(t)
-	readmePath := filepath.Join(root, "docs", "cli.md")
+	cliDocPath := filepath.Join(root, "docs", "cli.md")
 	appPath := filepath.Join(root, "internal", "cli", "app.go")
 
-	readmeRaw, err := os.ReadFile(readmePath)
+	cliDocRaw, err := os.ReadFile(cliDocPath)
 	if err != nil {
-		t.Fatalf("read %s: %v", readmePath, err)
+		t.Fatalf("read %s: %v", cliDocPath, err)
 	}
 	appRaw, err := os.ReadFile(appPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", appPath, err)
 	}
 
-	readme := string(readmeRaw)
+	cliDoc := string(cliDocRaw)
 	app := string(appRaw)
 
-	if !strings.Contains(readme, "Legacy compatibility shim; prefer `dirstral-cli` for client UX") {
+	if !strings.Contains(cliDoc, "Legacy compatibility shim; prefer `dirstral-cli` for client UX") {
 		t.Fatalf("docs/cli.md must mark ask as a legacy compatibility shim to preserve repo split boundary guidance")
 	}
-	if !strings.Contains(readme, "new client/orchestrator UX belongs in `dirstral-cli`") {
+	if !strings.Contains(cliDoc, "new client/orchestrator UX belongs in `dirstral-cli`") {
 		t.Fatalf("docs/cli.md must direct new client/orchestrator UX to dirstral-cli")
 	}
 	for _, row := range []string{
@@ -140,7 +143,7 @@ func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 		"| `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
 		"| `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
 	} {
-		if !strings.Contains(readme, row) {
+		if !strings.Contains(cliDoc, row) {
 			t.Fatalf("docs/cli.md command table must include legacy shim row: %s", row)
 		}
 	}

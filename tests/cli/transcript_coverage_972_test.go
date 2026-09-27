@@ -610,6 +610,8 @@ func TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing(t
 	}
 }
 
+// TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection pins that a corpus
+// whose transcripts only assert nothing gets no Speech section in the banner.
 func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T) {
 	// Pins what docs/configuration.md states, on the banner's ACTUAL output rather than on
 	// the probe's count: a corpus whose transcripts merely assert nothing

@@ -685,6 +685,8 @@ type lcProbedEmbedder struct {
 	probeCalls   int
 }
 
+// TokenEmbeddingsAvailable counts the probe and answers with the configured
+// error, refusal reason, or availability.
 func (e *lcProbedEmbedder) TokenEmbeddingsAvailable(_ context.Context) (bool, string, error) {
 	e.probeCalls++
 	if e.probeErr != nil {
