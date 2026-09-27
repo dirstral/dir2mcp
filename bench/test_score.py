@@ -1,7 +1,11 @@
 """Unit tests for the benchmark scorer. Run: cd bench && python3 -m unittest."""
+import os
+import re
 import unittest
 
 import score
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def q(qid, kind, answers=(), rel=None, line=None):
@@ -34,9 +38,24 @@ class ContainsGold(unittest.TestCase):
 
 
 class Abstained(unittest.TestCase):
+    def test_server_refusal_texts_count(self):
+        """The withheld-answer text in faithfulness.go scores as an abstention.
+
+        The fixed refusal texts live in Go. The test reads the text from the
+        source, so a change of wording there fails here instead of silently
+        scoring a refusal as an answer.
+        """
+        with open(os.path.join(ROOT, "internal", "retrieval", "faithfulness.go"), encoding="utf-8") as f:
+            src = f.read()
+        m = re.search(r'func unfaithfulAnswer\(\) string \{\s*return "([^"]+)"', src)
+        self.assertIsNotNone(m, "unfaithfulAnswer text not found in faithfulness.go")
+        self.assertTrue(score.abstained(m.group(1)), m.group(1))
+
     def test_server_texts(self):
+        """The fixed texts that dir2mcp returns when it does not answer all score as abstentions."""
         self.assertTrue(score.abstained("Insufficient evidence to answer: retrieval returned 3 ..."))
         self.assertTrue(score.abstained("No relevant context found in the indexed corpus."))
+        self.assertTrue(score.abstained("I could not verify the answer against the retrieved passages, so I am not reporting it."))
 
     def test_model_phrases(self):
         self.assertTrue(score.abstained("The context provided does not contain any information about X."))

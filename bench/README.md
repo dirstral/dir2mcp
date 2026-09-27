@@ -120,9 +120,11 @@ range `start_line..end_line` includes the gold line.
   supporting citation. This is the citation recall for a single gold passage.
 
 **(d) Abstention.** An answer abstains when it matches one of the patterns in
-`ABSTAIN_PATTERNS` in `score.py`. The patterns include the two fixed texts that
-dir2mcp returns when it does not answer ("Insufficient evidence to answer",
-"No relevant context found"), and the usual model phrases ("does not
+`ABSTAIN_PATTERNS` in `score.py`. The patterns include the three fixed texts
+that dir2mcp returns when it does not answer ("Insufficient evidence to answer",
+"No relevant context found", and "I could not verify the answer against the
+retrieved passages" when `rag.verify_faithfulness` withholds an answer), and
+the usual model phrases ("does not
 contain", "is not mentioned", "no information", "cannot determine", and
 similar).
 
