@@ -1,0 +1,922 @@
+# Configure dir2mcp
+
+## Configuration
+
+### YAML configuration (`.dir2mcp.yaml`)
+
+The primary on‑disk configuration file is `.dir2mcp.yaml` (created by `dir2mcp config init`).
+Use it for persistent, non‑sensitive settings such as connector definitions, defaults, and other options
+you might want to check into source control. Values defined here may be overridden at runtime by
+environment variables.
+
+A key that no setting claims does not fail the load. `dir2mcp up` prints one warning that
+names every unrecognized key, then starts, so a typo or a stale key from an older release
+is reported instead of being dropped in silence.
+
+#### Chunking keys
+
+```yaml
+chunking:
+  max_tokens: 0        # 0 = the chunker default
+  overlap_tokens: 0    # must be smaller than max_tokens when max_tokens is set
+```
+
+`chunking.strategy` is **not** a setting. Releases before this one accepted the key, saved
+it, and never read it: chunking is selected per document type (characters for text, line
+windows for code, time windows for a transcript), and the canonical spec defines no
+strategy selector. The key is now unrecognized, so a config that still carries it loads
+with the warning above and no longer publishes the key back into the saved config or the
+effective snapshot.
+
+#### Ingest size cap
+
+```yaml
+ingest:
+  max_file_mb: 20      # default: 20
+```
+
+`ingest.max_file_mb` is the per-file size policy, and it is enforced as a bound on the
+reads themselves, not only as a check at discovery. Discovery refuses a file over it, and
+so does every read that follows: the document read, the subtitle sidecar, the
+object-store download, the multimodal media read, and the on-demand `annotate` /
+`transcribe` reads. A check only measures a file at one instant; a file that grows
+afterwards, or an object that serves more bytes than it listed, is caught by the read.
+(`open_file` answers a window rather than a whole file, so its raw-text read carries its
+own budget derived from `max_chars`; the cap still bounds the source read it needs to
+locate cached extracted text.)
+
+During indexing a file over the cap is a **skip, not an error**: it keeps a visible
+`skipped` row with reason `size_cap`, it is counted in the skip breakdown `dir2mcp status`
+reports, and its chunks leave retrieval. It was refused by policy, not by a failure, so it
+never lands in the failure list. On a tool request the refusal is reported as
+`FILE_TOO_LARGE`, which names the setting instead of a generic failure.
+
+With `media.variants.group: true` (SPEC §8.6.5) the cap judges the rendition the group
+ends on, not every rendition. Grouping runs first, over every rendition that exists, and
+the cap then decides which of them may be ingested: the media is indexed as the best
+rendition that fits. A rendition grouping discards leaves no row at all, whichever side
+of the cap it fell. Discovery says so when the two settings meet: it logs which rendition
+the media ends on and how many renditions the cap excluded, and, when no rendition fits,
+it records one `size_cap` skip for the media on the rendition the policy would have
+chosen. With grouping off (the default) every file is judged on its own, as before.
+
+Raw text now follows this setting exactly. Earlier releases gated raw-text indexing on a
+hard-coded 10 MiB, so a 15 MiB text file was admitted by the configured cap and then
+failed anyway. Text, code, markdown, data and HTML files between 10 MiB and the
+configured cap are indexed. To keep the old ceiling, set `max_file_mb: 10`.
+
+Zero or a negative value is not "unlimited": it selects the built-in default bound.
+
+#### Retrieval answer keys
+
+```yaml
+rag:
+  generate_answer: true   # false serves every ask as search-only
+  k_default: 15           # hits for a request that sends no k (1..50)
+```
+
+`rag.k_default` sets how many hits a request that omits `k` gets. It applies to every
+tool that takes a `k`: `search`, `ask`, `related`, `ask_audio` and `transcribe_and_ask`,
+plus the `ask` and `search` CLI commands. Precedence is fixed: the `k` on the request,
+then `rag.k_default`, then the shipped default of 15.
+
+The value carries the same `1..50` bound as the request field. A value outside it fails
+at startup with `CONFIG_INVALID`, because a default that asks for a `k` the tools forbid
+would otherwise only fail later, on a request the operator never wrote.
+
+`k` also sets how much evidence the answer reasons over, up to `rag.max_context_chars`
+(20000 by default). That character budget is the only bound: a larger `k` gives the model
+more documents and not only a longer citation list. The budget is divided into equal
+shares, one per document, and no share falls below 400 characters, so the budget caps the
+document count as well. A document longer than its share is sent as a match-centered
+window of that share, and the text past the window does not reach the model. Short chunks
+(a recognition annotation runs to about 130 characters) therefore fit whole and the whole
+result set can reach the prompt; long ones (a PDF page) fill the budget sooner.
+
+The served tool schemas advertise the **effective** value. `tools/list` reports
+`"default": <your k_default>` for `k`, so a client that reads the schema and sends the
+advertised number explicitly gets the same result as a client that omits the field.
+
+`rag.generate_answer: false` turns answer generation off for the whole server. Every
+`ask`, `ask_audio` and `transcribe_and_ask` request then behaves as `mode=search_only`:
+the response shape is unchanged, `answer` is `""`, `citations` is `[]`, and the retrieval
+hits are still returned. No chat provider is called. A request cannot switch generation
+back on, so `mode=answer` is served as search-only rather than refused.
+
+#### Grounding check
+
+`rag.verify_faithfulness: true` reads each generated answer back against the exact
+passages the model was shown, and withholds the answer when a claim is not supported.
+It is **off by default**, because it costs one extra generation call per answered
+request.
+
+The evidence verdict and this check answer different questions. The verdict says whether
+the retrieved material is relevant. It cannot say whether the answer reports what that
+material states, and the two come apart. A corpus that records `Buddy Kennedy
+challenged (pitch result), call on the field was confirmed` can answer "who was ejected"
+with `Buddy Kennedy was ejected`: the passage really is the nearest material to the
+question, so the verdict correctly reads `sufficient`, and the rename from `challenged`
+to `ejected` survives. Only reading the answer back catches it.
+
+A withheld answer keeps the shape of every other refusal: the answer text says the claim
+could not be verified, `citations` is empty, and the retrieval hits are still returned so
+the reader can judge the material. `evidence` still reports what the evidence was
+worth, because what failed is the answer and not the retrieval.
+
+The result carries a second verdict, `faithfulness`, so a client can tell these apart
+without reading prose:
+
+| value | meaning |
+| --- | --- |
+| `verified` | the answer was checked and every claim was supported |
+| `unsupported` | at least one claim was not supported, so the answer was withheld |
+| `unchecked` | verification produced no verdict, and this is the default |
+
+`unchecked` is not a weak `verified`. It says no answer-level judgement is available,
+which happens both when the check is off and when it ran and could not finish.
+
+Read the two verdicts together. `evidence` describes the **retrieval**, `faithfulness`
+describes the **answer**, and they move independently: a withheld answer still carries
+the verdict its retrieval earned, normally `evidence: sufficient`. A client that reads
+only `evidence` therefore sees a healthy verdict on a refusal and takes it for an
+answer, which is the reason the second field exists.
+
+The check fails open. When the verifier cannot be reached the answer is published
+unchecked and the failure is logged, because dropping every answer during a provider
+outage would turn a trust feature into an availability problem.
+
+#### Answer language
+
+The default system prompt tells the model to answer in the language of the
+**question**. It asks for a Russian answer to a Russian question about a Russian archive,
+and for an English answer when a partner asks the same archive in English. The rule ships
+with the prompt, so it needs no configuration. Compliance still rests with the chat
+model: a weak model can ignore any instruction, so check yours if answers arrive in the
+wrong language.
+
+A question that mixes languages resolves to its dominant language. The same rule covers
+the short conversational reply the server sends when a message asks for nothing from the
+corpus.
+
+The language of the retrieved documents does not select the answer language. A
+multilingual corpus holds several languages at once, so the context names no single one.
+The person who asks is the person who reads, so the question is the anchor.
+
+The prompt also tells the model to refuse a language switch demanded by a retrieved
+document. Document text reaches the model inside untrusted-data markers, and the prompt
+rejects every instruction found there, a language change included.
+
+To pin one answer language for all requests, write your own `rag.system_prompt`. It
+replaces the shipped grounding rule, answer-language rule and `[rel_path]` citation rule,
+so keep in your text the ones you still want.
+
+#### Reference a shipped rule, do not copy it
+
+Keep a shipped rule by REFERENCE. Write `${rag.answer_language_rule}` or
+`${rag.citation_rule}` in your `rag.system_prompt`, and the server replaces each one with
+the rule this version ships.
+
+A copy goes stale, and it goes stale in silence. The server matches both rules exactly:
+the trailing answer-language reminder is appended only when the prompt in force states the
+answer-language rule, and a client parses the bracketed tag the citation rule asks for. A
+release that rewords a rule therefore disarms every prompt that reproduced the previous
+wording. Config load still passes, the daemon still starts, answers still come back, and
+only the quality changes. A reference cannot go stale, because it names the rule instead
+of restating it.
+
+The reference is resolved when the prompt is loaded, never when it is saved. Your config
+file keeps the token, so the next release reaches you without an edit. A misspelled name
+inside the `${rag.*}` namespace is a config error at startup. Any other `${...}` text is
+prompt text and is left alone.
+
+A prompt that still holds part of a shipped rule, from a copy made before this, is
+reported at load:
+
+```
+warning: rag.system_prompt reproduces PART of the shipped rag.answer_language_rule but not
+all of it. That is a copy taken from an older release: ...
+```
+
+The report changes nothing on its own. Replace the copied sentences with the reference to
+clear it.
+
+The setup wizard's `legal` and `code` profiles write these references, so a config the
+wizard generates tracks the server too.
+
+#### The untrusted-data guard is not replaceable
+
+`rag.system_prompt` supplies domain rules only. The server appends the untrusted-data
+guard to every RAG system prompt, after your text, and there is no setting that switches
+it off. The guard explains the markers that wrap each retrieved document, so it must reach
+the model whatever the prompt says. A prompt that already ends with the guard, for
+example a copy of the shipped one, keeps a single copy: nothing is appended twice. A
+prompt that quotes the guard and then writes more still gets the guard appended, because
+the guard must be the last rule the model reads.
+
+The setup wizard's `legal` and `code` profiles are domain rules of this kind, and they
+gain the guard the same way.
+
+### Environment variables (overrides / secrets)
+
+Sensitive keys and temporary runtime overrides are supplied via environment variables. They take
+precedence over entries in the YAML file and are convenient for API keys, tokens, or settings that
+vary by deployment. The commonly used variables are:
+
+| Variable | Required | Description |
+|---|---|---|
+| `MISTRAL_API_KEY` | Conditional | Required for embeddings, Mistral-based extraction/STT, and generation; not required for docling-only read-only extraction flows |
+| `DIR2MCP_SKIP_EMBED_PROBE` | No | When set to any non-empty value, skips the startup embedding-credential probe (a one-shot embed that validates the key/model before serving). Provider resolution and adapter-build checks still run; only the network probe is skipped, so an invalid credential resurfaces at first real embed instead of at startup. Intended for air-gapped bring-up and hermetic CI |
+| `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
+| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
+| `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
+| `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
+| `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
+| _(Mistral endpoint)_ | — | The Mistral base URL is **not** configurable via an environment variable. To proxy Mistral or point at a private/custom endpoint, add a `providers:` entry with a `base_url` (see [Self-hosted / GPU-VPS provider endpoints](#self-hosted--gpu-vps-provider-endpoints-embed--ocr--stt)) |
+| `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
+| `DIR2MCP_SERVER_NAME` | No | Override the MCP server name (and suggested `claude mcp add` alias). Defaults to a unique `dir2mcp-<slug>-<6-hex>` derived from the indexed directory |
+| `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
+| `DIR2MCP_SESSION_TIMEOUT` | No | Deprecated alias for `DIR2MCP_SESSION_INACTIVITY_TIMEOUT`; still supported but deprecated |
+| `DIR2MCP_SESSION_MAX_LIFETIME` | No | Maximum session lifetime |
+| `DIR2MCP_HEALTH_CHECK_INTERVAL` | No | Connector health poll interval (default: `5s`) |
+| `DIR2MCP_ALLOWED_ORIGINS` | No | Comma-separated additional browser origins |
+| `DIR2MCP_X402_FACILITATOR_TOKEN` | No | x402 facilitator bearer token |
+| `COHERE_API_KEY` | Optional | When set, auto-enables the post-fusion rerank stage (provider `cohere`); secret, never persisted to the config snapshot |
+| `DIR2MCP_RERANK_ENABLED` | No | Tri-state override of the auto behavior: `false` forces reranking off even with a credential; `true` requires it (warns + falls back if no credential) |
+| `DIR2MCP_RERANK_MODEL` | No | Cohere rerank model override (default: `rerank-v3.5`) |
+| `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
+| `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
+| `GEMINI_API_KEY` | Optional | Google Gemini key; enables the `gemini` provider profile (embeddings, chat, and native STT/TTS via `generateContent`). Bind it explicitly to a capability (e.g. `model.embed.provider: gemini`, `stt.provider: gemini`) — auto-selection still prefers Mistral. Secret, never persisted |
+
+For Homebrew and other installed workflows, you can persist this in `.dir2mcp.yaml`:
+
+```yaml
+ingest_extractor: auto
+ingest_on_unsupported: lenient   # lenient (default) | strict
+docling_command: docling --to json --output - {input}
+```
+
+### Storing credentials in the OS keychain
+
+Provider API keys can live in the OS keychain (macOS Keychain, Linux Secret Service,
+Windows Credential Manager) — encrypted at rest — instead of a plaintext `.env.local`:
+
+```bash
+dir2mcp config set-secret MISTRAL_API_KEY   # hidden prompt, or pipe: op read … | dir2mcp config set-secret MISTRAL_API_KEY
+dir2mcp config secrets                       # show which keys are in the keychain / env (never prints values)
+dir2mcp config rm-secret MISTRAL_API_KEY
+```
+
+Credentials resolve in the order defined by SPEC §16.1.1: **environment variable → OS
+keychain → `.env.local` / `.env` file**. So an explicit env var always wins, a keychain
+entry beats a plaintext file, and the keychain is consulted only for the built-in provider
+keys (`MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ELEVENLABS_API_KEY`). Keychain access is fail-open
+(a missing entry or an unavailable/locked backend simply falls through to the file/env
+sources) and can be turned off entirely with `DIR2MCP_DISABLE_KEYCHAIN=1`.
+
+> **Background daemons:** a launchd/systemd service may not be able to unlock the keychain
+> unattended. For always-on `service install` deployments, persist the credential to
+> `.env.local` first with `dir2mcp config init` (`service install` warns when no persisted
+> credential is present); the keychain is most useful for the interactive `dir2mcp up` / CLI.
+> Resolution is fail-open, so a daemon that cannot read the keychain falls back to `.env.local`.
+
+### Where dotenv files are read from
+
+`dir2mcp` reads dotenv files from two directories, in this fixed order:
+
+1. `<config dir>/.env.local`
+2. `<config dir>/.env`
+3. `<working dir>/.env.local`
+4. `<working dir>/.env`
+
+`<config dir>` is the directory that holds the resolved config file: the `--config`
+path when you pass one, otherwise `.dir2mcp.yaml` in the working directory. `config
+init` writes credentials to `<config dir>/.env.local`, so the file the wizard writes
+is the first file the loader reads.
+
+The rule is **first non-empty value wins**. The first file in that list that gives a
+variable a non-empty value wins; the later files only fill in variables nobody
+claimed yet. The environment and the OS keychain are consulted before the files
+(SPEC §16.1.1), under the same rule: a variable exported as an empty string counts
+as unset, so a dotenv file still fills it. When the config directory and the working
+directory are the same (the common case), the list collapses to two files and
+nothing changes.
+
+When dotenv files exist in **both** directories, startup prints a warning that names
+the files in precedence order. Values are never printed. A dotenv file that exists but
+cannot be read fails the load with the path in the message; a dotenv file that is
+absent is normal and silent.
+
+### Which files are indexed
+
+Each file is classified by name or extension first (SPEC §7.3). Common source
+languages (for example `.go`, `.py`, `.ts`, `.mjs`, `.vue`, `.lua`, `.tf`,
+`.proto`, plus `Makefile` and `Dockerfile`) index as code; prose and data
+formats index as text; PDFs, images, audio and video go to the extractors below.
+
+Any other file (an unknown extension, or a dotfile such as `.gitignore` or
+`.editorconfig`) is sniffed: when its first 8 KiB is valid UTF-8 with no
+NUL byte, it indexes as text. It stays skipped as binary when it looks binary,
+when it is empty, when it holds a private key, and when it is a subtitle file
+(a subtitle is read as the sidecar of its media).
+
+After an upgrade that changes a classification, the next scan re-reads the
+affected files. One case waits: on an S3 corpus, an unchanged object with an
+unknown extension that an older version stored as binary keeps that result
+until its ETag changes. Only its bytes can show that it is text, and the S3
+fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
+
+### Document extraction: modes & fallback
+
+PDFs and images are converted to text by an **extractor**, selected with `ingest.extractor` (env `DIR2MCP_INGEST_EXTRACTOR`):
+
+| Mode | Behavior |
+|---|---|
+| `auto` (default) | Prefer the local `docling` CLI; else a reachable `docling-serve`; else Mistral OCR; else a functional `pandoc` (born-digital formats only); else disabled. |
+| `docling` | Local docling CLI only (fails if not on `PATH`). |
+| `docling-serve` | docling-serve HTTP only; requires a reachable `serve_url` (no fallback). |
+| `mistral` | Mistral OCR only (requires `MISTRAL_API_KEY`). |
+| `off` | No extraction (PDFs/images contribute no extracted text). |
+
+Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → pandoc → disabled**. `pandoc` is normally the *secondary* T2 engine, additive to whichever primary resolves; it becomes the **primary** only when none of the three resolve and a functional pandoc is on `PATH` (`OCR: pandoc (no docling/OCR; pandoc covers born-digital formats)`). That state still leaves PDFs and images uncovered, because pandoc reads born-digital formats only. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document. Under `auto` the banner also lists the `pandoc` engine on its own `Pandoc:` row whenever it is secondary, with the reason when it is unavailable (e.g. `Pandoc: unavailable (pandoc not found on PATH; T2 engine for .docx/.odt/.rtf/.epub)`), because a missing pandoc is what leaves those formats uncovered.
+
+**Best-available *per format* (§7.4.B.1).** Selection is capability-aware: for each format, `auto` picks the highest-fidelity *active* engine that can actually read it, so no document is silently handed to an engine that can't (e.g. `.docx`/`.tiff` go to docling but are never routed to Mistral OCR, which can't import them), and a higher-fidelity engine is never bypassed. HTML is a dual-path format: when a structured engine (docling) is active it is routed there to preserve headings/tables/links (`extracted_markdown` with structured spans); otherwise it falls back to flat `raw_text` — so HTML is never dropped and never regresses when docling is absent.
+
+**When no active engine covers a format** (`ingest.on_unsupported`, env `DIR2MCP_INGEST_ON_UNSUPPORTED`): `lenient` (default) records the document as a durable `status=skipped` (`skip_reason=unsupported_format`) with a warning — the backward-compatible, honest-not-silent outcome; `strict` records it as a non-fatal per-document `UNSUPPORTED_FORMAT` error (for CI / correctness-sensitive corpora). Either way the gap is surfaced, never silent, and never reported as an indexed document. The same rule applies when no extractor is available at all (`OCR: disabled`): a PDF or an image is then recorded as skipped (or as an error under `strict`), never as `status=ok` with no text.
+
+**Coverage report (§7.7).** Three surfaces name the uncovered formats and what to add. The `dir2mcp up` banner prints a `Coverage` section (`Uncovered: .odt, .tiff (2 document(s); ...)` plus a `Fix:` line) from the durable document record, so it names a gap found by an earlier run at the next start; `dir2mcp status` prints the per-reason `Coverage` block; `dir2mcp doctor` reports `extraction_coverage` as `warn` naming the same extensions. All three count every non-deleted extractable document regardless of its status: an uncovered document is recorded as skipped or error, so a count of `status=ok` rows alone cannot see it. On a first run the record is empty until the scan has recorded the corpus, so `status` and `doctor` are the surfaces to consult right after that run.
+
+An extractor counts as *available* only when it can actually **run**, not merely when it is configured (spec 0.15.0 §7.4). The `docling` CLI is functional-checked (a quick `docling --version` probe, cached for the run); a binary that is present but broken — e.g. a venv with ABI-incompatible dependencies — is treated as **unavailable**, exactly as an unreachable `serve_url` makes `docling-serve` unavailable. Under `auto` a broken docling is skipped and the cascade continues; under explicit `docling` it disables extraction (no silent fallback). `dir2mcp doctor` reports the real state instead of a false "healthy".
+
+**Troubleshooting:**
+- *`OCR: disabled`* — no extractor is available, and no functional pandoc either: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`. Until then, each PDF and image is a durable skip (`skip_reason=unsupported_format`), and the `Coverage` section names them. Plain text and code still index.
+- *`OCR: pandoc (no docling/OCR; ...)`* — the cascade found no docling and no Mistral OCR, so pandoc became the primary. `.docx/.odt/.rtf/.epub` are covered; PDFs and images are not, and the `Coverage` section names them.
+- *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
+- *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
+- *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.
+- *Expected docling but the banner shows `mistral-ocr (fallback ...)`* — docling either isn't on `PATH` or is present-but-broken (it failed the `docling --version` functional check, e.g. an ABI-incompatible venv). Under `auto` a non-functional docling is skipped and the cascade continues to docling-serve/Mistral; fix the install (or use the `-full` track), or pin `extractor: docling` to turn the broken install into a loud error instead of a silent fallback.
+- *Wrong host's docling chosen / pointing at a custom binary* — set `ingest.docling.command` (`DIR2MCP_DOCLING_COMMAND`) to the command template; the resolved path is redacted from diagnostics. Confirm via the `extractor` row of `dir2mcp doctor` or `routing.json` in a support bundle.
+
+#### Per-format mode keys: validated, no runtime effect yet
+
+The config template also carries one mode key per format:
+
+```yaml
+ingest:
+  pdf:
+    mode: ocr          # off|ocr|auto
+  images:
+    mode: ocr_auto     # off|ocr_auto|ocr_on
+  audio:
+    mode: auto         # off|auto|on
+  archives:
+    mode: deep         # off|shallow|deep
+```
+
+Each of the four is a closed set. A value outside its set is rejected at startup
+with `CONFIG_INVALID`, so `ingest.archives.mode: shalow` fails instead of loading as
+if it had been understood. The value is also case-normalized, and an absent key keeps
+the default above.
+
+**No accepted value changes behavior yet.** The canonical spec lists the members of
+each set without defining what any member does, so dir2mcp validates them and waits
+for that definition rather than inventing one (see `dirstral-spec`). Until then, use
+the keys that do work:
+
+| Goal | Setting that works today |
+|---|---|
+| Turn PDF/image text extraction off | `ingest.extractor: off` |
+| Choose the PDF/image engine | `ingest.extractor` (table above) |
+| Turn audio/video transcription off | `stt.provider: off` |
+| Report a format nothing can read | `ingest.on_unsupported: strict` |
+
+You do not have to remember this. A generated config carries the same retraction as a
+comment directly above the four keys. A hand-written `.dir2mcp.yaml` that sets one of
+them to `off` also prints a startup warning. `off` gets the warning because it is the
+value that costs money or privacy when it is wrong: the key withholds nothing, and the
+warning names the key that does. The other values load silently, so a generated config
+stays warning-free.
+
+##### `ingest.archives.mode: deep` promises more than dir2mcp does
+
+The default is the sharp case (issue #843). Archive handling today expands the **top
+level** of an archive and nothing more:
+
+| Value | What the name claims | What dir2mcp does |
+|---|---|---|
+| `off` | archives are not expanded | expands the top level anyway |
+| `shallow` | top level only | top level only (a coincidence, not a read value) |
+| `deep` (default) | a nested archive is expanded too | **no recursion at all** |
+
+An archive nested inside an archive is not expanded. It is stored as a skipped
+`archive_member` document with `skip_reason=archive`, so the container never reports
+coverage it does not have and the gap appears in the coverage report.
+
+The default stays `deep`, and no member changes meaning, because both come from the
+canonical SPEC §16.2 template. A real `deep` implementation needs a recursion bound, a
+byte budget for the expansion, and a defined outcome at the bound and on a cycle. The
+spec defines none of those today, so that decision belongs in `dirstral-spec` first.
+
+### docling extraction over HTTP (docling-serve)
+
+Instead of spawning the docling CLI per document, dir2mcp can call a long-running [**docling-serve**](https://github.com/docling-project/docling-serve) HTTP container. This is the same docling engine and produces **byte-identical** output (the same structured `DoclingDocument` → Markdown + region citations) — only the transport differs (spec 0.10.0 §7.4.B).
+
+```yaml
+ingest:
+  extractor: docling-serve         # or: auto
+  docling:
+    serve_url: http://127.0.0.1:5001
+```
+
+- Run the container yourself, e.g.: `docker run --rm -p 5001:5001 ghcr.io/docling-project/docling-serve-cpu`. dir2mcp does **not** start or stop it — lifecycle is user-managed.
+- `extractor: docling-serve` **requires** a non-empty, reachable `serve_url`: an empty or unreachable endpoint is rejected at startup (`CONFIG_INVALID`). It never silently falls back to the docling CLI.
+- `dir2mcp doctor` reports the same availability decision, so a dead `docling-serve` endpoint shows up as an unavailable extractor instead of surfacing only later as per-document runtime failures.
+- Under `extractor: auto`, docling-serve is used only when the docling CLI isn't on `PATH` (local CLI is preferred); an empty `serve_url` means the HTTP transport isn't considered, and an unreachable one is skipped in favor of another available extractor (for example Mistral OCR).
+- Env equivalent: `DIR2MCP_DOCLING_SERVE_URL=http://127.0.0.1:5001`.
+
+### Extractor observability: which provider ran, and why
+
+The extractor decision (which engine was chosen, and whether it was a fallback)
+is surfaced consistently on three diagnostic surfaces — they all read the same
+resolution logic, so they never disagree:
+
+| Surface | How to see it | What it shows |
+|---|---|---|
+| Startup banner | printed by `dir2mcp up` in the **Models** section | `OCR: <provider> (<reason>)`, e.g. `OCR: docling (auto-detected on PATH)` or `OCR: mistral-ocr (fallback; docling not found on PATH; falling back to Mistral OCR)` |
+| `dir2mcp doctor` | run against the daemon | an `extractor` check whose detail is `<provider> (<reason>)`; status is `ok` normally, **`warn`** when the choice is a fallback or when extraction is disabled |
+| Support bundle | `dir2mcp support-bundle` → `routing.json` inside the tarball | machine-readable routing decisions (the same `provider` + `reason` data the banner shows), so a maintainer can confirm the backend without re-running `up` |
+
+The decision carries three fields internally:
+
+- **provider name** — `docling`, `docling-serve`, `mistral-ocr`, or empty (disabled);
+- **source** — `explicit` (you pinned `ingest.extractor`), `auto` (auto-detected as the preferred path), `fallback` (preferred path unavailable), or `disabled`;
+- **reason** — a human-readable explanation (e.g. `docling not found on PATH; falling back to Mistral OCR`). User-supplied docling command templates and resolved paths are intentionally **redacted** from the reason so no secret-bearing flag leaks into the banner or `routing.json`.
+
+**Per-document extraction errors** are recorded in the optional **batch run
+manifest** (a JSONL file, one record per asset, enabled with
+`media.batch.manifest: <path>`). Each error record carries a canonical
+`error_code` — `EXTRACT_FAILED` for a representation/derivation failure (this
+covers OCR/docling extraction failures) or `TRANSCRIBE_FAILED` for a transcript
+provider failure — plus a redacted `error_message`. Aggregate the manifest to
+count failures per run.
+
+> **Gap (no per-provider counters yet):** dir2mcp does **not** currently expose
+> numeric counters/metrics broken down by extractor provider, fallback events,
+> or error type. The only running numeric counter is an **aggregate**
+> document-level error count in indexing status (it does not distinguish
+> extraction failures from other errors, nor which provider produced them). For
+> per-provider / per-error breakdowns today, parse the batch manifest. Finer
+> error classification (e.g. `OCR_FAILED`) is also a tracked follow-up rather
+> than something emitted today.
+
+### Migration & rollout: adopting docling in stages
+
+You can move from a lean, docling-free setup to local structured extraction (or
+to a shared `docling-serve`) without a flag day — switching extractors across
+re-indexes is safe because every engine produces the same `extracted_markdown`
+representation (only span-provenance richness differs: structured `region` spans
+vs. flat `page` spans). Suggested phases:
+
+1. **Baseline (lean, no extraction or Mistral OCR).** Install
+   `dir2mcp` (lean). With no docling on `PATH`, `extractor: auto` resolves to
+   Mistral OCR when `MISTRAL_API_KEY` is set, else `disabled`. Confirm the
+   active path on the `dir2mcp up` banner / `dir2mcp doctor` `extractor` check
+   before indexing. With a `disabled` extractor, each PDF or image is recorded
+   as skipped (or as an error under `strict`) and named in the Coverage report;
+   its text is not indexed.
+2. **Pilot docling on one host.** Either `brew install dirstral/tap/dir2mcp-full`
+   (bundled, version-locked runtime) **or** install your own `docling` on
+   `PATH`. Leave `extractor: auto`: docling is now preferred automatically and
+   the banner should read `OCR: docling (...)`. Re-index a sample and spot-check
+   region citations.
+3. **Centralize via `docling-serve` (optional).** Stand up a long-running
+   [docling-serve](#docling-extraction-over-http-docling-serve) container and
+   point clients at it with `ingest.docling.serve_url`
+   (`DIR2MCP_DOCLING_SERVE_URL`). Under `auto`, a host without the docling CLI
+   uses the endpoint; pin `extractor: docling-serve` to require it (no silent
+   fallback). Output is byte-identical to the CLI.
+4. **Pin once you are confident.** Replace `auto` with an explicit
+   `extractor: docling` (or `docling-serve`) so a host that loses its docling
+   install **fails loudly** (extraction disabled) instead of silently degrading
+   to Mistral OCR. Keep `auto` if a graceful Mistral fallback is what you want.
+
+**Staged-enablement checklist:**
+
+- [ ] Decide the track per host: lean (`dir2mcp`) if you bring docling /
+      docling-serve / Mistral yourself, full (`dir2mcp-full`) for batteries-included local docling.
+- [ ] Set `MISTRAL_API_KEY` if (and only if) you want a Mistral OCR fallback or use it as the primary extractor.
+- [ ] After each change, verify the chosen extractor on the `up` banner or via
+      `dir2mcp doctor` (watch for `warn`/`disabled`).
+- [ ] Re-index a representative sample and confirm citations resolve as expected.
+- [ ] Enable `media.batch.manifest` during the rollout to capture per-asset
+      `EXTRACT_FAILED` / `TRANSCRIBE_FAILED` records, then review the manifest.
+- [ ] Once stable, consider pinning `ingest.extractor` (drop `auto`) so missing
+      docling is a loud error rather than a silent fallback.
+
+For a multi-host / GPU-VPS topology (self-hosted extractor + remote corpus), see
+[docs/dual-machine-deployment.md](dual-machine-deployment.md).
+
+### Subtitle sidecars: which file becomes a transcript (SPEC §8.6.4)
+
+A subtitle file (`.vtt`, `.srt`, `.ttml`) next to an audio or video file is
+ingested as that media's transcript **instead of** running STT. The transcript is
+recorded as authored (`source: sidecar`), so an STT model change never re-derives
+it. Set `media.sidecars.enabled: false` to disable this and always run STT.
+
+Two filename shapes bind, for media `clip.mp4`:
+
+| Sidecar | Result |
+|---|---|
+| `clip.vtt` | one transcript, no language recorded |
+| `clip.en.vtt`, `clip.ru.vtt` | one transcript per language |
+
+Rules:
+
+- The single token before the subtitle extension must be a **real language tag**.
+  `clip.HD.vtt` and `clip.2024.vtt` do not bind, so they cannot record a bogus
+  language or silently suppress STT.
+- An extra dotted segment does not bind (`clip.notes.en.vtt`), and neither does
+  the media's own extension (`clip.mp4.vtt`).
+
+**Rendition-suffixed media** (`episode_1080p.mp4`, `episode_720p.mp4`) carries a
+suffix the sidecar usually does not (`episode.ru.vtt`). Set
+`media.variants.group: true` (SPEC §8.6.5) and a sidecar on the bare stem also
+binds, because that flag is your statement that files sharing a normalized name
+are renditions of one work. It is **off by default**: without it dir2mcp never
+guesses across filenames, and only the exact shapes above bind.
+
+```yaml
+media:
+  variants:
+    group: true       # off by default; also dedups renditions to one document
+    select: best      # which rendition is canonical
+```
+
+`select` picks from the renditions that fit `ingest.max_file_mb`, so an archive of large
+renditions needs a cap that admits the quality you want. See [Ingest size cap](#ingest-size-cap).
+
+An exact match always wins over a bare-stem match, so `episode_1080p.en.vtt`
+beats `episode.en.vtt`. An untagged bare-stem sidecar (`episode.ttml`) binds only
+when no language-tagged sidecar binds, so it never overwrites an authored
+per-language transcript. Name it `episode.ru.ttml` to ingest it beside the VTTs.
+
+### Recognition: how long one media file may take
+
+The `recognize` capability (design 0004) hands each media file to a recognition
+backend, which analyses frames across the whole file. Its cost therefore scales
+with **duration**, so the bound on one call is the LARGER of a flat floor and a
+per-second-of-media allowance:
+
+```yaml
+recognize:
+  provider: serve                  # off by default
+  base_url: http://127.0.0.1:8765
+  timeout: 10m                     # flat floor; governs short media
+  timeout_per_media_second: 2.0    # wall-clock seconds allowed per second of media
+```
+
+| Media | Effective bound with the defaults |
+|---|---|
+| a 30-second clip | 10m (the floor) |
+| a 3h24m broadcast | 6h48m (12240s x 2.0) |
+
+Rules:
+
+- The bound is `max(timeout, duration x timeout_per_media_second)`, so the ratio
+  can never make a call tighter than the floor.
+- Set `timeout_per_media_second: 0` to disable the scaling and bound every call by
+  `timeout` alone.
+- The duration comes from `ffprobe`. When it cannot be read, the floor governs
+  alone.
+- A negative value for either key is `CONFIG_INVALID` at startup.
+
+**When recognition runs out of that budget, a document that already has indexed
+content is NOT failed.** Whatever the pipeline produced for it (a subtitle
+transcript, a derived transcript, media chunks, annotations from an earlier run)
+stays searchable, a warning names the file and the budget, the run's error count
+includes it, and the document's done marker is withheld so the next scan retries
+recognition. A document marked `status="error"` hides **all** of its chunks from
+search, so failing it on a timeout would empty a corpus that was answering
+questions a minute earlier.
+
+A media file with **nothing** indexed is the exception: it has no chunks that the
+stamp could hide and it genuinely is not searchable, so it is still recorded as
+`status="error"` and retried. That keeps the gap durable and visible in
+`dir2mcp_stats` rather than reported as an indexed document that answers nothing.
+
+A backend that is unreachable, misconfigured, or answers with an error status is a
+different case and still fails the document loudly. That is deliberate: a typo'd
+`base_url` must not quietly index nothing. Only an expired deadline degrades, and
+only when dir2mcp cannot prove the request never reached the backend (a route that
+drops packets also hangs until the clock runs out, and that is a misconfiguration,
+not a slow recognizer).
+
+### Fully local / no-egress setup
+
+The default quickstart (and `.env.example`) configures **cloud** providers, so a corpus is processed by third-party APIs (Mistral for embeddings/OCR/STT/generation, ElevenLabs for voice). If your data must **not leave the host** (data-residency / compliance / on-prem archives), configure every capability against endpoints you run — dir2mcp treats a self-hosted provider as first-class (SPEC §8.5) and needs no cloud key.
+
+Provide **no** cloud credentials (do not set `MISTRAL_API_KEY`, `ELEVENLABS_API_KEY`, etc. — with none present, auto-selection has nothing cloud to pick) and bind each capability explicitly in `.dir2mcp.yaml`:
+
+```yaml
+# .dir2mcp.yaml — fully local, no egress
+providers:
+  local-llm:                              # OpenAI-compatible server you run
+    kind: openai                          #   (Ollama, vLLM, llama.cpp, LM Studio, TEI, …)
+    base_url: http://127.0.0.1:11434/v1   # e.g. Ollama's OpenAI-compatible endpoint
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: llama3.1                  # answers + translation stay local
+  local-stt:                              # self-hosted Whisper/WhisperX
+    kind: whisper                         # base_url is the host ROOT (/v1/audio/transcriptions is appended)
+    base_url: http://127.0.0.1:9001
+    stt_model: large-v3
+model:
+  embed:
+    provider: local-llm                   # reindex-bound (the embed identity includes it)
+  chat:
+    provider: local-llm
+stt_provider: local-stt                   # STT uses the legacy selector
+ingest:
+  extractor: docling                      # local structured extraction; do NOT fall back to cloud OCR
+```
+
+Notes:
+- **Transcription is optional.** A folder with no audio or video needs no speech server: drop the `local-stt` profile and the `stt_provider` line, and transcription stays off (the default selector is `auto`, which turns STT on only when an eligible profile exists).
+- **Document extraction:** use local `docling` (the `dir2mcp-full` track bundles it) or a self-hosted [docling-serve](#docling-extraction-over-http-docling-serve). Avoid `extractor: auto`, whose last fallback is cloud Mistral OCR — pin `extractor: docling` (or `docling-serve`, or `off`) so no page image is ever uploaded. For a self-hosted OCR endpoint instead, bind `model.ocr.provider` to a `kind: mistral` `/v1/ocr` profile (see below).
+- **Verify, don't infer:** run `dir2mcp doctor` — its **egress** row must report `no third-party egress: all resolved providers target local/loopback or private/LAN endpoints`. If it names any public host, that capability is still leaving the machine.
+- A trusted-LAN endpoint may be **credential-less** (omit `api_key`); loopback, private-range, `.local`/`.internal`, and single-label LAN hosts all count as no-egress.
+- For a multi-machine topology (corpus over NFS/S3, a GPU box on the LAN, systemd units), see [docs/dual-machine-deployment.md](dual-machine-deployment.md) and the self-hosted provider contract below.
+
+### Self-hosted / GPU-VPS provider endpoints (embed / OCR / STT)
+
+A self-hosted model server (on a GPU VPS or a trusted LAN) is a first-class provider: declare it under `providers:` with a custom `base_url` and bind it per capability (spec §8.5). No new provider `kind` is introduced, and a trusted-network endpoint may be **credential-less** (no `api_key`).
+
+```yaml
+providers:
+  gpu-embed:                 # OpenAI-compatible embed/chat (TEI, vLLM, Infinity, …)
+    kind: openai
+    base_url: http://gpu-vps:8080/v1
+    embed_text_model: bge-m3
+  whisper:                   # self-hosted STT (POST {base_url}/v1/audio/transcriptions)
+    kind: whisper            # base_url is the host ROOT; /v1/audio/transcriptions is appended
+    base_url: http://gpu-vps:9001
+    stt_model: large-v3
+  gpu-ocr:                   # self-hosted bespoke OCR (POST {base_url}/v1/ocr)
+    kind: mistral            # base_url is the host ROOT; /v1/ocr is appended
+    base_url: http://gpu-vps:9100
+    ocr_model: my-ocr
+model:
+  embed:
+    provider: gpu-embed      # reindex-bound (the embed identity includes it)
+  ocr:
+    provider: gpu-ocr        # omit to keep the hosted mistral-ocr default
+stt_provider: whisper        # STT uses the legacy selector
+```
+
+- **Capability mapping** (which route serves each capability, spec §8.5): embed → `POST {base_url}/v1/embeddings`; chat → `/v1/chat/completions`; STT → `/v1/audio/transcriptions` (endpoint-dependent, validated at first use). **OCR has no OpenAI analog** — bind it only to a `kind: mistral` `/v1/ocr` endpoint (or use [docling-serve](#docling-extraction-over-http-docling-serve)); binding `model.ocr.provider` to a `kind: openai` profile is rejected as `CONFIG_INVALID`.
+- **`base_url` shape differs by kind:** a `kind: openai` `base_url` already includes `/v1`; a `kind: mistral` OCR `base_url` and a `kind: whisper` STT `base_url` are the **host root** (the client appends `/v1/ocr` and `/v1/audio/transcriptions` respectively). The whisper client tolerates a stray trailing `/v1` and will not double it.
+- No shipped self-hosted defaults — you must declare the profile and bind it explicitly; nothing silently auto-selects a self-hosted endpoint.
+- **Long recordings are transcribed in windows.** A recording that fits goes to STT in ONE request. When its extracted audio is over the provider's per-request payload cap, or the recording runs longer than 10 minutes, dir2mcp cuts the audio into overlapping ~10-minute windows with ffmpeg, transcribes each window, and merges them back into one transcript with absolute timestamps (a window is shortened further when a 10-minute slice would not fit the cap). A window that fails is skipped with a warning, so a 3-hour file loses a window instead of the whole document; the document fails only when every window fails. **A windowed transcript records what it covers.** Its representation carries a `coverage` object in `meta_json` (windows attempted, windows decoded, and the decoded millisecond ranges), so a recording that decoded one window of eight is no longer indistinguishable from a complete transcript, and a partial one is announced in the log rather than indexed in silence. `media.stt.min_coverage` (default `0`, the floor off) plus `media.stt.on_partial_transcript` (`warn|skip`, default `warn`) let an operator refuse a transcript that covers too little: under `skip` the transcript is dropped instead of answering "nothing found" for audio it never heard, and an item with no other searchable representation is recorded as `status=skipped` with `skip_reason=transcript_partial` (one that still has direct media chunks stays indexed through those). The cap is the client's: `media.stt.max_payload_mb` for a `kind: whisper` endpoint (default 50 MB), 20 MB for Voxtral on a `kind: mistral` endpoint. Each request gets a timeout sized to the audio it carries: 10x the audio duration, never below 120 s, so a 10-minute window is waited out for 100 minutes rather than cut off at a constant. A cut-off request is NOT retried, because the server keeps decoding after the client hangs up and a retry would only queue a second decode of the same audio. `media.stt.request_timeout_sec` overrides that rule outright, up or down. Windowing needs `ffmpeg` and `ffprobe` on PATH; without them a long file is still sent in one request, and a provider that refuses it says so in the log. **The corpus says how much it never heard.** `dir2mcp up` prints a Speech coverage section once the server reports ready (on the daemon path too, which is the default on a terminal; a run that returns while the daemon is still starting prints no coverage, because the record it would report on is not built yet), and `dir2mcp doctor` answers a `transcript_coverage` check, when the record holds transcripts whose coverage does not state completeness: how many, and how much audio of how much was decoded. The default matters here. `on_partial_transcript` defaults to `warn`, which keeps the partial transcript and leaves the document `status=ok`, so the shortfall reaches no other report: skip reasons see only the `skip` path, and the extraction verdict is about formats. A corpus can be 100% indexed, report no skips and no errors, and still be missing hours of speech. `doctor` states a clean corpus positively, because an omitted line and a clean corpus read the same. `doctor` also names how many transcripts say NOTHING about their coverage. A single-request decode records none, and neither does any transcript indexed before dir2mcp recorded coverage, so without that number a corpus with no records at all would read exactly like one that is whole. It stays an `ok`, because an unknown is not a known defect. That count is a `doctor` line only: the `up` banner prints a Speech coverage section when a transcript records an INCOMPLETE decode, and stays silent otherwise, so a corpus whose transcripts merely assert nothing produces no banner section. A permanent line on every start is one an operator learns to skip; `doctor` is the surface that is asked. The report names the STT provider and model recorded on the transcript, never an endpoint, because the record does not hold which endpoint served a window. It also names the action that repairs them: `dir2mcp reindex --redecode-partial-transcripts` ignores the cached transcript of exactly those recordings, so they reach the provider again. A plain reindex re-decodes nothing here, because the transcript cache is keyed on the media bytes and the provider/model and repairing an endpoint changes neither. The flag is scoped on purpose: clearing the whole cache would re-decode a corpus that is mostly fine, which on an archive is hours of GPU time.
+- **A recording that changes language inside itself can be decoded per window.** By default the source language is resolved ONCE per recording and the whole recording is routed on it (`media.stt.language_scope: item`, spec 8.2.1). A decoder committed to the wrong language does not fail: it emits the nearest language it knows, so the minority passages of an interview conducted in Russian and answered in Ukrainian come out in the wrong script, and the coverage floor cannot see it because the recording's language IS covered. `media.stt.language_scope: window` (spec 8.2.2) applies the same three steps per decode window instead: the language the decoder reports for the window identifies it (falling back to the text detector when the provider reports none), `media.stt.language_providers` routes the window, and a window whose language moves to another profile is decoded again on that profile, so the extra request is paid only for windows that actually move. A window whose report is below the confidence floor inherits the preceding window's language, so one misread window cannot flap the route. The honest-coverage floor runs per window too: under `on_uncovered_language: warn` an uncovered window is indexed and recorded `covered: false`; under `skip` only that window is refused, and the recording is a `language_uncovered` skip only when every window was refused. The transcript records the result in `coverage.languages` (which stretch resolved to which language, how, on which profile, covered or not) and `coverage.refused`, its representation language is the largest covered language by duration, a segment in another language records `language` on its span and its chunk, a segment from a window whose language could not be resolved records `und` so it is never filtered or answered as the recording's language, and a retrieval chunk never spans a language change. The §8.6.6 quality checks run per window too: a window that decodes to a repetition loop, gibberish or text off the script of its own resolved language is refused as `quality_gate` instead of reaching the transcript, and a recording whose every window fails that way is `TRANSCRIBE_FAILED` as a failed document-level gate is (silence is not a defect: the empty and density checks stay document-level). The scope and route table join the transcript's derivation identity, so switching a corpus to `window` re-decodes it on the next run. A decoder's own language report is not calibrated for a language it covers badly (a Whisper-class decoder has reported Kyrgyz as Macedonian at full confidence), so `media.stt.language_identifier` (spec 8.2.3) can name an STT-capable profile used only for the language it reports; its answer outranks the decoder's, and a failed or unsure answer changes nothing. A `language_providers` value may also be an ordered list of candidates: a window one candidate decodes into a repetition loop (with the quality gate on), or into a language outside its declared coverage (under `on_uncovered_language: skip`), is decoded again by the next. A profile may carry `stt_validation` records of the operator's own measurements, and `media.stt.require_validation: true` keeps a candidate without one for the language out of the route. No model is trained or shipped: which model covers which language stays the operator's `stt_languages` declaration and `language_providers` route.
+
+### Late chunking with a self-hosted TEI server (`kind: tei`)
+
+Late chunking (spec §8.1.9) embeds a whole document once through a long-context model, then mean-pools each chunk's token vectors, so every chunk vector carries document context. It needs an embedder that returns **token-level** embeddings with offsets. The only kind that does is `tei`: a self-hosted [Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) server on its **native** surface (`/embed`, `/embed_all`, `/tokenize`, `/info`). A `kind: openai` profile pointed at the same server keeps working but returns pooled vectors only, so it cannot serve this mode.
+
+```yaml
+providers:
+  tei:
+    kind: tei
+    base_url: http://gpu-box:8080                       # host ROOT (native surface, not /v1)
+    embed_text_model: sentence-transformers/all-MiniLM-L6-v2   # the served model id, so the embed identity names it
+    embed_code_model: sentence-transformers/all-MiniLM-L6-v2
+model:
+  embed:
+    provider: tei              # reindex-bound (the embed identity includes it)
+ingest:
+  late_chunking: true          # reindex-bound too; run `dir2mcp reindex` after turning it on
+```
+
+Notes:
+
+- The served model must use **mean** pooling (`GET /info` reports it). The adapter checks it once per run, before any document is embedded; with any other pooling it refuses token embeddings and the whole corpus embeds chunk-then-embed, logged once with the served pooling named. A TEI model that pools with `cls` (many `bge` models) is not a late-chunking model.
+- A document longer than the server's `max_input_length` is split into consecutive token windows and embedded window by window; the split is deterministic. Small models (256 tokens) work, but a long-context model gives each chunk more context.
+- `ingest.late_chunking` and `retrieval.contextual.enabled` are mutually exclusive (`CONFIG_INVALID`): both put document context into a chunk vector, by incompatible means.
+- Every other embedder (Mistral, OpenAI, Cohere, Gemini, `kind: openai`, `omniembed`) falls back to chunk-then-embed with the flag on; the fallback and its reason are logged once per run.
+- A remote `tei` endpoint (not loopback or a private network) must be `https`; a Bearer token is sent only to the configured scheme and host. The `TEI_BASE_URL` environment variable fills the built-in `tei` profile's `base_url`.
+- For a full GPU-VPS topology (corpus over NFS/S3, vector backend, systemd), see [docs/dual-machine-deployment.md](dual-machine-deployment.md).
+
+### Continuous incremental indexing (optional)
+
+By default `dir2mcp up` scans the directory once at startup. Enable the **filesystem watcher** to keep the index continuously in sync with on-disk changes for the life of the process — added files are indexed, edited files are re-indexed, and removed files are tombstoned (evicted from retrieval).
+
+```yaml
+ingest:
+  watch: true            # default: false
+  watch_debounce: 500ms  # coalesce editor write bursts before re-indexing
+```
+
+Notes:
+
+- The watcher runs alongside the existing embedding worker, so newly indexed files become searchable automatically without a manual `reindex`.
+- It is **best-effort, not a correctness guarantee**: a low-frequency safety rescan reconciles anything missed (kernel event coalescing, OS watch limits on very large trees), so the index converges even if individual events are dropped.
+- A **directory** that is removed, or renamed out of the corpus, retires every document below it at once. A filesystem reports one event for the directory, not one per file, so the watcher reconciles the descendants itself instead of leaving them searchable until the next safety rescan.
+- A **large burst** can fill the watcher's internal job queue while one document is being indexed. A change the queue cannot take is dropped on purpose, because blocking there is what makes the kernel drop events, so the drop asks for an immediate reconcile instead and is written to the log. The corpus converges on that reconcile, not on the next periodic rescan.
+- Excluded paths, `.gitignore` rules, and size/type limits apply to watched changes exactly as they do to the initial scan.
+- A file that **stops** being eligible is retired at once. If it grows past `ingest.max_file_mb` it keeps a visible `skipped` row with the reason, and its chunks leave retrieval. If it becomes gitignored it is tombstoned, exactly as a full rescan would tombstone it. An edit to a `.gitignore` file triggers a reconcile of the tree, because one rule can change the eligibility of many paths at once.
+- **The watcher needs a filesystem.** `source.kind: local` and `source.kind: nfs` are ordinary directory trees, so both use it. A remote corpus (`source.kind: s3`) has no filesystem to watch, so the watcher does not start for it. The index reconciles on a periodic rescan of the remote source instead, and `dir2mcp up` prints a warning at startup. `watch_debounce` and the `watch_overflows` stat apply only to the filesystem watcher; a remote corpus reports neither.
+- Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
+
+### Gemini embeddings (`gemini-embedding-001`)
+
+dir2mcp can use Google's [Gemini Embedding model](https://deepmind.google/models/gemini/embedding/) (`gemini-embedding-001`) at full parity via Gemini's **native** embed API. Set `GEMINI_API_KEY` and bind embeddings to the `gemini` provider (auto-selection still prefers Mistral, so the binding is explicit):
+
+```yaml
+model:
+  embed:                       # reindex-bound — see note below
+    provider: gemini
+    text_model: gemini-embedding-001
+    code_model: gemini-embedding-001
+    # Optional Matryoshka output dimensionality (native 3072; truncatable
+    # to 1536 / 768). Omit for the native dimension. Truncated vectors are
+    # re-normalized automatically.
+    text_dim: 3072
+    code_dim: 3072
+```
+
+- **Asymmetric `taskType`** (better retrieval quality): the document/query role is mapped automatically — corpus content embeds as `RETRIEVAL_DOCUMENT`, search queries as `RETRIEVAL_QUERY`, and a query against the configured `code_model` as `CODE_RETRIEVAL_QUERY`. No configuration needed; the role is set by the call site.
+- **Matryoshka dimensions** (`text_dim`/`code_dim`): request a smaller vector to shrink the index. dir2mcp sends Gemini's `outputDimensionality` and L2-normalizes the truncated vectors. The knob is Gemini-only — setting it on a provider that can't honor it is rejected at startup (`CONFIG_INVALID`).
+- **Reindex-bound (spec §8.1.4/§8.1.6):** the embed provider, model, **and requested dimension** form the corpus-lifetime embed identity. Switching to Gemini, or changing the dimension later, requires a `dir2mcp reindex` (the server refuses to mix vector spaces and tells you to reindex).
+
+#### Multimodal embeddings (`gemini-embedding-2`, preview — implemented, default-off)
+
+Spec §8.1.7 (0.14.0) defines an opt-in `model.embed.multimodal` mode (`off` default | `augment` | `replace`) that embeds media directly into the same vector space via the multimodal `gemini-embedding-2` model. It is being implemented in phases against a **Public Preview** model:
+
+```yaml
+model:
+  embed:
+    provider: gemini
+    text_model: gemini-embedding-2
+    code_model: gemini-embedding-2
+    multimodal: augment      # off (default) | augment | replace
+```
+
+- **Images**, **PDFs**, **audio**, and **video** are supported today. Under `augment` the document is indexed *both* as text (image OCR / docling PDF text / audio transcript, if configured) *and* as direct media embeddings; under `replace` it is embedded directly *instead of* text. A PDF is embedded **per page** (each page is its own vector with a page citation); audio and video are embedded **per time window** (each window is its own vector with a `start_ms`/`end_ms` citation). A text query then retrieves images, PDF pages, and media windows from the shared space.
+- **Audio/video duration probing and window extraction** use the external `ffprobe`/`ffmpeg` binaries. When they are absent, audio/video are skipped for direct embedding and the file keeps its text path (audio transcript) — a graceful fallback, not an error. Direct audio embedding covers MP3/WAV; video covers MP4/MOV (the formats the preview model accepts). Other audio formats keep only their transcript; video has no text path.
+- `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving. The mode is **YAML-only** (`model.embed.multimodal`); there is no environment-variable override, since it is a deploy-time, reindex-bound choice.
+- **Retrieval & citations.** Media hits surface in `search`/`ask` results with their `modality` and `media_ref`. To avoid double-counting, a coarse page-image candidate is dropped when a text/region candidate survives for the same `(rel_path, page)`. `ask` grounds on available text (an `augment` hit's OCR/transcript); a `replace`-mode media-only hit is cited without quoted context. `open_file` on a media-only chunk returns the non-retryable `MEDIA_NO_TEXT` (never raw bytes), distinct from the retryable `OCR_NOT_READY` when text is merely pending.
+
+See [Design 0003](https://github.com/dirstral/dirstral-spec/blob/main/docs/design/0003-multimodal-embeddings.md).
+
+### Server identity
+
+Each `dir2mcp up` instance reports a unique MCP server name derived from the indexed directory, so running multiple corpora side-by-side (e.g., `dir2mcp-stas-legal-a1b2c3` and `dir2mcp-research-notes-9f44ee`) keeps them distinguishable in your MCP client list.
+
+- Default shape: `dir2mcp-<slug>-<6-hex>`, where `<slug>` is the slugified basename of the indexed directory and `<6-hex>` hashes its absolute path (so the name is stable across re-runs from the same location).
+- Developer builds (binaries built locally without a release tag — `dir2mcp version` reports `v0.0.0-dev` or `vdev-<sha>`, optionally with `+dirty`) use a `dir2mcp-dev-<slug>-<6-hex>` prefix instead, so a dev build run from your repo shows up as a distinct entry alongside the brew-installed release in `claude mcp list`.
+- Override via YAML (`server.name: my-alias`) or env (`DIR2MCP_SERVER_NAME=my-alias`). Overrides apply verbatim and bypass the default generated name, including the `dir2mcp-dev-...` prefix used by dev builds.
+- The `dir2mcp up` banner prints a ready-to-paste `claude mcp add --transport http <name> <url> ...` line using this name; the client-side alias you register with is yours to choose.
+
+### Reranking (optional)
+
+An optional post-fusion **reranking** stage can re-score retrieval candidates with a cross-encoder for higher answer quality. It is **capability-driven** — it activates automatically when a rerank provider credential is present (the same way the Mistral key gates embedding/OCR). A missing credential is a startup condition, not a query failure: in auto mode reranking simply stays off (silent); if you explicitly set `rerank.enabled: true` without a credential the server warns at startup and runs without reranking. Once active it is **fail-open** — any *runtime* provider error (network, rate limit, non-2xx) silently falls back to the normal fused order, so a query never fails because reranking failed. Spec: `dirstral-spec/docs/SPEC.md` §9.1.1.
+
+- Provider: **Cohere** (`POST /v2/rerank`, default model `rerank-v3.5`).
+- **Auto-enable**: just provide the credential — `COHERE_API_KEY=...` (or `rerank.cohere.api_key` in YAML). No enable flag required.
+- Optional YAML (every field optional; shown with defaults):
+
+  ```yaml
+  rerank:
+    # `enabled` is an optional override:
+    #   omitted -> auto (on iff a credential is present)
+    #   false   -> force off even when a credential is present
+    #   true    -> require it (warns + falls back if no credential)
+    provider: cohere
+    candidate_pool: 50      # fused candidates re-scored before truncation to k
+    cohere:
+      api_key: ${COHERE_API_KEY}
+      model: rerank-v3.5
+  ```
+
+- Env overrides: `COHERE_API_KEY=...` auto-enables; `DIR2MCP_RERANK_ENABLED=false` opts out even with a credential; `DIR2MCP_RERANK_MODEL=...` overrides the model. Env wins over YAML for the key; the key is a secret and is never written to the config snapshot.
+- For `index=both`, reranking is applied once to the merged candidate pool. Ordering is deterministic (relevance desc, then `chunk_id`).
+
+### Relevance floor and insufficient-evidence abstention
+
+Two separate controls decide what counts as evidence (SPEC §9.4.3). Both are **server-side**: neither is an MCP tool parameter, so neither changes a tool input/output schema.
+
+**1. The relevance floor (`retrieval.min_score`) is a RELATIVE pruning control.** It drops low-scoring candidate hits before they reach the model, so a query with no strongly-relevant chunks returns fewer results instead of diluting the answer with weak context.
+
+- The floor is applied after scoring/fusion, reranking, the fusion's own dedup/truncation, and recency decay, and compares each hit's final score as a **ratio to the best-scoring hit of the same result set**. It runs on the candidate pool **before** the final truncation to the caller's `k`, deliberately, so a survivor that pure relevance ranked at `k+1..k+n` can still surface (#427). A consequence worth knowing when reading query logs: while the pool is larger than `k`, pruning a hit changes nothing the caller sees, because truncation would have cut that hit anyway. The floor becomes visible exactly when the surviving pool is at or below `k`, which is the narrow or filtered query. Raw scores are incommensurable across retrieval modes (cosine ≈ `0..1`, RRF max ≈ `0.033`, a provider-specific rerank scale), so a ratio is what makes one configured number mean the same thing in every mode: it is unchanged when the whole set is rescaled. A hit whose ratio equals the floor is **kept** (strict less-than drops).
+- It **ships enabled** at `0.05`, i.e. "drop a hit that scores below 5% of the best hit". A set of near-equal candidates therefore survives in full, and a hit reaches `0` only when its own score is `0`. Set `0` to disable it explicitly. Values outside `[0,1]` are rejected as invalid config.
+- When the result set has no finite positive best score (every score is `0`, all of them are negative, all of them are `NaN`, or the best one is `+Inf`), no ratio is defined and the floor keeps the set intact rather than pruning on a meaningless comparison. A single unreadable hit (`NaN`) beside readable ones is the opposite case, and it drops.
+- Being relative, this floor **cannot** express "the best hit is too weak": the top hit is `1.0` by construction, so some hit always clears any floor. That is the job of the second control.
+
+  ```yaml
+  retrieval:
+    min_score: 0.05   # ships enabled; 0 disables; 1 keeps only the top-scoring hit(s)
+  ```
+
+**2. Abstention uses an ABSOLUTE evidence threshold.** When retrieval returns candidates but none of them is strong enough on an absolute scale, `ask` does not generate an answer from them: it returns an explicit *insufficient evidence* answer with an **empty `citations` array** (a normal result, not an error), and keeps the rejected candidates in `hits` so you can see what was turned down. Its wording differs from the empty-corpus answer, so a caller can tell "I found nothing" apart from "I found material and judged it too weak".
+
+- **Signal and scale:** the hit's own `(query, chunk)` score, tagged with the scale it is on. `cosine` is the vector index's query/chunk cosine similarity; `rerank` is the reranker's relevance score for the pair. A candidate that reached the result set only through lexical BM25 carries no absolute signal (an FTS5 `bm25()` score is corpus-relative, and an RRF score encodes rank rather than relevance).
+- **Shipped values:** `cosine ≥ 0.05`, `rerank ≥ 0.02`. They are deliberately conservative, because embedding cosine baselines are provider-dependent and a tighter default would make the guard silently corpus-specific. They are server constants and are **not** operator-configurable; `retrieval.min_score` configures the pruning floor only.
+- **Aggregation:** the eligible set clears the threshold when its **strongest** hit does, each hit measured against the threshold for its **own** scale (one response may legitimately carry several scales at once).
+- **Blind spot:** when no eligible hit carries an absolute signal at all, the guard fails **open** and the answer is generated. Suppressing answers on a corpus whose vector index is simply unavailable would be the worse failure.
+
+An optional **recency time-decay** boosts newer content for dated corpora (news, logs, changelogs, meeting notes). It is **server-side and config-only** — not an MCP tool parameter, so it changes no tool input/output schema.
+
+- When configured, each hit's final score is multiplied by an exponential decay `exp(-ln2 * age / half_life)`, where `age` is the hit's source-document mtime relative to a fixed "now" captured at query start. The decay is applied just **before** the relevance floor; re-scored hits are re-sorted deterministically.
+- A hit whose date cannot be resolved is **never boosted nor penalized**, and a future-dated hit (clock skew) is clamped so it cannot be amplified above its raw score.
+- **Default empty/`0` = disabled** (pass-through): behavior is unchanged unless you configure it. A negative half-life is rejected as invalid config.
+
+  ```yaml
+  retrieval:
+    recency_half_life: 0   # 0/empty disables; e.g. 720h halves a 30-day-old hit's score
+  ```
+
+### HyDE query transform (optional)
+
+**HyDE** (Hypothetical Document Embeddings) generates a short hypothetical answer to the query, embeds *that*, and retrieves with it — often improving recall for terse or keyword-style queries by closing the query↔document style gap. It is **server-side and config-only** (not an MCP tool parameter), so it changes no tool input/output schema.
+
+- **Default off**: behavior is unchanged unless you enable it. Enabling it adds one generation call per search to produce the hypothetical answer.
+- **Graceful degradation**: a generation failure (or no configured generator) falls back to the raw query — HyDE is an optimization, never a hard dependency.
+- **Modes**:
+  - `fuse` (default): RRF-fuses the hypothetical-document hits with the raw-query hits.
+  - `replace`: retrieves with the hypothetical-document embedding alone.
+
+  ```yaml
+  retrieval:
+    hyde:
+      enabled: false   # set true to opt in
+      mode: fuse       # fuse (default) | replace
+  ```
+
+### Hierarchical (coarse-to-fine) retrieval (optional)
+
+For long documents and long media the answer often needs document-level context that no single chunk carries. **Hierarchical retrieval** (the RAPTOR / parent-document technique) derives a short model-generated **`summary` representation** per document, embeds it alongside that document's fine chunks, and — when a summary matches the query — **expands it to the fine chunks beneath it** before dedup/rerank. It is **server-side and config-only** (not an MCP tool parameter), so it changes no tool input/output schema.
+
+- **Summaries retrieve, chunks cite.** A summary is a routing device: it is never returned as a hit, never a citation snippet, and never an answer quote. Every citation still points at a real source span in a fine chunk.
+- **Default off**, and **not a reindex**: a summary is an *additive* vector in the same embedding space as its document's chunks, so toggling this adds/removes summary vectors and never re-embeds the corpus.
+- **Capability-driven and fail-open**: summaries are generated by the configured chat provider (one call per document). With no chat provider — or on a per-document generation failure — that document simply has no summary and falls back to flat retrieval; the next scan retries.
+- **Cost**: one bounded generation call per document, cached by derivation identity, so an unchanged document is not re-summarized.
+- **Scope today**: document-level summaries only. Section/event-level windowed summaries (`levels: [section]`, `section_units` / `section_seconds`) are a follow-up: configuring `section` logs a warning and derives no section windows. Document-level summaries need `document` in `levels`, so `levels: [section]` on its own derives no summaries at all. Keep the default `[document]`, or use `[document, section]`.
+
+  ```yaml
+  retrieval:
+    hierarchical:
+      enabled: false        # set true to opt in
+      source_reps: auto     # auto (default) = the document's primary retrievable text
+                            #   representation; or an explicit list, e.g.
+                            #   [extracted_markdown, transcript]
+      levels: [document]    # document (default) | section (not implemented yet)
+      provider: ""          # optional generator profile; empty => the configured chat provider
+      max_tokens: 512       # per-summary generation bound
+      prompt_version: v1    # names the built-in, domain-free template
+      # prompt: ""          # optional override; the effective prompt is hashed into the
+                            #   summary derivation identity, so an edit re-derives summaries
+  ```
+
+### Auth token behavior
+
+`dir2mcp` bearer auth can come from:
+
+1. `--auth file:<path>` (explicit file source)
+2. `DIR2MCP_AUTH_TOKEN` (environment)
+3. auto-generated `secret.token` in the state directory (`auth=auto` default)
+
+Operational guidance:
+- Do not pass bearer tokens directly on command lines in shared environments.
+- Prefer token files (`--auth file:<path>`) or environment variables.
+
+### ElevenLabs bridge
+
+`elevenlabs-bridge` is a separate Go helper that forwards ElevenLabs webhook
+calls to a running `dir2mcp` MCP endpoint. It reads its configuration from the
+current environment and falls back to sensible defaults:
+
+| Variable | Required | Description |
+|---|---|---|
+| `MCP_URL` | No | `dir2mcp` MCP endpoint URL. When unset, the bridge first tries `$STATE_DIR/connection.json`, then falls back to `http://127.0.0.1:8087/mcp` |
+| `MCP_TOKEN` | No | Explicit bearer token for `dir2mcp`. When set, overrides all other token sources. When unset, the bridge resolves credentials in order: first checks `connection.json.token_file` (inside `$STATE_DIR/connection.json` written by `dir2mcp` when using `--auth file:<path>`), then `$STATE_DIR/secret.token`, and finally falls back to no-auth if none exist |
+| `STATE_DIR` | No | `dir2mcp` state directory used to locate `connection.json` and token files. Default: `.dir2mcp` in the bridge working directory |
+| `PORT` | No | Bridge listen port. Default: `8088` |
+
+Usage:
+
+```bash
+dir2mcp bridge elevenlabs
+
+# Override defaults when needed.
+MCP_URL="http://127.0.0.1:8087/mcp" \
+STATE_DIR="/path/to/corpus/.dir2mcp" \
+PORT=8088 \
+dir2mcp bridge elevenlabs
+
+# Legacy wrapper binary still works and forwards to the same integrated command.
+make build-elevenlabs-bridge
+./elevenlabs-bridge --state-dir /path/to/corpus/.dir2mcp
+```
+
+If your `dir2mcp` server already uses `--auth none`, you can omit `MCP_TOKEN`
+and `STATE_DIR`.

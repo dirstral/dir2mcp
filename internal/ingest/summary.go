@@ -84,9 +84,9 @@ func (svc *Service) resolveSummaryBinding(cfg config.Config) {
 }
 
 // warnSectionSummariesUnsupported records, once per service, that section-level
-// summaries were requested but are not implemented yet: document-level summaries
-// are still derived and section windows simply do not exist. Honest coverage
-// beats a silent no-op (§9.7).
+// summaries were requested but are not implemented yet: section windows simply
+// do not exist. Document-level summaries are derived only when `document` is also
+// among the levels. Honest coverage beats a silent no-op (§9.7).
 func (svc *Service) warnSectionSummariesUnsupported() {
 	svc.getLogger().Printf("hierarchical retrieval: retrieval.hierarchical.levels requests %q, which is not implemented yet; only document-level summaries are derived",
 		config.HierarchicalLevelSection)

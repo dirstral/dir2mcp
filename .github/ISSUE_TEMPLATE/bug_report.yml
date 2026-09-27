@@ -41,4 +41,4 @@ body:
       label: Support bundle
       description: |
         Run `dir2mcp support-bundle` and attach the tar.gz. It redacts credentials.
-        Read "What a support bundle discloses" in the README before you attach it.
+        Read "What a support bundle discloses" in docs/security.md before you attach it.

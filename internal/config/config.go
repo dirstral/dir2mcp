@@ -689,7 +689,7 @@ type Config struct {
 	// that half of #655 is deliberately not implemented here: the canonical spec
 	// names the enum members without defining what any member DOES, so writing
 	// the behavior would author normative semantics this repository does not own
-	// (spec-first governance; compare dirstral-spec#68). The README says the same
+	// (spec-first governance; compare dirstral-spec#68). docs/configuration.md says the same
 	// thing, so an operator is not told the modes work.
 	//
 	// IngestArchivesMode is the sharp case (issue #843). Its shipped default is
@@ -5657,7 +5657,7 @@ var inertIngestModeCommentLines = []string{
 // on every start over a default the operator cannot improve on is a warning
 // operators learn to skip, which would cost more than it buys. Their retraction
 // is the comment the generated config carries (inertIngestModeCommentLines) and
-// the README section, both read at exactly the moment the value is read.
+// the docs/configuration.md section, both read at exactly the moment the value is read.
 //
 // It is driven by the FILE fields, not by the merged Config, so `off` warns only
 // when the operator actually wrote it. It is called from applyFileOverrides, so
@@ -6159,8 +6159,9 @@ func (c Config) HierarchicalDocumentLevelEnabled() bool {
 
 // HierarchicalSectionLevelRequested reports whether the operator asked for
 // section-level summaries. Section windowing is not implemented yet, so callers
-// warn once and derive document-level summaries only — honest coverage rather
-// than a silent no-op (SPEC §9.7).
+// warn once and derive no section windows, honest coverage rather than a silent
+// no-op (SPEC §9.7). Document-level summaries still need `document` in the
+// levels (HierarchicalDocumentLevelEnabled); `[section]` alone derives none.
 func (c Config) HierarchicalSectionLevelRequested() bool {
 	if !c.RetrievalHierarchicalEnabled {
 		return false

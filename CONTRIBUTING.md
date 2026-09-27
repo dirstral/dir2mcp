@@ -13,7 +13,7 @@ dir2mcp support-bundle
 
 The bundle redacts credentials. It also redacts local paths and endpoints
 unless you add `--include-content`. Read
-[What a support bundle discloses](README.md#what-a-support-bundle-discloses)
+[What a support bundle discloses](docs/security.md#what-a-support-bundle-discloses)
 before you attach it.
 
 For a security problem, do not open an issue. Follow [SECURITY.md](SECURITY.md).
@@ -41,6 +41,27 @@ make fmt     # format the tree in place (the gate only reports, it never rewrite
 
 `make check` must pass before you open a pull request. Put new tests under
 `tests/`, in the directory for the subsystem.
+
+## More make targets
+
+```bash
+make cyclo                    # the gocyclo -over 15 gate that CI runs (gocyclo v0.6.0)
+make lint                     # golangci-lint; part of make check
+make benchmark                # the large-corpus retrieval benchmark
+make bench-e2e                # the end-to-end answer and citation benchmark (bench/README.md)
+make build-elevenlabs-bridge  # the ElevenLabs bridge wrapper binary
+make demo                     # record assets/demo.gif again (needs vhs and a local Ollama)
+```
+
+## Release and API notes
+
+- A pushed `v*` tag runs `.github/workflows/release.yml`, which publishes the
+  release with GoReleaser. The Homebrew formula update needs
+  `HOMEBREW_TAP_GITHUB_TOKEN` with write access to `dirstral/homebrew-tap`.
+- `retrieval.NewEngine` takes a context as its first parameter:
+  `retrieval.NewEngine(ctx, stateDir, rootDir, cfg)`.
+- `Engine.Ask` has a context-aware variant, `AskWithContext`. The original
+  `Ask` stays as a thin wrapper for compatibility.
 
 ## Behaviour changes are spec-first
 

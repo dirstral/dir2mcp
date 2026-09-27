@@ -2,7 +2,7 @@
 
 ## Project
 
-dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. It supports indexing, retrieval, citations, and optional x402 request gating (an HTTP 402‑based payment challenge system). See [x402 request gating docs](dirstral-spec/docs/x402-payment-adapter-spec.md) for details (canonical spec lives in the `dirstral-spec` submodule; `docs/*.md` are pointer stubs).
+dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. It supports indexing, retrieval, citations, and optional x402 request gating (an HTTP 402‑based payment challenge system). See [x402 request gating docs](dirstral-spec/docs/x402-payment-adapter-spec.md) for details (canonical spec lives in the `dirstral-spec` submodule; `docs/SPEC.md`, `docs/VISION.md`, `docs/ECOSYSTEM.md` and `docs/x402-payment-adapter-spec.md` are pointer stubs).
 
 ## Repository layout
 
@@ -18,7 +18,7 @@ dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. I
 - `internal/x402`: x402 types + facilitator client
 - `internal/store`: sqlite-backed metadata persistence
 - `tests/*`: integration-style suites by subsystem
-- `docs/`: pointer stubs only — canonical normative docs (SPEC, VISION, ECOSYSTEM, x402 adapter) live in the `dirstral-spec` git submodule (`dirstral-spec/docs/`)
+- `docs/`: user guides (install, configuration, cli, mcp-tools, security, deployment, x402, dual-machine-deployment) plus pointer stubs for the normative docs (SPEC, VISION, ECOSYSTEM, x402 adapter), which live in the `dirstral-spec` git submodule (`dirstral-spec/docs/`). The README stays short: put reference material in a guide and link it.
 
 ## Build and test
 

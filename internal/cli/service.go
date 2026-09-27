@@ -520,7 +520,7 @@ func credentialSweepKeys(providerRefs []string, runtimeRefs []config.RuntimeSecr
 // A secret is satisfied when it was just persisted to .env.local, when the
 // target directory's dotenv already defines it, or when the effective config
 // resolved it from a source other than the current environment (the keychain).
-// The keychain caveat is documented in the README: a background agent may not be
+// The keychain caveat is documented in docs/configuration.md: a background agent may not be
 // able to unlock it unattended, so keychain-only credentials are still best
 // mirrored into .env.local with `dir2mcp config init`.
 func unpersistedRequiredSecrets(workingDir string, refs []config.RuntimeSecretRef, saved []string) []string {
