@@ -87,6 +87,8 @@ type seedRep struct {
 	deleted bool
 }
 
+// seedTranscripts creates the sqlite store under dir/.dir2mcp with one document
+// and one representation for each rep, and returns the open store.
 func seedTranscripts(t *testing.T, dir string, reps ...seedRep) *store.SQLiteStore {
 	t.Helper()
 	ctx := context.Background()
@@ -145,6 +147,9 @@ func doctorCheckNamed(t *testing.T, dir, name string) (struct {
 	}{}, false
 }
 
+// TestPartialTranscriptCoverage_CountsOnlyWhatDoesNotStateCompleteness pins that the
+// partial count takes only the partially decoded transcript, not a fully decoded one
+// or a single-request one.
 func TestPartialTranscriptCoverage_CountsOnlyWhatDoesNotStateCompleteness(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
@@ -179,6 +184,8 @@ func TestPartialTranscriptCoverage_CountsOnlyWhatDoesNotStateCompleteness(t *tes
 	}
 }
 
+// TestPartialTranscriptCoverage_ReadsTheCoverageDurationNotTheMediaDuration pins that
+// the duration comes from coverage.duration_ms, not from the top-level duration_ms.
 func TestPartialTranscriptCoverage_ReadsTheCoverageDurationNotTheMediaDuration(t *testing.T) {
 	// A transcript meta_json carries BOTH a top-level duration_ms and
 	// coverage.duration_ms. Here they differ, so an aggregate that read the
@@ -199,6 +206,9 @@ func TestPartialTranscriptCoverage_ReadsTheCoverageDurationNotTheMediaDuration(t
 	}
 }
 
+// TestPartialTranscriptCoverage_AnUnknownDurationIsReportedNotSummedAsZero pins that a
+// transcript with an unknown duration still counts as a file, and that its duration
+// is reported as unknown instead of added as zero.
 func TestPartialTranscriptCoverage_AnUnknownDurationIsReportedNotSummedAsZero(t *testing.T) {
 	// §8.6.13: duration_ms is 0 when the probe failed. Summed as zero it would
 	// report a shortfall of nothing, which is the silence §7.7 forbids.
@@ -230,6 +240,8 @@ func TestPartialTranscriptCoverage_AnUnknownDurationIsReportedNotSummedAsZero(t 
 	}
 }
 
+// TestPartialTranscriptCoverage_ARetiredTranscriptIsNotCounted pins that a tombstoned
+// transcript representation is not counted.
 func TestPartialTranscriptCoverage_ARetiredTranscriptIsNotCounted(t *testing.T) {
 	// A partial-transcript refusal (`on_partial_transcript: skip`) tombstones the
 	// representation and its chunks. Counting it would report a shortfall for
@@ -252,6 +264,9 @@ func TestPartialTranscriptCoverage_ARetiredTranscriptIsNotCounted(t *testing.T) 
 	}
 }
 
+// TestPartialTranscriptCoverage_EveryWindowBackAndTimeStillShortIsPartial pins that a
+// transcript whose windows all returned is still partial when the decoded time falls
+// short.
 func TestPartialTranscriptCoverage_EveryWindowBackAndTimeStillShortIsPartial(t *testing.T) {
 	// The reading the window counts cannot see, and the reason dirstral-spec#107
 	// was amended: completeness is the MEASURED question wherever it can be
@@ -273,6 +288,9 @@ func TestPartialTranscriptCoverage_EveryWindowBackAndTimeStillShortIsPartial(t *
 	}
 }
 
+// TestPartialTranscriptCoverage_AnUnreadableMetaAssertsNothing pins that one row with
+// unparsable metadata does not fail the report, and that the readable partial
+// transcript is still counted.
 func TestPartialTranscriptCoverage_AnUnreadableMetaAssertsNothing(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir,
@@ -291,6 +309,8 @@ func TestPartialTranscriptCoverage_AnUnreadableMetaAssertsNothing(t *testing.T) 
 	}
 }
 
+// TestDoctorTranscriptCoverage_ReportsACleanCorpusPositively pins that doctor reports
+// the transcript_coverage check as ok and states the clean verdict.
 func TestDoctorTranscriptCoverage_ReportsACleanCorpusPositively(t *testing.T) {
 	// §7.7: an omitted line and a clean corpus read identically to the operator
 	// deciding whether to trust a search result, so doctor states it.
@@ -311,6 +331,8 @@ func TestDoctorTranscriptCoverage_ReportsACleanCorpusPositively(t *testing.T) {
 	}
 }
 
+// TestDoctorTranscriptCoverage_NamesTheShortfallAndAWorkingRemedy pins that doctor
+// warns on a partial transcript and names the shortfall and a remedy that works.
 func TestDoctorTranscriptCoverage_NamesTheShortfallAndAWorkingRemedy(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
@@ -343,6 +365,9 @@ func TestDoctorTranscriptCoverage_NamesTheShortfallAndAWorkingRemedy(t *testing.
 	}
 }
 
+// TestStartupTranscriptCoverage_IsSilentWhereNoBannerPrints pins that the coverage
+// probe runs once for the banner, and that --json and --quiet print no banner and
+// run no probe.
 func TestStartupTranscriptCoverage_IsSilentWhereNoBannerPrints(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
@@ -367,6 +392,8 @@ func TestStartupTranscriptCoverage_IsSilentWhereNoBannerPrints(t *testing.T) {
 	}
 }
 
+// TestDoctorTranscriptCoverage_ASubSecondShortfallIsNotRenderedAsNothing pins that
+// doctor names a shortfall of less than one second instead of rounding it to zero.
 func TestDoctorTranscriptCoverage_ASubSecondShortfallIsNotRenderedAsNothing(t *testing.T) {
 	// "0s never heard" reads as nothing missing, which is the silence §7.7
 	// forbids. Windows are minutes long, so this is the rounding edge rather
@@ -388,6 +415,8 @@ func TestDoctorTranscriptCoverage_ASubSecondShortfallIsNotRenderedAsNothing(t *t
 	}
 }
 
+// TestPartialTranscriptCoverage_SeesEveryAudioTrack pins that the count includes the
+// transcripts of additional audio tracks (transcript@t<N>), not only the first.
 func TestPartialTranscriptCoverage_SeesEveryAudioTrack(t *testing.T) {
 	// §8.6.12 gives an additional audio track its own `transcript@t<N>` rep_type,
 	// and each track is a separate decode with its own coverage. A predicate
@@ -416,6 +445,8 @@ func TestPartialTranscriptCoverage_SeesEveryAudioTrack(t *testing.T) {
 	}
 }
 
+// TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall pins that a
+// translation of a partial transcript does not count the same missing audio twice.
 func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.T) {
 	// A translation derives from the source transcript's TEXT and records no
 	// coverage of its own (§8.6.2). Counting it would report the same missing
@@ -447,6 +478,8 @@ func TestPartialTranscriptCoverage_ATranslationIsNotASecondShortfall(t *testing.
 // §8.6.13 existed is in that state, and §5.2 makes an absent field "no
 // assertion", never a positive value.
 
+// TestTranscriptCoverage_ACorpusThatAssertsNothingSaysSo pins that doctor stays ok for
+// transcripts without a coverage record, and names them.
 func TestTranscriptCoverage_ACorpusThatAssertsNothingSaysSo(t *testing.T) {
 	// The real archive shape: decoded transcripts, not one coverage record between
 	// them, because they were indexed before the record existed.
@@ -471,6 +504,8 @@ func TestTranscriptCoverage_ACorpusThatAssertsNothingSaysSo(t *testing.T) {
 	}
 }
 
+// TestTranscriptCoverage_ACleanCorpusStillReadsClean pins that the no-record clause
+// does not appear when every transcript carries a coverage record.
 func TestTranscriptCoverage_ACleanCorpusStillReadsClean(t *testing.T) {
 	// The clause must not appear when every transcript asserts, or it becomes
 	// the noise it was added to remove.
@@ -488,6 +523,8 @@ func TestTranscriptCoverage_ACleanCorpusStillReadsClean(t *testing.T) {
 	}
 }
 
+// TestTranscriptCoverage_TheClauseRidesAlongsideAKnownShortfall pins that doctor warns
+// on a known shortfall and still names the transcripts without a record.
 func TestTranscriptCoverage_TheClauseRidesAlongsideAKnownShortfall(t *testing.T) {
 	// The two populations are independent: a corpus can hold a known partial
 	// AND transcripts that say nothing, and the report must not drop either.
@@ -511,6 +548,8 @@ func TestTranscriptCoverage_TheClauseRidesAlongsideAKnownShortfall(t *testing.T)
 	}
 }
 
+// TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted pins that sidecar
+// and translation transcripts do not count as no-assertion rows.
 func TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted(t *testing.T) {
 	// A sidecar is AUTHORED, not decoded, and a translation derives from another
 	// transcript's text. Neither could ever carry coverage, so counting their
@@ -537,6 +576,9 @@ func TestPartialTranscriptCoverage_SilenceThatMeansNothingIsNotCounted(t *testin
 	}
 }
 
+// TestPartialTranscriptCoverage_TheWordCoverageInSomeOtherFieldIsNotACoverageRecord
+// pins that the word "coverage" in another field, such as track_label, is not read
+// as a coverage record.
 func TestPartialTranscriptCoverage_TheWordCoverageInSomeOtherFieldIsNotACoverageRecord(t *testing.T) {
 	// `track_label` carries the container's track title (§8.6.12), and
 	// "coverage" is an ordinary broadcast word. Matching the quoted word rather
@@ -564,6 +606,8 @@ func TestPartialTranscriptCoverage_TheWordCoverageInSomeOtherFieldIsNotACoverage
 	}
 }
 
+// TestPartialTranscriptCoverage_WhitespaceAroundTheKeyIsStillACoverageRecord pins that
+// a coverage key written with a space before the colon is still read as a record.
 func TestPartialTranscriptCoverage_WhitespaceAroundTheKeyIsStillACoverageRecord(t *testing.T) {
 	// A LIKE on `"coverage":` encodes an assumption about the writer's
 	// formatting. JSON permits a space before the colon, and a document written
@@ -589,6 +633,9 @@ func TestPartialTranscriptCoverage_WhitespaceAroundTheKeyIsStillACoverageRecord(
 	}
 }
 
+// TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing pins
+// that a transcript with missing or unparsable metadata counts as asserting no
+// coverage, instead of being dropped from the count.
 func TestPartialTranscriptCoverage_AnUnreadableMetaIsCountedAsAssertingNothing(t *testing.T) {
 	// json_extract raises on a document it cannot parse, so each test is guarded
 	// by json_valid. A row that fails the guard is counted: it certainly carries
@@ -635,6 +682,8 @@ func TestStartupBanner_ANoAssertionOnlyCorpusPrintsNoSpeechSection(t *testing.T)
 	}
 }
 
+// TestStartupBanner_AKnownShortfallDoesRenderTheSection pins that a known shortfall
+// renders the Speech coverage section in the banner and states the shortfall.
 func TestStartupBanner_AKnownShortfallDoesRenderTheSection(t *testing.T) {
 	// The other side of the same claim: without this, a section that never
 	// rendered at all would satisfy the test above.
