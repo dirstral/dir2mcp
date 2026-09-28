@@ -20,6 +20,7 @@ import (
 // like every hosted provider: it can never serve the late-chunking path.
 type lcPlainEmbedder struct{}
 
+// Embed returns the vector [1] for every input.
 func (lcPlainEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
 	out := make([][]float32, len(inputs))
 	for i := range inputs {
@@ -32,6 +33,7 @@ func (lcPlainEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, inp
 // the late-chunking path.
 type lcTokenEmbedder struct{ lcPlainEmbedder }
 
+// EmbedDocumentTokens returns one token with the vector [1] for every input.
 func (lcTokenEmbedder) EmbedDocumentTokens(_ context.Context, _ string, _ model.EmbedRole, inputs []string) ([]model.TokenEmbedding, error) {
 	out := make([]model.TokenEmbedding, len(inputs))
 	for i := range inputs {
@@ -98,6 +100,8 @@ type lcWordEmbedder struct {
 	failRepText string
 }
 
+// Embed records the call and its inputs, and returns the vector [0, 1] for every
+// input.
 func (e *lcWordEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
 	e.embedCalls++
 	e.embedInputs = append(e.embedInputs, inputs...)
@@ -108,6 +112,9 @@ func (e *lcWordEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, i
 	return out, nil
 }
 
+// EmbedDocumentTokens records the call and its documents. It returns tokenErr
+// when set, a non-retryable provider error for the document equal to
+// failRepText, and otherwise the wordTokens of each document.
 func (e *lcWordEmbedder) EmbedDocumentTokens(_ context.Context, _ string, _ model.EmbedRole, inputs []string) ([]model.TokenEmbedding, error) {
 	e.tokenCalls++
 	e.tokenDocs = append(e.tokenDocs, inputs...)
@@ -158,6 +165,8 @@ type lcTextSource struct {
 	texts map[int64]string
 }
 
+// RepresentationText returns the stored text of the representation repID, and
+// false when there is none.
 func (s *lcTextSource) RepresentationText(_ context.Context, repID int64) (string, bool, error) {
 	text, ok := s.texts[repID]
 	return text, ok, nil
@@ -170,10 +179,14 @@ type capturingIndex struct {
 	vectors map[uint64][]float32
 }
 
+// newCapturingIndex returns an in-memory HNSW index that also records each
+// upserted vector.
 func newCapturingIndex() *capturingIndex {
 	return &capturingIndex{Index: index.NewHNSWIndex(""), vectors: make(map[uint64][]float32)}
 }
 
+// Upsert records a copy of vector under the chunk ID, then upserts it into the
+// wrapped index.
 func (c *capturingIndex) Upsert(ctx context.Context, vector []float32, payload model.IndexPayload) error {
 	cp := make([]float32, len(vector))
 	copy(cp, vector)
@@ -190,6 +203,8 @@ func lcTask(label uint64, repID int64, text string, runeStart, runeEnd int) mode
 	return tk
 }
 
+// lcWorker returns an embedding worker with late chunking on, a batch size of 8,
+// and its log written to buf.
 func lcWorker(src index.ChunkSource, ix model.Index, emb model.Embedder, buf *bytes.Buffer) *index.EmbeddingWorker {
 	return &index.EmbeddingWorker{
 		Source: src, Index: ix, Embedder: emb,
@@ -197,6 +212,7 @@ func lcWorker(src index.ChunkSource, ix model.Index, emb model.Embedder, buf *by
 	}
 }
 
+// unit returns v scaled to length 1.
 func unit(v ...float32) []float32 {
 	var s float64
 	for _, x := range v {
@@ -210,6 +226,8 @@ func unit(v ...float32) []float32 {
 	return out
 }
 
+// vecClose reports whether a and b have the same length and differ by at most
+// 1e-5 in each component.
 func vecClose(a, b []float32) bool {
 	if len(a) != len(b) {
 		return false
@@ -685,6 +703,8 @@ type lcProbedEmbedder struct {
 	probeCalls   int
 }
 
+// TokenEmbeddingsAvailable counts the probe and answers with the configured
+// error, refusal reason, or availability.
 func (e *lcProbedEmbedder) TokenEmbeddingsAvailable(_ context.Context) (bool, string, error) {
 	e.probeCalls++
 	if e.probeErr != nil {

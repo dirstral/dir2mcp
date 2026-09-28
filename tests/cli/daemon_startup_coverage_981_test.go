@@ -17,6 +17,9 @@ import (
 // server.log either. The only reachable §7.7 surface was `doctor`, which an
 // operator has no reason to run when startup looked clean.
 
+// TestDaemonReady_NamesAPartialTranscriptOnTheDefaultPath pins that the default
+// daemon banner names a partially decoded transcript, states the shortfall, and
+// prints the section above the ready line.
 func TestDaemonReady_NamesAPartialTranscriptOnTheDefaultPath(t *testing.T) {
 	dir := t.TempDir()
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
@@ -41,6 +44,8 @@ func TestDaemonReady_NamesAPartialTranscriptOnTheDefaultPath(t *testing.T) {
 	}
 }
 
+// TestDaemonReady_ACleanCorpusKeepsTheBannerShort pins that a fully covered corpus
+// adds no coverage sections to the ready banner.
 func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 	// The sections are silent when there is nothing to report, so the default
 	// banner does not grow for a healthy corpus.
@@ -63,6 +68,8 @@ func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 	}
 }
 
+// TestDaemonReady_TheStillStartingPathReportsNoCoverage pins that a daemon start
+// which returns before the store is built prints no coverage verdict.
 func TestDaemonReady_TheStillStartingPathReportsNoCoverage(t *testing.T) {
 	// A run that returns while the daemon is still starting prints no coverage,
 	// and docs/configuration.md says so. Any verdict there would describe a corpus the

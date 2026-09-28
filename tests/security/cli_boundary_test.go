@@ -12,6 +12,9 @@ import (
 	"testing"
 )
 
+// TestRepoSplitBoundary_CLICommandSurface pins the exact set of commands in the
+// commands map of internal/cli/app.go, so a command cannot be added or removed
+// without a deliberate change here.
 func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 	root := repoRoot(t)
 	appPath := filepath.Join(root, "internal", "cli", "app.go")
@@ -49,6 +52,8 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 	assertCommandSurface(t, commands, expected)
 }
 
+// extractCommandsMap returns the keys of the package-level commands map in the
+// parsed file.
 func extractCommandsMap(t *testing.T, file *ast.File) map[string]struct{} {
 	t.Helper()
 	commands := map[string]struct{}{}
@@ -64,6 +69,8 @@ func extractCommandsMap(t *testing.T, file *ast.File) map[string]struct{} {
 	return commands
 }
 
+// collectCommandsFromSpec adds the string keys of spec to commands when spec
+// declares the commands map, and ignores any other declaration.
 func collectCommandsFromSpec(t *testing.T, spec ast.Spec, commands map[string]struct{}) {
 	t.Helper()
 	valueSpec, ok := spec.(*ast.ValueSpec)
@@ -91,6 +98,8 @@ func collectCommandsFromSpec(t *testing.T, spec ast.Spec, commands map[string]st
 	}
 }
 
+// assertCommandSurface fails the test unless the parsed command set equals the
+// expected set exactly: no command missing and none added.
 func assertCommandSurface(t *testing.T, commands, expected map[string]struct{}) {
 	t.Helper()
 	if len(commands) == 0 {
@@ -111,27 +120,30 @@ func assertCommandSurface(t *testing.T, commands, expected map[string]struct{}) 
 	}
 }
 
+// TestRepoSplitBoundary_CLILegacyShimDocs pins that docs/cli.md and the usage
+// text mark ask, search, open-file and list-files as legacy compatibility shims
+// and send new client UX to dirstral-cli.
 func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 	root := repoRoot(t)
-	readmePath := filepath.Join(root, "docs", "cli.md")
+	cliDocPath := filepath.Join(root, "docs", "cli.md")
 	appPath := filepath.Join(root, "internal", "cli", "app.go")
 
-	readmeRaw, err := os.ReadFile(readmePath)
+	cliDocRaw, err := os.ReadFile(cliDocPath)
 	if err != nil {
-		t.Fatalf("read %s: %v", readmePath, err)
+		t.Fatalf("read %s: %v", cliDocPath, err)
 	}
 	appRaw, err := os.ReadFile(appPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", appPath, err)
 	}
 
-	readme := string(readmeRaw)
+	cliDoc := string(cliDocRaw)
 	app := string(appRaw)
 
-	if !strings.Contains(readme, "Legacy compatibility shim; prefer `dirstral-cli` for client UX") {
+	if !strings.Contains(cliDoc, "Legacy compatibility shim; prefer `dirstral-cli` for client UX") {
 		t.Fatalf("docs/cli.md must mark ask as a legacy compatibility shim to preserve repo split boundary guidance")
 	}
-	if !strings.Contains(readme, "new client/orchestrator UX belongs in `dirstral-cli`") {
+	if !strings.Contains(cliDoc, "new client/orchestrator UX belongs in `dirstral-cli`") {
 		t.Fatalf("docs/cli.md must direct new client/orchestrator UX to dirstral-cli")
 	}
 	for _, row := range []string{
@@ -140,7 +152,7 @@ func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 		"| `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
 		"| `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |",
 	} {
-		if !strings.Contains(readme, row) {
+		if !strings.Contains(cliDoc, row) {
 			t.Fatalf("docs/cli.md command table must include legacy shim row: %s", row)
 		}
 	}
@@ -152,6 +164,8 @@ func TestRepoSplitBoundary_CLILegacyShimDocs(t *testing.T) {
 	}
 }
 
+// TestRepoSplitBoundary_InternalCLIFileOwnership pins the allowlist of files in
+// internal/cli: a new file or directory there fails until it is added here.
 func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 	root := repoRoot(t)
 	cliDir := filepath.Join(root, "internal", "cli")
@@ -248,6 +262,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 	}
 }
 
+// mapKeys returns the keys of m in no particular order.
 func mapKeys(m map[string]struct{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
