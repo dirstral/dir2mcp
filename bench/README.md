@@ -217,6 +217,46 @@ What the numbers say:
   numbers, latency p50 11.06 s and p95 16.98 s. That run is not committed,
   because its runner did not yet record the `evidence` field.
 
+### With the faithfulness verifier on
+
+`rag.verify_faithfulness: true` (off by default) reads each answer back against
+the passages that the model saw, and withholds an answer that it cannot
+support. One full run on 2026-09-28, raw files in
+[`results/2026-09-28-local-qwen2.5-7b-verify/`](results/2026-09-28-local-qwen2.5-7b-verify/):
+
+- Binary: `make build` from commit
+  `2f9f9c7b8273244d40d05ad0a39ef32f14003b38` (main), `dir2mcp version`
+  `dir2mcp v0.11.3-0.20260928164656-2f9f9c7b8273`.
+- Config: `bench/config.local.yaml` plus `rag: {verify_faithfulness: true}`,
+  with `base_url` set to port 21434. The models, the corpus, the questions and
+  the hardware are the same as in the run above.
+
+| Metric | Verifier off (2026-09-24) | Verifier on (2026-09-28) |
+| --- | --- | --- |
+| (a) Answer contains a gold answer | 75.0% (60/80) | 67.5% (54/80) |
+| (b) Inline citation precision, file level | 98.7% (78/79) | 100.0% (61/61) |
+| (b) Inline citation precision, span level | 67.1% (53/79) | 60.7% (37/61) |
+| (d) Abstention, all unanswerable | 25.0% (10/40) | 75.0% (30/40) |
+| (d) Abstention, unanswerable in corpus (SQuAD 2.0 adversarial) | 5.0% (1/20) | 55.0% (11/20) |
+| (d) Abstention, unanswerable off corpus | 45.0% (9/20) | 95.0% (19/20) |
+| (d) False abstention, answerable | 6.2% (5/80) | 22.5% (18/80) |
+| Answers that dir2mcp withheld (`faithfulness` = unsupported) | n/a | 47 |
+| (e) Latency p50 / p95 (ms) | 10881 / 17017 | 16678 / 22444 |
+
+What the numbers say:
+
+- The verifier triples the refusals of unanswerable questions (25% to 75%).
+  It catches almost every off-corpus question.
+- The cost is 7.5 points of correct answers, and false refusals rise from 6%
+  to 22%. The verifier is the same 7B model, and it also rejects some correct
+  short answers.
+- It adds one generation call to each answered question, so p50 latency rises
+  by about 6 s.
+- On a separate tuning set (344 questions from the same articles, none of
+  them in these 120) we tried other verifier wordings, a vote of two
+  wordings, and a context of only the cited passages. None moved both numbers
+  in the right direction with this model. Issue #1081 tracks a better refusal signal.
+
 Do not compare these numbers with SQuAD leaderboard numbers. SQuAD gives the
 model the gold paragraph. Here the system must find it in the corpus, and it
 writes a free-form answer with citations.
