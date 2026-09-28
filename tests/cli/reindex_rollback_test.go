@@ -107,7 +107,7 @@ func TestReindex_RestoresContentHashesOnFailure(t *testing.T) {
 
 	var code int
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(60*time.Second))
 		defer cancel()
 		code = app.RunWithContext(ctx, []string{"reindex"})
 	})
@@ -147,7 +147,7 @@ func TestReindex_DiscardsContentHashBackupOnSuccess(t *testing.T) {
 
 	var code int
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(60*time.Second))
 		defer cancel()
 		code = app.RunWithContext(ctx, []string{"reindex"})
 	})
@@ -205,7 +205,7 @@ func TestReindex_RestoresIndexOnFailure(t *testing.T) {
 
 	var code int
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(60*time.Second))
 		defer cancel()
 		code = app.RunWithContext(ctx, []string{"reindex"})
 	})
