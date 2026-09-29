@@ -270,8 +270,11 @@ jobs:
     # not Defender: the image already excludes C:\ and D:\ from the scan.
     # Every failure so far was under the user temp on C:. Put the tests' temp
     # dirs on the runner's own temp on D: instead (a step below, because the
-    # runner context is not available in a job-level env). The test-side
-    # retries stay, so a lock is still tolerated for up to 30 s.
+    # runner context is not available in a job-level env). That did not end
+    # it: the lock recurred under D:, once past a 30 s retry. The test side
+    # (tests/testutil.TempDir) now retries the removal for 30 s and then logs
+    # and leaves the directory behind, so a passed test cannot turn red on a
+    # file it no longer owns.
     steps:
       # Keep LF line endings. Fixtures and golden files compare bytes, and the
       # runner default (core.autocrlf=true) rewrites them to CRLF.
