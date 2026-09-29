@@ -87,3 +87,21 @@ func TestInsideTempDir(t *testing.T) {
 		}
 	}
 }
+
+// TestTempDirPrefix pins that a subtest name with a slash, a quote or a space
+// becomes a prefix that MkdirTemp accepts, and that plain names pass through.
+func TestTempDirPrefix(t *testing.T) {
+	cases := map[string]string{
+		"TestUp":                  "TestUp",
+		"TestUp/sub_case":         "TestUp_sub_case",
+		`TestUp/"quoted"`:         "TestUp__quoted_",
+		"TestUp/with space:colon": "TestUp_with space_colon",
+		"TestUp/back\\slash":      "TestUp_back_slash",
+		"TestРусский/подтест":     "TestРусский_подтест",
+	}
+	for name, want := range cases {
+		if got := tempDirPrefix(name); got != want {
+			t.Errorf("tempDirPrefix(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
