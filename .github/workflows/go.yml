@@ -221,11 +221,9 @@ jobs:
     # cases on main at 48833bcb). The holder is outside the process, and it is
     # not Defender: the image already excludes C:\ and D:\ from the scan.
     # Every failure so far was under the user temp on C:. Put the tests' temp
-    # dirs on the runner's own temp on D: instead. The test-side retries stay,
-    # so a lock is still tolerated for up to 30 s.
-    env:
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
+    # dirs on the runner's own temp on D: instead (a step below, because the
+    # runner context is not available in a job-level env). The test-side
+    # retries stay, so a lock is still tolerated for up to 30 s.
     steps:
       # Keep LF line endings. Fixtures and golden files compare bytes, and the
       # runner default (core.autocrlf=true) rewrites them to CRLF.
@@ -240,6 +238,13 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+
+      - name: Use the runner temp for the tests
+        shell: pwsh
+        run: |
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "temp dirs go to $env:RUNNER_TEMP"
 
       - name: Build
         run: go build ./...
