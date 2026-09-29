@@ -147,6 +147,57 @@ brews:
 # set NIX_USER_REPOSITORY_GITHUB_TOKEN (a PAT with `repo` scope on
 # dirstral/nix-user-repository) as a repository secret on dir2mcp, exactly like
 # HOMEBREW_TAP_GITHUB_TOKEN. Without it, the nix publish step fails the release.
+# Container image on GHCR, one per arch plus a multi-arch manifest. The
+# Dockerfile copies the linux binary GoReleaser already built, so the image
+# holds the same bytes as the release archive. The
+# io.modelcontextprotocol.server.name label is what the MCP Registry checks
+# for ownership of an OCI package (#1087).
+dockers:
+  - id: dir2mcp-amd64
+    ids: [dir2mcp]
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    image_templates:
+      - "ghcr.io/dirstral/dir2mcp:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+    extra_files:
+      - docker/config.yaml
+      - docker/entrypoint.sh
+  - id: dir2mcp-arm64
+    ids: [dir2mcp]
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    image_templates:
+      - "ghcr.io/dirstral/dir2mcp:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+    extra_files:
+      - docker/config.yaml
+      - docker/entrypoint.sh
+
+docker_manifests:
+  - name_template: "ghcr.io/dirstral/dir2mcp:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/dirstral/dir2mcp:{{ .Version }}-amd64"
+      - "ghcr.io/dirstral/dir2mcp:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/dirstral/dir2mcp:latest"
+    # A prerelease tag (v1.2.3-rc1) must not replace the stable latest.
+    skip_push: auto
+    image_templates:
+      - "ghcr.io/dirstral/dir2mcp:{{ .Version }}-amd64"
+      - "ghcr.io/dirstral/dir2mcp:{{ .Version }}-arm64"
+
 nix:
   - name: dir2mcp
     ids:

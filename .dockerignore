@@ -1,0 +1,14 @@
+.git
+.github
+.dir2mcp
+.dir2mcp.yaml
+.env
+.env.local
+annotator/.venv-test
+bench/work
+dist
+node_modules
+*.gif
+assets
+docs
+dirstral-spec/.git

@@ -40,6 +40,35 @@ brew install dirstral/tap/dir2mcp-full
 
 Choose **full** for batteries-included local extraction; choose **lean** if you bring docling yourself, run docling-serve, or rely on Mistral OCR. Either way, extraction is configurable at runtime via `ingest.extractor` (see [Document extraction](configuration.md#document-extraction-modes--fallback)). To move from lean to full (or to a shared docling-serve) in stages without a re-index flag day, see [Migration & rollout](configuration.md#migration--rollout-adopting-docling-in-stages).
 
+### Docker
+
+Each release publishes a multi-arch image (linux/amd64, linux/arm64):
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v "$PWD:/corpus:ro" -v dir2mcp-state:/state \
+  ghcr.io/dirstral/dir2mcp:latest
+```
+
+The container serves `http://localhost:8080/mcp` with bearer-token auth, on the
+loopback interface only: the token travels in clear text over HTTP, so publish
+the port on `127.0.0.1` as above. For access from other machines, put TLS in
+front of it ([tunnels and reverse proxies](deployment.md)). Read
+the token with `docker run --rm -v dir2mcp-state:/state alpine cat /state/secret.token`.
+
+Models: a `.dir2mcp.yaml` in the mounted folder is used when there is one.
+Otherwise the image default binds embeddings and answers to an Ollama on the
+Docker host at `host.docker.internal:11434` (Docker Desktop and Colima; on
+Linux add `--add-host=host.docker.internal:host-gateway`). The server starts
+and serves its tools when that Ollama is not reachable, and indexing waits
+for it. For a cloud provider, put the key in the environment (`-e MISTRAL_API_KEY=...`)
+and mount a `.dir2mcp.yaml` that binds to it.
+
+The image holds ffmpeg for audio and video, and no docling: for PDFs and
+images use `ingest.extractor: mistral` or a docling-serve container
+([document extraction](configuration.md#docling-extraction-over-http-docling-serve)).
+`docker build -t dir2mcp .` builds the same image from source.
+
 ### Nix (macOS + Linux)
 
 A [Nix flake](../flake.nix) packages the **lean** `dir2mcp` binary for `x86_64`/`aarch64` on both Linux and macOS. Run it without installing:

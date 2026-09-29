@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+# Release image, built by GoReleaser from the already-built linux binary
+# (dockers: in .goreleaser.yaml). Keep the runtime half identical to
+# Dockerfile, which builds from source for local use.
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata ffmpeg \
+ && addgroup -S dir2mcp && adduser -S -G dir2mcp dir2mcp \
+ && mkdir -p /corpus /state && chown dir2mcp:dir2mcp /corpus /state
+COPY dir2mcp /usr/local/bin/dir2mcp
+COPY docker/config.yaml /etc/dir2mcp/config.yaml
+COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+USER dir2mcp
+WORKDIR /corpus
+VOLUME ["/corpus", "/state"]
+EXPOSE 8080
+LABEL io.modelcontextprotocol.server.name="io.github.dirstral/dir2mcp" \
+      org.opencontainers.image.source="https://github.com/dirstral/dir2mcp" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.description="Serve any folder as an MCP knowledge server with cited answers"
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["up", "--foreground", "--non-interactive", "--dir", "/corpus", "--state-dir", "/state", "--listen", "0.0.0.0:8080"]

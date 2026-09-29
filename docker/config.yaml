@@ -1,0 +1,16 @@
+# Default config of the dir2mcp container image: the local route, with Ollama
+# on the Docker host. Mount your own .dir2mcp.yaml into /corpus to replace it.
+#
+# host.docker.internal resolves on Docker Desktop and Colima. On Linux, start
+# the container with --add-host=host.docker.internal:host-gateway, or use
+# --network=host and change base_url to http://127.0.0.1:11434/v1.
+providers:
+  local:
+    kind: openai
+    base_url: http://host.docker.internal:11434/v1
+    embed_text_model: nomic-embed-text
+    embed_code_model: nomic-embed-text
+    chat_model: qwen2.5:7b
+model:
+  embed: {provider: local}
+  chat: {provider: local}
