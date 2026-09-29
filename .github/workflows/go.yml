@@ -211,6 +211,38 @@ jobs:
   # the Makefile gates need a POSIX shell and the Python annotator venv, and
   # the annotator suite stays on Linux (the `annotator` job above). Tests that
   # need unix-only features skip on Windows with a stated reason.
+  # The container image: build the Dockerfile and prove that a container with
+  # a mounted folder and no provider key serves MCP (initialize, tools/list,
+  # tools/call). This is what a directory's automated check does (Glama) and
+  # what a first docker run does.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: true
+
+      - name: Build the image
+        run: docker build --build-arg VERSION=ci -t dir2mcp:ci .
+
+      - name: Serve a folder and run the MCP smoke
+        run: |
+          set -euo pipefail
+          mkdir -p corpus
+          printf 'The budget meeting is on Thursday at 10:00 in room 4B.\n' > corpus/meetings.md
+          docker volume create d2m-state >/dev/null
+          docker run -d --name d2m -p 8080:8080 -v "$PWD/corpus:/corpus:ro" -v d2m-state:/state dir2mcp:ci
+          for i in $(seq 1 60); do
+            if docker run --rm -v d2m-state:/state alpine test -s /state/secret.token; then break; fi
+            sleep 1
+          done
+          token=$(docker run --rm -v d2m-state:/state alpine cat /state/secret.token)
+          test -n "$token"
+          DIR2MCP_DEMO_URL="http://localhost:8080/mcp" DIR2MCP_DEMO_TOKEN="$token" ./scripts/smoke_hosted_demo.sh
+          docker logs d2m | grep -q "not reachable" || { echo "expected the unreachable-provider warning"; docker logs d2m; exit 1; }
+          docker rm -f d2m >/dev/null
+
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
