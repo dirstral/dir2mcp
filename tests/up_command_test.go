@@ -734,9 +734,10 @@ func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 // meta.sqlite after `up` has closed it (a file scanner, most likely), and
 // t.TempDir's cleanup then fails the test with "The process cannot access the
 // file because it is being used by another process". A 2 s retry was not
-// enough there. On macOS, lsof shows no handle to meta.sqlite once `up`
-// returns, so dir2mcp itself does not leak it. The removal retries for up to
-// 10 s on Windows; a handle held longer still fails the test.
+// enough there, and neither was 10 s (a lock after exit code 3 outlasted it).
+// On macOS, lsof shows no handle to meta.sqlite once `up` returns, also after
+// exit code 3, so dir2mcp itself does not leak it. The removal retries for up
+// to 30 s on Windows; a handle held longer still fails the test.
 func upTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "dir2mcp-up-")
@@ -745,7 +746,7 @@ func upTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() {
 		err := os.RemoveAll(dir)
-		for i := 0; err != nil && runtime.GOOS == "windows" && i < 100; i++ {
+		for i := 0; err != nil && runtime.GOOS == "windows" && i < 300; i++ {
 			time.Sleep(100 * time.Millisecond)
 			err = os.RemoveAll(dir)
 		}

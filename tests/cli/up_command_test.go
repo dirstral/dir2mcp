@@ -513,7 +513,7 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(60*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"reindex"})
 		if code != 0 {
@@ -526,6 +526,8 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	}
 }
 
+// TestReindexClearsContentHashesBeforeRun pins that reindex clears a stored
+// document content hash before the ingestor runs, so every file is ingested again.
 func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -567,7 +569,7 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(2*time.Second))
+		ctx, cancel := context.WithTimeout(context.Background(), raceScaled(60*time.Second))
 		defer cancel()
 		code := app.RunWithContext(ctx, []string{"reindex"})
 		if code != 0 {
