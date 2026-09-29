@@ -232,7 +232,11 @@ jobs:
           mkdir -p corpus
           printf 'The budget meeting is on Thursday at 10:00 in room 4B.\n' > corpus/meetings.md
           docker volume create d2m-state >/dev/null
-          docker run -d --name d2m -p 127.0.0.1:8080:8080 -v "$PWD/corpus:/corpus:ro" -v d2m-state:/state dir2mcp:ci
+          # Linux has no host.docker.internal by itself; host-gateway is the
+          # documented start line for Linux (docs/install.md), and it makes the
+          # provider probe fail fast (connection refused on the runner) instead
+          # of a DNS lookup that can take longer than the smoke.
+          docker run -d --name d2m --add-host=host.docker.internal:host-gateway -p 127.0.0.1:8080:8080 -v "$PWD/corpus:/corpus:ro" -v d2m-state:/state dir2mcp:ci
           # The token is written before the listener binds, so wait for the
           # port to answer, not only for the token file. Any HTTP status
           # means the server is up; the smoke script checks the protocol.
