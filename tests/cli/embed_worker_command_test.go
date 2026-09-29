@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestEmbedWorkerAppearsInUsage verifies the subcommand is advertised in the
@@ -32,7 +33,7 @@ func TestEmbedWorkerAppearsInUsage(t *testing.T) {
 // must fail with a remediable CONFIG_INVALID (exit 2), never the unknown-command
 // path (exit 1).
 func TestEmbedWorkerIsRegistered(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -50,7 +51,7 @@ func TestEmbedWorkerIsRegistered(t *testing.T) {
 // TestEmbedWorkerFailsFastWhenDistributedDisabled verifies the worker refuses to
 // run when distributed embedding is not enabled — it has no role otherwise.
 func TestEmbedWorkerFailsFastWhenDistributedDisabled(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// A plain config with distributed mode off (the default).
 	writeWorkerConfig(t, tmp, "root_dir: .\nstate_dir: .dir2mcp\n")
 
@@ -78,7 +79,7 @@ func TestEmbedWorkerFailsFastWhenDistributedDisabled(t *testing.T) {
 // remediable CONFIG_INVALID (exit 2) regardless of which validation layer
 // catches it.
 func TestEmbedWorkerFailsFastWithoutTierCStore(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeWorkerConfig(t, tmp, "root_dir: .\nstate_dir: .dir2mcp\nindex_backend: memory\ndistributed_embed_enabled: true\n")
 
 	var stdout, stderr bytes.Buffer
@@ -103,7 +104,7 @@ func TestEmbedWorkerFailsFastWithoutTierCStore(t *testing.T) {
 // TestEmbedWorkerRejectsUnexpectedArgs verifies flag parsing: the subcommand
 // takes no positional arguments.
 func TestEmbedWorkerRejectsUnexpectedArgs(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -125,7 +126,7 @@ func TestEmbedWorkerRejectsUnexpectedArgs(t *testing.T) {
 
 // TestEmbedWorkerRejectsUnknownFlag verifies an unknown flag is a parse error.
 func TestEmbedWorkerRejectsUnknownFlag(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -143,7 +144,7 @@ func TestEmbedWorkerRejectsUnknownFlag(t *testing.T) {
 // TestEmbedWorkerRejectsBadDurationFlag verifies a malformed duration knob is a
 // parse error rather than being silently ignored.
 func TestEmbedWorkerRejectsBadDurationFlag(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The action-first client verbs (install/uninstall/doctor/print-config)
@@ -132,7 +133,7 @@ func TestClientVerb_ClientNameCaseInsensitive(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
-	code := app.RunWithContext(context.Background(), []string{"--state-dir", t.TempDir(), "doctor", "CLAUDE"})
+	code := app.RunWithContext(context.Background(), []string{"--state-dir", testutil.TempDir(t), "doctor", "CLAUDE"})
 
 	if code == 2 && strings.Contains(stderr.String(), "unknown client") {
 		t.Fatalf("`CLAUDE` should route to the claude leaf, not unknown-client: %q", stderr.String())

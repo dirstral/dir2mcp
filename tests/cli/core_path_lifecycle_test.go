@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestCorePath_ForegroundUpAskDown drives the core user path against a real
@@ -36,7 +38,7 @@ func TestCorePath_ForegroundUpAskDown(t *testing.T) {
 	}
 	fake := newFakeOpenAIServer(t)
 	bin := buildDir2mcpBinaryPortable(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeCorePathCorpus(t, root, fake.URL+"/v1")
 	env, home := corePathEnv(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
@@ -139,7 +141,7 @@ model:
 // provider credentials, so only the fake provider can resolve.
 func corePathEnv(t *testing.T) (env []string, home string) {
 	t.Helper()
-	home = t.TempDir()
+	home = testutil.TempDir(t)
 	drop := map[string]bool{}
 	for _, k := range []string{
 		"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME",
@@ -165,13 +167,16 @@ func corePathEnv(t *testing.T) (env []string, home string) {
 	return env, home
 }
 
+// buildDir2mcpBinaryPortable builds ./cmd/dir2mcp from the repo root (two
+// levels above the test cwd) into a fresh temp dir and returns the binary path.
+// The name gets an .exe suffix on Windows.
 func buildDir2mcpBinaryPortable(t *testing.T) string {
 	t.Helper()
 	name := "dir2mcp"
 	if isWindows() {
 		name += ".exe"
 	}
-	bin := filepath.Join(t.TempDir(), name)
+	bin := filepath.Join(testutil.TempDir(t), name)
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("get cwd: %v", err)

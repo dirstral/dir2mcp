@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedFilterExportStore seeds a transcript whose middle chunk is pure
@@ -72,7 +73,7 @@ func seedFilterExportStore(t *testing.T, stateDir, relPath string) {
 // is dropped and the inline phrase is removed, while real text and timing
 // survive.
 func TestExportAppliesFilterWords(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedFilterExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	// Config drives the filter; the phrase is general-purpose (no built-in list).
 	cfgYAML := strings.Join([]string{
@@ -114,7 +115,7 @@ func TestExportAppliesFilterWords(t *testing.T) {
 // TestExportNoFilterWordsUnchanged pins that with no media.filter_words config
 // the export is byte-identical to today (no accidental stripping).
 func TestExportNoFilterWordsUnchanged(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedFilterExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 
 	var stdout, stderr bytes.Buffer

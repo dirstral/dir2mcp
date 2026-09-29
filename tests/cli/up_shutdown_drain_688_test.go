@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #688: `up` cancelled its run context and then returned. The initial
@@ -81,7 +82,7 @@ func (s *closeOrderStore) Close() error {
 // Before the fix the run returned as soon as the context was cancelled, which
 // left the scan writing into a store that runUp was already closing.
 func TestUpShutdownWaitsForInitialIngest(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 	t.Setenv("DIR2MCP_SKIP_EMBED_PROBE", "1")

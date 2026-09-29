@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestReindex_RefusesWhenDaemonAlive verifies the issue #418 guard:
@@ -22,7 +23,7 @@ import (
 // runs concurrent sqlite writers and unlinks index files the daemon
 // still holds open, corrupting the shared state.
 func TestReindex_RefusesWhenDaemonAlive(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -77,7 +78,7 @@ func TestReindex_RefusesWhenDaemonAlive(t *testing.T) {
 // false-positive on a stale pid file (a daemon that crashed without
 // cleanup): a pid that is not alive must let the reindex run.
 func TestReindex_ProceedsWithStalePidFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

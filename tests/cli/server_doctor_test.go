@@ -21,9 +21,9 @@ import (
 // doctor must flag the extractor as a warn-level fallback so the
 // operator sees the diagnostic before they ever try to index.
 func TestServerDoctor_JSONReportSurfacesOCRFallback(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir()) // no docling on PATH
+	t.Setenv("PATH", testutil.TempDir(t)) // no docling on PATH
 
 	testutil.WithWorkingDir(t, tmp, func() {
 		var stdout, stderr bytes.Buffer
@@ -77,10 +77,10 @@ func TestServerDoctor_JSONReportSurfacesOCRFallback(t *testing.T) {
 // "0 failures" even though the entire run had collapsed at the
 // document stage. The check must now report doc-level errors too.
 func TestServerDoctor_SurfacesDocumentLevelFailures(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	// Seed the store with a failed-at-extraction document; no chunks
 	// are ever created, mirroring the docling-failed-on-every-PDF
@@ -134,9 +134,9 @@ func TestServerDoctor_SurfacesDocumentLevelFailures(t *testing.T) {
 // without a positional argument hits the new daemon-side preflight
 // path (not the legacy client-arg-required error).
 func TestServerDoctor_NoArgRoutesToDaemon(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	testutil.WithWorkingDir(t, tmp, func() {
 		var stdout, stderr bytes.Buffer

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/secrets"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The `egress` doctor check makes an ABSOLUTE claim: "no third-party egress".
@@ -18,7 +19,7 @@ import (
 // egress check's status and detail.
 func egressDetail(t *testing.T, cfgBody string) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, ".dir2mcp.yaml"), []byte(cfgBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

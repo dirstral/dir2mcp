@@ -22,6 +22,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 var cwdMu sync.Mutex
@@ -667,6 +668,8 @@ func scanLines(t *testing.T, text string) []string {
 	return lines
 }
 
+// withWorkingDir runs fn with the process cwd switched to dir and restores it
+// afterwards.
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
 
@@ -737,24 +740,10 @@ func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 // enough there, and neither was 10 s (a lock after exit code 3 outlasted it).
 // On macOS, lsof shows no handle to meta.sqlite once `up` returns, also after
 // exit code 3, so dir2mcp itself does not leak it. The removal retries for up
-// to 30 s on Windows; a handle held longer still fails the test.
+// to 30 s on Windows (testutil.TempDir); a handle held longer still fails the test.
 func upTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "dir2mcp-up-")
-	if err != nil {
-		t.Fatalf("create temp dir: %v", err)
-	}
-	t.Cleanup(func() {
-		err := os.RemoveAll(dir)
-		for i := 0; err != nil && runtime.GOOS == "windows" && i < 300; i++ {
-			time.Sleep(100 * time.Millisecond)
-			err = os.RemoveAll(dir)
-		}
-		if err != nil {
-			t.Errorf("remove temp dir %s: %v", dir, err)
-		}
-	})
-	return dir
+	return testutil.TempDir(t)
 }
 
 // runUpUntilServing runs `up` until it serves (connection.json names a URL),

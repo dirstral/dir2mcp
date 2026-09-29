@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestDaemonLifecycle_UpForksThenDownStops drives the full fork → poll →
@@ -30,7 +32,7 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 		t.Skip("set RUN_INTEGRATION_TESTS=1 to exercise the daemon lifecycle")
 	}
 	bin := buildDir2mcpBinary(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	logPath := filepath.Join(stateDir, "server.log")
 	pidPath := filepath.Join(stateDir, "server.pid")
@@ -121,9 +123,12 @@ func verifyDownIsNoop(t *testing.T, bin, root string, env []string) {
 	}
 }
 
+// buildDir2mcpBinary builds ./cmd/dir2mcp from the repo root with `go build`
+// into a fresh per-test temp dir and returns the absolute path of the binary.
+// The test fails at once when the build does not succeed.
 func buildDir2mcpBinary(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "dir2mcp")
+	bin := filepath.Join(testutil.TempDir(t), "dir2mcp")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/dir2mcp")
 	cmd.Dir = repoRootForTest(t)
 	out, err := cmd.CombinedOutput()
@@ -191,7 +196,7 @@ func TestDaemonLifecycle_BindBusyReportsClearError(t *testing.T) {
 	addr := holder.Addr().String()
 
 	bin := buildDir2mcpBinary(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	env := append(os.Environ(),
 		"MISTRAL_API_KEY=test-key",
 		"DIR2MCP_AUTH_TOKEN=",

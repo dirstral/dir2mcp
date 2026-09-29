@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // writeAskCorpusConfig writes a .dir2mcp.yaml carrying the given rag lines into
@@ -31,7 +32,7 @@ func TestAskLocal_OmittedKUsesConfiguredKDefault(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	const configuredK = 23
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeAskCorpusConfig(t, tmp, "rag_k_default: 23\n")
 
 	stub := &commandTestRetrieverStub{askResult: model.AskResult{Question: "q", Answer: "a"}}
@@ -60,7 +61,7 @@ func TestAskLocal_OmittedKUsesConfiguredKDefault(t *testing.T) {
 func TestAskLocal_SuppliedKWinsOverConfiguredKDefault(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeAskCorpusConfig(t, tmp, "rag_k_default: 23\n")
 
 	stub := &commandTestRetrieverStub{askResult: model.AskResult{Question: "q", Answer: "a"}}
@@ -95,7 +96,7 @@ func TestAskLocal_GenerateAnswerFalseIsServedAsSearchOnly(t *testing.T) {
 		{name: "mode=answer", args: []string{"ask", "--json", "--mode", "answer", "q"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			writeAskCorpusConfig(t, tmp, "rag_generate_answer: false\n")
 
 			stub := &commandTestRetrieverStub{

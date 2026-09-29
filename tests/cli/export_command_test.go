@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedExportStore writes a sqlite store at <stateDir>/meta.sqlite holding a
@@ -69,7 +70,7 @@ func seedExportStore(t *testing.T, stateDir, relPath, metaJSON string) {
 // TestExportVTTToStdout pins the end-to-end export path: a seeded transcript
 // renders to ordered WebVTT on stdout.
 func TestExportVTTToStdout(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", "")
 
 	var stdout, stderr bytes.Buffer
@@ -92,7 +93,7 @@ func TestExportVTTToStdout(t *testing.T) {
 
 // TestExportSRTToFile pins atomic file output: --out writes a valid SRT file.
 func TestExportSRTToFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", "")
 	outPath := filepath.Join(tmp, "out", "talk.srt")
 
@@ -120,7 +121,7 @@ func TestExportSRTToFile(t *testing.T) {
 // TestExportLangSelectsTranscript pins --lang matching against the transcript's
 // meta_json language, and a clear error when no transcript matches.
 func TestExportLangSelectsTranscript(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 
 	var stdout, stderr bytes.Buffer
@@ -150,7 +151,7 @@ func TestExportLangSelectsTranscript(t *testing.T) {
 
 // TestExportNoTranscript pins a clear error when the document has no transcript.
 func TestExportNoTranscript(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)

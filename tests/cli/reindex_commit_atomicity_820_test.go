@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Reindex commit atomicity: dir2mcp #820.
@@ -149,7 +150,7 @@ func assertCommitFinished(t *testing.T, stateDir, stderr string) {
 // what is live at the end is exactly what recovery decided, with nothing written
 // over it by a fresh rebuild.
 func TestReindex_AfterCrashedCommit_DiscardsTheSupersededGeneration(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	seedCrashedReindexCommit(t, stateDir, relPath)
@@ -175,7 +176,7 @@ func TestReindex_AfterCrashedCommit_DiscardsTheSupersededGeneration(t *testing.T
 // superseded backup answers from an index whose vectors key chunk rows the
 // durable rebuild already replaced.
 func TestUp_AfterCrashedCommit_DoesNotServeTheSupersededGeneration(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	seedCrashedReindexCommit(t, stateDir, relPath)
@@ -202,7 +203,7 @@ func TestUp_AfterCrashedCommit_DoesNotServeTheSupersededGeneration(t *testing.T)
 // recovery discard a generation that is a genuine rollback target, which is the
 // #727 destruction with a new cause.
 func TestReindex_SuccessfulRun_LeavesNoCommitMarker(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

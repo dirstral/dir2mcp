@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestEmbedWorkerEndToEnd_LiveInfra drives the real `dir2mcp embed-worker`
@@ -38,7 +39,7 @@ func TestEmbedWorkerEndToEnd_LiveInfra(t *testing.T) {
 		t.Skip("set MISTRAL_API_KEY (or OPENAI_API_KEY) so the worker can resolve an embed provider")
 	}
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

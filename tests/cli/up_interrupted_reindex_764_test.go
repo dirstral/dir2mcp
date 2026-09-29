@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #764: #727/#761 taught `reindex` to finish the rollback a crashed run
@@ -171,7 +172,7 @@ func indexFileNameForKind(kind string) string {
 // generation, not the partial one the crash left live, and must put the content
 // hashes that describe it back too.
 func TestUp_AfterCrashedReindex_ServesRecoveredGeneration(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	live := seedCrashedReindexState(t, stateDir, relPath)
@@ -210,7 +211,7 @@ func TestUp_AfterCrashedReindex_ServesRecoveredGeneration(t *testing.T) {
 // contract: with no crash artifacts, startup neither writes anything nor says
 // anything new.
 func TestUp_HealthyCorpus_IsUntouchedByRecovery(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -249,7 +250,7 @@ func TestUp_HealthyCorpus_IsUntouchedByRecovery(t *testing.T) {
 // this issue is about.
 func TestUp_LiveDaemon_LeavesTheCorpusAlone(t *testing.T) {
 	realToken := requireStartTokens(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	live := seedCrashedReindexState(t, stateDir, relPath)
@@ -288,7 +289,7 @@ func TestUp_LiveDaemon_LeavesTheCorpusAlone(t *testing.T) {
 // quietly missing documents, and it must leave the good generation on disk for
 // the operator to recover by hand.
 func TestUp_RecoveryFailure_RefusesToServe(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

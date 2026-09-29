@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestDaemonHandshakePathCannotHangStartup guards the handshake read (#671).
@@ -21,7 +22,7 @@ import (
 // not pass as a handshake, so the run takes the foreground path and creates
 // <state_dir>/server.log.
 func TestDaemonHandshakePathCannotHangStartup(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	fifo := filepath.Join(tmp, "handshake.fifo")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Skipf("mkfifo unavailable here: %v", err)

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedBilingualStore writes a sqlite store holding one document with two
@@ -100,7 +101,7 @@ func writeTTMLConfig(t *testing.T, dir string, smil bool) string {
 // ttml is rejected: the optional surface is OFF by default (SPEC §8.6.10) and
 // VTT/SRT behavior is unchanged.
 func TestExportTTMLDisabledByDefault(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 
 	var stdout, stderr bytes.Buffer
@@ -123,7 +124,7 @@ func TestExportTTMLDisabledByDefault(t *testing.T) {
 // TestExportTTMLMonolingual pins that with the surface enabled, a single-language
 // TTML document is rendered to stdout.
 func TestExportTTMLMonolingual(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -147,7 +148,7 @@ func TestExportTTMLMonolingual(t *testing.T) {
 // TestExportTTMLBilingual pins bilingual TTML: both languages render over the
 // same <p> time regions, aligned within the default tolerance.
 func TestExportTTMLBilingual(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedBilingualStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -181,7 +182,7 @@ func TestExportTTMLBilingual(t *testing.T) {
 // TestExportTTMLMissingLanguageInvalidField pins that requesting a language with
 // no transcript fails as INVALID_FIELD (SPEC §8.6.10), not a server error.
 func TestExportTTMLMissingLanguageInvalidField(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -204,7 +205,7 @@ func TestExportTTMLMissingLanguageInvalidField(t *testing.T) {
 // enabled but the media file absent/unprobeable (or ffprobe missing), the TTML
 // is still written and the export succeeds; SMIL is simply omitted.
 func TestExportTTMLSMILFailsOpen(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, true)
 	outPath := filepath.Join(tmp, "out", "talk.ttml")

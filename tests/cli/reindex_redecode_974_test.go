@@ -31,12 +31,13 @@ func TestReindexRedecode_RejectsTheCombinationThatCannotWork(t *testing.T) {
 	}
 }
 
+// TestReindexRedecode_SaysSoWhenThereIsNothingToRepair pins that a re-decode run
+// on a clean corpus reports "nothing to re-decode". Said positively, for the
+// same reason the doctor check states a clean corpus: silence here reads as "it
+// worked" when the truth is "there was nothing to do", and the operator has just
+// repaired an endpoint and wants to know whether the repair reached anything.
 func TestReindexRedecode_SaysSoWhenThereIsNothingToRepair(t *testing.T) {
-	// Said positively, for the same reason the doctor check states a clean
-	// corpus: silence here reads as "it worked" when the truth is "there was
-	// nothing to do", and the operator has just repaired an endpoint and wants
-	// to know whether the repair reached anything.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/complete.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
 	_ = st.Close()
@@ -47,8 +48,11 @@ func TestReindexRedecode_SaysSoWhenThereIsNothingToRepair(t *testing.T) {
 	}
 }
 
+// TestReindexRedecode_NamesHowManyItWillRepair pins that a re-decode run
+// announces the count of partial recordings it will repair and leaves the
+// complete recordings out of that count.
 func TestReindexRedecode_NamesHowManyItWillRepair(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir,
 		seedRep{relPath: "archive/one.mp4",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)},
@@ -67,9 +71,11 @@ func TestReindexRedecode_NamesHowManyItWillRepair(t *testing.T) {
 	}
 }
 
+// TestReindexRedecode_APlainReindexAnnouncesNothing pins that a reindex without
+// the flag never announces a re-decode: the ordinary reindex stays the cheap
+// operation.
 func TestReindexRedecode_APlainReindexAnnouncesNothing(t *testing.T) {
-	// The ordinary reindex stays the cheap operation.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/one.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)})
 	_ = st.Close()
@@ -106,13 +112,14 @@ func runReindexIn(t *testing.T, dir string, extra ...string) string {
 	return stderr.String()
 }
 
+// TestReindexRedecode_CountsRecordingsNotTranscripts pins that the announced
+// count is per document. §8.6.12 gives every additional audio track its own
+// transcript, so one recording can hold several partial transcripts. The report
+// counts those separately, because each is its own decode with its own missing
+// audio, but the repair is per DOCUMENT: "2 recordings" for one file would
+// misreport what the run is about to do.
 func TestReindexRedecode_CountsRecordingsNotTranscripts(t *testing.T) {
-	// §8.6.12 gives every additional audio track its own transcript, so one
-	// recording can hold several partial transcripts. The report counts those
-	// separately, because each is its own decode with its own missing audio, but
-	// the repair is per DOCUMENT: announcing "2 recordings" for one file would
-	// misreport what the run is about to do.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir,
 		seedRep{relPath: "archive/dual.mp4", repType: "transcript",
 			metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)},
@@ -127,15 +134,15 @@ func TestReindexRedecode_CountsRecordingsNotTranscripts(t *testing.T) {
 	}
 }
 
+// TestReindexRedecode_RefusesWhenNoTranscriberResolves pins that the flag exits
+// non-zero when no transcriber resolves. With stt.provider off, transcription is
+// skipped entirely: the armed paths are never decoded and never written back,
+// Reindex returns success, and the cache still holds the partial text. The
+// operator would read a green run as a repair, which is the exact failure this
+// flag exists to remove. TranscriberFromConfig returns (nil, nil) for `off`, not
+// an error, so the nil is the case that has to be caught.
 func TestReindexRedecode_RefusesWhenNoTranscriberResolves(t *testing.T) {
-	// With stt.provider off, transcription is skipped entirely: the armed paths
-	// are never decoded and never written back, Reindex returns success, and the
-	// cache still holds the partial text. The operator would read a green run as
-	// a repair, which is the exact failure this flag exists to remove.
-	//
-	// TranscriberFromConfig returns (nil, nil) for `off`, not an error, so the
-	// nil is the case that has to be caught.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/one.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, 10*minute, 73*minute)})
 	_ = st.Close()

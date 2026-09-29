@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index/diskindex"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #727: a reindex that CRASHED (SIGKILL / power loss) never runs its
@@ -182,7 +183,7 @@ func readFileString(t *testing.T, path string) string {
 // live must be the ORIGINAL good index and the ORIGINAL content hashes, not the
 // partial rebuild the crash left behind.
 func TestReindex_AfterCrash_RetryPreservesLastKnownGood(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	live := seedCrashedReindexState(t, stateDir, relPath)
@@ -217,7 +218,7 @@ func TestReindex_AfterCrash_RetryPreservesLastKnownGood(t *testing.T) {
 // state were ever rotated into the recovery slot, the corruption would carry
 // forward into the next pass's assertion instead of being papered over.
 func TestReindex_AfterCrash_RepeatedCrashesDoNotRotatePartialState(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	live := seedCrashedReindexState(t, stateDir, relPath)
@@ -256,7 +257,7 @@ func TestReindex_AfterCrash_RepeatedCrashesDoNotRotatePartialState(t *testing.T)
 // crash under one backend can be retried under another, and those files are
 // just as much part of the last-known-good set.
 func TestReindex_AfterCrash_RecoversEveryLeftoverGeneration(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -314,7 +315,7 @@ func TestReindex_AfterCrash_RecoversEveryLeftoverGeneration(t *testing.T) {
 // side: once a retry rebuilds durably, the recovered generation is no longer
 // needed and must not be left behind as a permanent second copy of the index.
 func TestReindex_AfterCrash_SuccessfulRetryClearsRecoveredBackups(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	const relPath = "docs/a.md"
 	const rebuilt = "HASH-AFTER-REBUILD"

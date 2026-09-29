@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func writeConfigWithUnknownKeys(t *testing.T, dir string) {
@@ -32,7 +33,7 @@ func writeConfigWithUnknownKeys(t *testing.T, dir string) {
 // The warning must reach stderr even though `up` later fails its embed preflight:
 // the point is that config problems surface, not that startup succeeds.
 func TestUp_WarnsAboutUnrecognizedConfigKeys(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	writeConfigWithUnknownKeys(t, tmp)
 
@@ -56,7 +57,7 @@ func TestUp_WarnsAboutUnrecognizedConfigKeys(t *testing.T) {
 
 // --quiet suppresses non-error output, warnings included.
 func TestUp_QuietSuppressesConfigWarnings(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	writeConfigWithUnknownKeys(t, tmp)
 
@@ -75,7 +76,7 @@ func TestUp_QuietSuppressesConfigWarnings(t *testing.T) {
 // A valid config must stay silent — a false-positive warning on good config
 // would be worse than the silence this replaces.
 func TestUp_ValidConfigEmitsNoUnrecognizedKeyWarning(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	body := "root_dir: .\nstt_provider: off\nrag_k_default: 7\n"
 	if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"), []byte(body), 0o600); err != nil {

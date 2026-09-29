@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Cold start used to rehydrate the text index, then the code index, then walk
@@ -97,7 +98,7 @@ func (i *barrierIndex) Load(context.Context, string) error {
 // rehydrated at the same time: each injected Load waits for the other, which
 // only completes if the two loads overlap.
 func TestUpIndexLoadsRunConcurrently(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -179,7 +180,7 @@ func TestUpIndexLoadFailureAttribution(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			t.Setenv("MISTRAL_API_KEY", "test-key")
 			t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -283,7 +284,7 @@ func (s *pagingChunkStore) ListEmbeddedChunkMetadata(_ context.Context, indexKin
 // multi-minute cold start, not a rounding error. It also pins the keyset seek,
 // since an OFFSET-style rescan would reintroduce the same quadratic.
 func TestUpEmbeddedChunkMetadataPreloadPagesInBulk(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 

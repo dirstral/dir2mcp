@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // reindexFailingIngestor's Reindex fails, standing in for an interrupted or
@@ -89,7 +90,7 @@ func readDocumentHash(t *testing.T, stateDir, relPath string) string {
 // snapshot must be restored so the next incremental sync keeps its "already
 // indexed" gate instead of reprocessing the whole corpus.
 func TestReindex_RestoresContentHashesOnFailure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -128,7 +129,7 @@ func TestReindex_RestoresContentHashesOnFailure(t *testing.T) {
 // so the rebuild's fresh content_hash survives and is not overwritten by a
 // lingering backup.
 func TestReindex_DiscardsContentHashBackupOnSuccess(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -185,7 +186,7 @@ func TestReindex_DiscardsContentHashBackupOnSuccess(t *testing.T) {
 // prepareReindexStore deleted the index up front, so a failed rebuild left the
 // corpus with nothing.
 func TestReindex_RestoresIndexOnFailure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

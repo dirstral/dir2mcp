@@ -29,6 +29,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 var cwdMu sync.Mutex
@@ -74,8 +75,11 @@ type cliConnectionFile struct {
 	TokenFile   string `json:"token_file"`
 }
 
+// TestUpCreatesSecretTokenAndConnectionFile pins that a default `up` writes a
+// 64-char secret.token with mode 0600 and a connection.json that carries the
+// format_version, the /mcp URL, the protocol header and the session contract.
 func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -162,8 +166,11 @@ func assertConnectionFile(t *testing.T, connection cliConnectionFile) {
 	}
 }
 
+// TestUpBannerPrintsRegistrationHintWithUniqueName pins that the `up` banner
+// prints a `claude mcp add` hint whose server name is the auto-derived name of
+// the resolved root directory, slug and 6-hex suffix included.
 func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -214,8 +221,10 @@ func TestUpBannerPrintsRegistrationHintWithUniqueName(t *testing.T) {
 	}
 }
 
+// TestUpSupportsGlobalDirAndStateDirFlags pins that the global --dir and
+// --state-dir flags reach `up`: connection.json lands in the custom state dir.
 func TestUpSupportsGlobalDirAndStateDirFlags(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	rootDir := filepath.Join(tmp, "workspace")
 	stateDir := filepath.Join(tmp, "custom-state")
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
@@ -245,8 +254,10 @@ func TestUpSupportsGlobalDirAndStateDirFlags(t *testing.T) {
 	}
 }
 
+// TestUpTLSRequiresCertAndKeyTogether pins that `up` with --tls-cert but no
+// --tls-key exits 2 and names the pair rule on stderr.
 func TestUpTLSRequiresCertAndKeyTogether(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -268,8 +279,11 @@ func TestUpTLSRequiresCertAndKeyTogether(t *testing.T) {
 	}
 }
 
+// TestUpInvalidFlagWithJSONEmitsJSONError pins that an unknown `up` flag under
+// --json exits 2 with a CONFIG_INVALID JSON error payload on stderr, so a
+// machine caller never has to parse a plain-text usage message.
 func TestUpInvalidFlagWithJSONEmitsJSONError(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -302,8 +316,10 @@ func TestUpInvalidFlagWithJSONEmitsJSONError(t *testing.T) {
 	}
 }
 
+// TestUpTLSConnectionURLUsesHTTPS pins that connection.json names an https://
+// URL when `up` serves with a TLS cert and key.
 func TestUpTLSConnectionURLUsesHTTPS(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -335,7 +351,7 @@ func TestUpTLSConnectionURLUsesHTTPS(t *testing.T) {
 // token file are supplied; the file takes precedence and the direct flag
 // is ignored. This exercises the new CLI warning logic.
 func TestUpWarnsAboutFacilitatorTokenConflict(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -366,8 +382,11 @@ func TestUpWarnsAboutFacilitatorTokenConflict(t *testing.T) {
 	}
 }
 
+// TestUpNonInteractiveMissingConfigReturnsExitCode2 pins that a non-interactive
+// `up` with no MISTRAL_API_KEY exits 2 with CONFIG_INVALID and points the
+// operator at the missing key and at `dir2mcp config init`.
 func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -396,8 +415,11 @@ func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
 	}
 }
 
+// TestUpNonInteractiveReadOnlyDoclingModeDoesNotRequireMistralKey pins that a
+// read-only `up` with a docling extractor and STT off starts without a
+// MISTRAL_API_KEY: that mode makes no Mistral call, so it asks for no key.
 func TestUpNonInteractiveReadOnlyDoclingModeDoesNotRequireMistralKey(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -441,7 +463,7 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 		t.Skip("file permission semantics differ on Windows")
 	}
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// ensure there is something to upset loadDotEnvFiles
 	bad := filepath.Join(tmp, ".env")
 	if err := os.WriteFile(bad, []byte("FOO=bar"), 0); err != nil {
@@ -469,8 +491,10 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 	}
 }
 
+// TestReindexRejectsUnexpectedArguments pins that `reindex` with a positional
+// argument exits 2 and says the command accepts no arguments.
 func TestReindexRejectsUnexpectedArguments(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -493,7 +517,7 @@ func TestReindexRejectsUnexpectedArguments(t *testing.T) {
 // ingestor factory.  Previously runReindex always used config.Default(),
 // causing the ingest service to be unaware of any environment overrides.
 func TestReindexPassesConfigToNewIngestor(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// Exercise a non-default value so we can distinguish default vs
 	// loaded. The provider clean break (#38) removed the MISTRAL_*
 	// env→Config mapping; DIR2MCP_DOCLING_COMMAND remains a loader-applied
@@ -529,7 +553,7 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 // TestReindexClearsContentHashesBeforeRun pins that reindex clears a stored
 // document content hash before the ingestor runs, so every file is ingested again.
 func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -595,8 +619,11 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	}
 }
 
+// TestUpJSONConnectionEventIncludesTokenSourceForFileAuth pins that `up --json
+// --auth file:<path>` emits the full NDJSON event set and that the connection
+// event reports token_source=file with the absolute token path.
 func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -669,8 +696,11 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	}
 }
 
+// TestUpJSONPreloadErrorEmitsWarningEvent pins that a failed embedded-chunk
+// metadata preload does not stop `up`: the run serves and reports the store
+// error as a bootstrap_embedded_chunk_metadata NDJSON event.
 func TestUpJSONPreloadErrorEmitsWarningEvent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -709,8 +739,10 @@ func TestUpJSONPreloadErrorEmitsWarningEvent(t *testing.T) {
 	}
 }
 
+// TestUpReturnsExitCode4OnBindFailure pins that `up` exits 4 when the listen
+// address is already in use.
 func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -740,8 +772,10 @@ func TestUpReturnsExitCode4OnBindFailure(t *testing.T) {
 	}
 }
 
+// TestUpReturnsExitCode3OnIngestionFatal pins that a fatal ingestor error makes
+// `up --json` exit 3 with an INGESTION_FATAL JSON error payload on stderr.
 func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -791,8 +825,10 @@ func TestUpReturnsExitCode3OnIngestionFatal(t *testing.T) {
 	}
 }
 
+// TestUpDefaultListenStaysLoopbackWhenNotPublic pins that a plain `up` binds
+// 127.0.0.1 and writes public=false, so the default never exposes the network.
 func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -817,8 +853,10 @@ func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
 	}
 }
 
+// TestUpPublicWithoutListenBindsAllInterfaces pins that `up --public` with no
+// --listen binds 0.0.0.0 and writes public=true to connection.json.
 func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -843,8 +881,10 @@ func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
 	}
 }
 
+// TestUpPublicAuthNoneFailsWithoutForceInsecure pins the guardrail: `up
+// --public --auth none` exits 2 unless --force-insecure is set.
 func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -865,8 +905,10 @@ func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
 	}
 }
 
+// TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure pins that the
+// public-auth guardrail trims the --auth value: " none " is refused like "none".
 func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -887,8 +929,10 @@ func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
 	}
 }
 
+// TestUpPublicAuthNoneAllowedWithForceInsecure pins that --force-insecure is the
+// explicit opt-out: `up --public --auth none --force-insecure` serves.
 func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -904,8 +948,10 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	})
 }
 
+// TestUpX402RequiredMissingFieldsFailsFast pins that --x402 required validates
+// the config at startup: a missing facilitator URL exits 2 before serving.
 func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	// ensure previous tests don't leak auth token
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
@@ -935,8 +981,10 @@ func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 	}
 }
 
+// TestUpX402OnAllowsMissingFields pins that --x402 on fails open: with no x402
+// fields at all, `up` still reaches server_started.
 func TestUpX402OnAllowsMissingFields(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	// ensure no leftover auth token influences behaviour
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
@@ -981,8 +1029,10 @@ func TestUpX402OnAllowsMissingFields(t *testing.T) {
 	}
 }
 
+// TestUpPublicRespectsExplicitListen pins that --public does not override an
+// explicit --listen host: the connection URL keeps 127.0.0.1 and public=true.
 func TestUpPublicRespectsExplicitListen(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -1007,8 +1057,10 @@ func TestUpPublicRespectsExplicitListen(t *testing.T) {
 	}
 }
 
+// TestUpPublicNDJSONServerStartedIncludesPublicField pins that the
+// server_started NDJSON event carries data.public=true under `up --public`.
 func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
@@ -1147,6 +1199,8 @@ func scanLines(t *testing.T, text string) []string {
 	return lines
 }
 
+// withWorkingDir runs fn with the process cwd switched to dir and restores it
+// afterwards.
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
 

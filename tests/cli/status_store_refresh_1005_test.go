@@ -76,7 +76,7 @@ func indexingOf1005(t *testing.T, payload map[string]interface{}) map[string]int
 // them, so refreshing the counters from the store must not drop them: a live
 // indexing run has to keep reading as running.
 func TestStatusKeepsRunLivenessFromCorpusJSON1005(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -120,7 +120,7 @@ func TestStatusKeepsRunLivenessFromCorpusJSON1005(t *testing.T) {
 // cached numbers, exits 0, and says on stderr that the numbers are cached, so
 // the operator is never handed stale counters silently.
 func TestStatusFallsBackToCorpusJSONWhenStoreUnreadable1005(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	// A directory named meta.sqlite passes the existence check and then fails
 	// every read, which is the shape of a corrupt or half-written state dir.
@@ -202,7 +202,7 @@ func seedEmbeddedChunks1005(t *testing.T, stateDir string, count int) {
 // status.json out of the bundle, so shipping the daemon's frozen cache there
 // would reproduce #1005 inside the diagnostic meant to explain it.
 func TestSupportBundleStatusJSONReadsTheStore1005(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -212,7 +212,7 @@ func TestSupportBundleStatusJSONReadsTheStore1005(t *testing.T) {
 		t.Fatalf("write corpus.json: %v", err)
 	}
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
 	testutil.WithWorkingDir(t, tmp, func() {
