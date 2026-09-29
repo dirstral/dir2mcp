@@ -30,9 +30,9 @@ import (
 //     unfavourable umask can't expose its contents to other local users.
 func TestSupportBundle_AssemblesDiagnosticsArchive(t *testing.T) {
 	const sentinelKey = "should-not-leak-1234567890"
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", sentinelKey)
-	t.Setenv("PATH", t.TempDir()) // no docling on PATH
+	t.Setenv("PATH", testutil.TempDir(t)) // no docling on PATH
 
 	bundlePath := filepath.Join(tmp, "bundle.tar.gz")
 	testutil.WithWorkingDir(t, tmp, func() {
@@ -89,10 +89,10 @@ func TestSupportBundle_AssemblesDiagnosticsArchive(t *testing.T) {
 // --include-content (see TestSupportBundle_ListFilesRedactsContentByDefault
 // for the privacy-preserving default).
 func TestSupportBundle_ListFilesIncludesErrorMessage(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	// Seed a failed document so the bundle's list-files.json has
 	// something to carry the new error_message field for.
@@ -168,7 +168,7 @@ func TestSupportBundle_ListFilesIncludesErrorMessage(t *testing.T) {
 // flag parser rejects input, instead of letting the flag package
 // scribble untyped text alongside our JSON output.
 func TestSupportBundle_JSONFlagParseError(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	testutil.WithWorkingDir(t, tmp, func() {
 		var stdout, stderr bytes.Buffer
 		app := cli.NewAppWithIO(&stdout, &stderr)
@@ -190,10 +190,10 @@ func TestSupportBundle_JSONFlagParseError(t *testing.T) {
 // content), while still keeping the diagnostic skeleton (doc_type, status, and
 // a has_error flag) so a maintainer can triage failures.
 func TestSupportBundle_ListFilesRedactsContentByDefault(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
@@ -274,13 +274,13 @@ func TestSupportBundle_ListFilesRedactsContentByDefault(t *testing.T) {
 // secret redactor before it enters the shareable bundle (previously it was
 // bundled raw while client logs and daemon.json were already redacted).
 func TestSupportBundle_ServerLogRedacted(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	const token = "sk-supersecret-abc123XYZ"
 	logLine := "2026-07-01 handling request Authorization: Bearer " + token + "\n"
@@ -316,10 +316,10 @@ func TestSupportBundle_ServerLogRedacted(t *testing.T) {
 // routing signal a maintainer needs) instead of the misleading .gz that
 // filepath.Ext alone would yield — while still disclosing no basename.
 func TestSupportBundle_RedactedPathKeepsCompoundExtension(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
@@ -372,13 +372,13 @@ func TestSupportBundle_RedactedPathKeepsCompoundExtension(t *testing.T) {
 // --include-content. The category aggregate (a fixed enum) is still kept so a
 // maintainer can triage embedding failures.
 func TestSupportBundle_StatusFailureSamplesRedactedByDefault(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	const secretPath = "clients/acme-merger-2026/board-minutes.pdf"
 	const secretMessage = "embed failed near 'confidential: layoff list'"
@@ -462,10 +462,10 @@ func TestSupportBundle_StatusFailureSamplesRedactedByDefault(t *testing.T) {
 // suppresses the "Wrote support bundle" progress line on stdout but the consent
 // notice must still reach stderr.
 func TestSupportBundle_QuietPreservesIncludeContentWarning(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))

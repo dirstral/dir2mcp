@@ -34,8 +34,12 @@ func RemoveAllRetrying(dir string, remove func(string) error, attempts int, slee
 }
 
 // ReleaseTempDir registers a cleanup that removes dir with a retry on Windows.
-// Cleanups run last-in first-out, so a call made after t.TempDir runs before
-// the test framework's own single-shot removal, which then finds nothing left.
+// Cleanups run last-in first-out, so a call made right after t.TempDir runs
+// after every cleanup the test registers later (a store close, a server stop)
+// and before the test framework's own single-shot removal, which then finds
+// nothing left. Call it at creation time and nowhere else: a call from a
+// helper the test enters later runs before the cleanups registered in between,
+// and then it waits on a handle that a later cleanup would have closed.
 // It does nothing on other platforms, and nothing for a dir outside the
 // process temp directory: only a temp dir may be removed from here.
 func ReleaseTempDir(t *testing.T, dir string) {
@@ -50,8 +54,9 @@ func ReleaseTempDir(t *testing.T, dir string) {
 	})
 }
 
-// TempDir returns t.TempDir() with the Windows release registered on it. Use
-// it for a directory that `up` runs in without WithWorkingDir.
+// TempDir returns t.TempDir() with the Windows release registered on it. The
+// tests/cli package uses it for every temp dir, so a test cannot pick the
+// wrong one.
 func TempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

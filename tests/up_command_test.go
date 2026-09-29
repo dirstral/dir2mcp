@@ -669,12 +669,9 @@ func scanLines(t *testing.T, text string) []string {
 }
 
 // withWorkingDir runs fn with the process cwd switched to dir and restores it
-// afterwards. On Windows it also registers the retrying removal of dir, so a
-// sqlite file that `up` left "in use" for a moment does not fail the test at
-// t.TempDir's own cleanup.
+// afterwards.
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
-	testutil.ReleaseTempDir(t, dir)
 
 	cwdMu.Lock()
 	defer cwdMu.Unlock()

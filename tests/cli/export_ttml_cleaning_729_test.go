@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // cleaningConfigLines is the media.subtitles.* editorial config shared by the
@@ -54,7 +55,7 @@ func writeCleaningTTMLConfig(t *testing.T, dir string) string {
 // Fails before the fix: TTML built cues with FilterCues only, so "Ajubei",
 // "spam.com", four "No." cues and "Crimea, NATO" all survived into the TTML.
 func TestExportTTMLAppliesCueCleaning729(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedCleanExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgPath := writeCleaningTTMLConfig(t, tmp)
 
@@ -93,7 +94,7 @@ func TestExportTTMLAppliesCueCleaning729(t *testing.T) {
 // survives verbatim. This guards the fix against becoming an unconditional
 // rewrite of TTML output.
 func TestExportTTMLNoCleaningConfigUnchanged729(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedCleanExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -190,7 +191,7 @@ func seedBilingualCleanStore(t *testing.T, stateDir, relPath string) {
 // on the same cue set the exports render, otherwise pairing is computed over
 // cues that will not be emitted.
 func TestExportTTMLBilingualCleansBothLanguages729(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedBilingualCleanStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgPath := writeCleaningTTMLConfig(t, tmp)
 

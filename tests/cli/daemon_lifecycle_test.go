@@ -123,9 +123,12 @@ func verifyDownIsNoop(t *testing.T, bin, root string, env []string) {
 	}
 }
 
+// buildDir2mcpBinary builds ./cmd/dir2mcp from the repo root with `go build`
+// into a fresh per-test temp dir and returns the absolute path of the binary.
+// The test fails at once when the build does not succeed.
 func buildDir2mcpBinary(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "dir2mcp")
+	bin := filepath.Join(testutil.TempDir(t), "dir2mcp")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/dir2mcp")
 	cmd.Dir = repoRootForTest(t)
 	out, err := cmd.CombinedOutput()

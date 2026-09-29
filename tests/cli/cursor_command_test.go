@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func readJSONObject(t *testing.T, path string) map[string]interface{} {
@@ -46,8 +48,12 @@ func cursorServers(t *testing.T, path string) map[string]interface{} {
 	return servers
 }
 
+// TestCursorInstallWritesHTTPEntryAndPreservesOthers pins that `install
+// cursor` writes a remote url entry (no command) with the bearer and protocol
+// headers into mcp.json at mode 0600, and keeps the unrelated server and an
+// unknown top-level key.
 func TestCursorInstallWritesHTTPEntryAndPreservesOthers(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cursor")
 	configPath := writeCursorConfig(t, tmp)
 
@@ -86,8 +92,11 @@ func TestCursorInstallWritesHTTPEntryAndPreservesOthers(t *testing.T) {
 	}
 }
 
+// TestCursorReinstallIsIdempotent pins that a second `install cursor` reports
+// replaced=true and leaves the file byte-identical, with our entry plus the
+// unrelated one.
 func TestCursorReinstallIsIdempotent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cursor-again")
 	configPath := writeCursorConfig(t, tmp)
 
@@ -118,8 +127,11 @@ func TestCursorReinstallIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestCursorInstallRefusesNonObjectMCPServers pins that `install cursor`
+// fails with "mcpServers must be an object" and leaves the file untouched when
+// mcpServers is not a JSON object.
 func TestCursorInstallRefusesNonObjectMCPServers(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cursor-bad")
 	configPath := filepath.Join(tmp, "mcp.json")
 	initial := []byte(`{"mcpServers":["not","an","object"]}`)
@@ -143,8 +155,10 @@ func TestCursorInstallRefusesNonObjectMCPServers(t *testing.T) {
 	}
 }
 
+// TestCursorUninstallRemovesOnlyOurEntry pins that `uninstall cursor` removes
+// only our entry: the unrelated server and the unknown top-level key survive.
 func TestCursorUninstallRemovesOnlyOurEntry(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cursor-rm")
 	configPath := writeCursorConfig(t, tmp)
 	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "cursor", "--name", "notes", "--config-path", configPath); code != 0 {
@@ -170,8 +184,11 @@ func TestCursorUninstallRemovesOnlyOurEntry(t *testing.T) {
 	}
 }
 
+// TestCursorUninstallDropsEmptyBlockAndIsIdempotent pins that `uninstall
+// cursor` drops an emptied mcpServers block, and that a second run reports
+// "nothing to remove" and does not rewrite the file.
 func TestCursorUninstallDropsEmptyBlockAndIsIdempotent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	configPath := filepath.Join(tmp, "mcp.json")
 	if err := os.WriteFile(configPath, []byte(`{"mcpServers":{"notes":{"url":"http://x/mcp"}}}`), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -211,8 +228,11 @@ func cursorDoctor(t *testing.T, stateDir, configPath, token string) map[string]i
 	return payload
 }
 
+// TestCursorDoctorReportsEntryState pins the `doctor cursor` verdicts: "not
+// installed" before install, no errors after install, and a stale-token
+// entry_error after the token file changes. The output never holds a token.
 func TestCursorDoctorReportsEntryState(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cursor-doc")
 	configPath := filepath.Join(tmp, "mcp.json")
 
@@ -241,8 +261,11 @@ func TestCursorDoctorReportsEntryState(t *testing.T) {
 	assertNoToken(t, "tok-cursor-doc", got)
 }
 
+// TestCursorPrintConfigUsesEnvPlaceholder pins that `print-config cursor`
+// emits pure JSON on stdout with "Bearer ${env:DIR2MCP_TOKEN}" in place of the
+// token, and shows on stderr how to export the variable from the token file.
 func TestCursorPrintConfigUsesEnvPlaceholder(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cursor-print")
 
 	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "print-config", "cursor", "--name", "notes")
@@ -265,8 +288,12 @@ func TestCursorPrintConfigUsesEnvPlaceholder(t *testing.T) {
 	}
 }
 
+// TestCursorDoctorResolvesEnvPlaceholder pins that `doctor cursor` resolves
+// the ${env:DIR2MCP_TOKEN} placeholder in a pasted print-config snippet: it
+// reports an unset variable, reports a wrong value, and accepts the token that
+// matches.
 func TestCursorDoctorResolvesEnvPlaceholder(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cursor-env")
 	configPath := filepath.Join(tmp, "mcp.json")
 	// Write the print-config snippet as a user would paste it.

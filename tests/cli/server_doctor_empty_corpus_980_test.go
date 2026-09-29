@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #980. Every count-reading check reports ok when its count is zero, so a corpus
@@ -18,8 +19,12 @@ import (
 // died after `up` created meta.sqlite. Every search then returns nothing while
 // the health report says the install is perfect.
 
+// TestDoctor_AnEmptyRecordOverANonEmptyCorpusIsAWarning pins that the
+// corpus_record check warns when the store holds no documents but the corpus
+// directory has content, states the zero counts, and names source.path as the
+// remedy.
 func TestDoctor_AnEmptyRecordOverANonEmptyCorpusIsAWarning(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	// A corpus with content, and a store that recorded none of it.
 	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("# hello"), 0o644); err != nil {
 		t.Fatalf("write corpus file: %v", err)
@@ -41,10 +46,13 @@ func TestDoctor_AnEmptyRecordOverANonEmptyCorpusIsAWarning(t *testing.T) {
 	}
 }
 
+// TestDoctor_AnEmptyRecordOverAnEmptyCorpusIsNotAWarning pins that an empty
+// record over an empty corpus directory is ok, states the zero counts, and
+// says the directory is "empty too". Nothing indexed from nothing is correct,
+// not a fault. A warning here would train an operator to ignore the check on a
+// corpus they have not filled yet.
 func TestDoctor_AnEmptyRecordOverAnEmptyCorpusIsNotAWarning(t *testing.T) {
-	// Nothing indexed from nothing is correct, not a fault. Warning here would
-	// train an operator to ignore the check on a corpus they have not filled yet.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	seedEmptyStore(t, dir)
 
 	check, _ := doctorCheckNamed(t, dir, "corpus_record")
@@ -59,10 +67,12 @@ func TestDoctor_AnEmptyRecordOverAnEmptyCorpusIsNotAWarning(t *testing.T) {
 	}
 }
 
+// TestDoctor_APopulatedRecordAlwaysStatesItsSize pins that a healthy
+// corpus_record check prints the document count on every run, so "nothing
+// indexed" can never look like "everything fine" through a line that is simply
+// absent.
 func TestDoctor_APopulatedRecordAlwaysStatesItsSize(t *testing.T) {
-	// The count is printed on every healthy run, so "nothing indexed" can never
-	// look like "everything fine" through a line that is simply absent.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	seedTranscripts(t, dir, seedRep{relPath: "archive/a.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
 
@@ -75,11 +85,14 @@ func TestDoctor_APopulatedRecordAlwaysStatesItsSize(t *testing.T) {
 	}
 }
 
+// TestDoctor_DurableSkipsAreNamedWithTheirReasons pins that the
+// skipped_documents check warns, lists each skip reason with its count, and
+// states that the files are NOT searchable. SkipSummary was read by `status`
+// and `reindex` and by no doctor check, so files dropped for size_cap or
+// language_uncovered never reached the surface an operator asks;
+// extraction_coverage catches only the format-class gap.
 func TestDoctor_DurableSkipsAreNamedWithTheirReasons(t *testing.T) {
-	// SkipSummary was read by `status` and `reindex` and by no doctor check, so
-	// files dropped for size_cap or language_uncovered never reached the surface
-	// an operator asks. extraction_coverage catches only the format-class gap.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(dir, ".dir2mcp", "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
@@ -113,8 +126,11 @@ func TestDoctor_DurableSkipsAreNamedWithTheirReasons(t *testing.T) {
 	}
 }
 
+// TestDoctor_NoSkipsIsReportedPositively pins that a corpus with no skipped
+// document gets an ok skipped_documents check whose detail says so in words,
+// not through an absent line.
 func TestDoctor_NoSkipsIsReportedPositively(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	seedTranscripts(t, dir, seedRep{relPath: "archive/a.mp4",
 		metaJSON: `{"source":"stt","provider":"whisper","model":"large-v3"}`})
 
@@ -140,12 +156,15 @@ func seedEmptyStore(t *testing.T, dir string) {
 	}
 }
 
+// TestDoctor_AnEmptyRecordOverAnUninspectableSourceIsNotCalledEmpty pins that
+// an empty record over a remote source the probe cannot read is a warning
+// whose detail admits the source "could not be inspected" and never says
+// "empty too". "Empty", "not empty" and "I could not look" are three different
+// answers. To collapse the third into the first lets an empty record over an
+// unreachable mount read as a clean bill: the exact bug class this check
+// exists to remove, committed by the check itself.
 func TestDoctor_AnEmptyRecordOverAnUninspectableSourceIsNotCalledEmpty(t *testing.T) {
-	// "empty", "not empty" and "I could not look" are three different answers.
-	// Collapsing the third into the first is what lets an empty record over an
-	// unreachable mount read as a clean bill — the exact bug class this check
-	// exists to remove, committed by the check itself.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	seedEmptyStore(t, dir)
 	// A remote source: the probe cannot read it cheaply and must not guess.
 	// nfs rather than s3 because s3 additionally demands AWS credentials, which
@@ -170,10 +189,12 @@ func TestDoctor_AnEmptyRecordOverAnUninspectableSourceIsNotCalledEmpty(t *testin
 	}
 }
 
+// TestDoctor_AnUnreadableCorpusRootIsReportedNotAssumedEmpty pins the same
+// rule for a local root that cannot be opened: the detail never says "empty
+// too". A missing or unreadable corpus path is a fact about the probe, not a
+// fact about the corpus.
 func TestDoctor_AnUnreadableCorpusRootIsReportedNotAssumedEmpty(t *testing.T) {
-	// Same rule for a local root that cannot be opened: a missing or unreadable
-	// corpus path is a fact about the probe, not a fact about the corpus.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	seedEmptyStore(t, dir)
 	cfgPath := filepath.Join(dir, ".dir2mcp.yaml")
 	missing := filepath.Join(dir, "not-here")
@@ -190,16 +211,17 @@ func TestDoctor_AnUnreadableCorpusRootIsReportedNotAssumedEmpty(t *testing.T) {
 	}
 }
 
+// TestDoctor_TheCountsAreStatedOnEveryPath pins that every corpus_record branch
+// states the document and chunk counts, also where the answer is zero. The
+// check exists so that "nothing indexed" can never look like "everything fine"
+// through a line that is simply absent; a branch that describes the situation
+// without the numbers reintroduces that gap.
+//
+// It also makes one inconsistency visible that nothing else names: zero
+// documents with a non-zero chunk count is a store whose chunks outlived their
+// documents, which "the record holds no documents" alone would describe as
+// merely empty.
 func TestDoctor_TheCountsAreStatedOnEveryPath(t *testing.T) {
-	// The check exists so that "nothing indexed" can never look like "everything
-	// fine" through a line that is simply absent. A branch that describes the
-	// situation without the numbers reintroduces that gap, so every path states
-	// them — including the ones where the answer is zero.
-	//
-	// It also makes one inconsistency visible that nothing else names: zero
-	// documents with a non-zero chunk count is a store whose chunks outlived
-	// their documents, which "the record holds no documents" alone would
-	// describe as merely empty.
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, dir string)
@@ -223,7 +245,7 @@ func TestDoctor_TheCountsAreStatedOnEveryPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := testutil.TempDir(t)
 			tc.setup(t, dir)
 			check, ok := doctorCheckNamed(t, dir, "corpus_record")
 			if !ok {

@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests pin the SPEC §7.7 startup diagnostics on the `dir2mcp up` banner
@@ -101,12 +102,12 @@ func seedStore(t *testing.T, dir string, docs ...model.Document) {
 // that would cover them. Neither document is status=ok; a report counting only ok
 // rows (the pre-fix doctor) sees nothing.
 func TestUpBanner_CoverageNamesDurablyUncoveredFormatsAndPandocEngine(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "auto")
-	t.Setenv("PATH", t.TempDir()) // no docling, no pandoc: auto falls back to Mistral OCR
+	t.Setenv("PATH", testutil.TempDir(t)) // no docling, no pandoc: auto falls back to Mistral OCR
 
 	seedStore(t, tmp,
 		model.Document{RelPath: "report.pdf", DocType: "pdf", Status: "ok"},
@@ -149,12 +150,12 @@ func TestUpBanner_CoverageNamesDurablyUncoveredFormatsAndPandocEngine(t *testing
 // (pandoc is ineligible under the pin) nor a Coverage section (nothing uncovered),
 // so a healthy corpus keeps the banner clean.
 func TestUpBanner_NoCoverageSectionWhenEverythingCovered(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "mistral")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	seedStore(t, tmp,
 		model.Document{RelPath: "report.pdf", DocType: "pdf", Status: "ok"},
@@ -176,12 +177,12 @@ func TestUpBanner_NoCoverageSectionWhenEverythingCovered(t *testing.T) {
 // banner still names them (a coverage gap is never silent) but the remedy names
 // the knob the operator set, not an engine to install.
 func TestUpBanner_ExtractorOffNamesTheKnob(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "off")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	seedStore(t, tmp,
 		model.Document{RelPath: "report.pdf", DocType: "pdf", Status: "ok"},
@@ -233,11 +234,11 @@ func routingJSONFromBundle(t *testing.T, dir string) []struct {
 // resolution source, never the binary path.
 func TestRoutingDecisions_PandocSecondaryEngineActive(t *testing.T) {
 	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "auto")
-	binDir := t.TempDir()
+	binDir := testutil.TempDir(t)
 	stub := filepath.Join(binDir, "pandoc")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write pandoc stub: %v", err)
@@ -270,11 +271,11 @@ func TestRoutingDecisions_PandocSecondaryEngineActive(t *testing.T) {
 // binary is present, because the policy never activates it.
 func TestRoutingDecisions_NoPandocRowUnderOtherPin(t *testing.T) {
 	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "mistral")
-	binDir := t.TempDir()
+	binDir := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(binDir, "pandoc"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write pandoc stub: %v", err)
 	}
@@ -291,11 +292,11 @@ func TestRoutingDecisions_NoPandocRowUnderOtherPin(t *testing.T) {
 // Pandoc row would be a duplicate and is omitted.
 func TestRoutingDecisions_NoDuplicateRowWhenPandocIsPrimary(t *testing.T) {
 	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-a-secret")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "pandoc")
-	binDir := t.TempDir()
+	binDir := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(binDir, "pandoc"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write pandoc stub: %v", err)
 	}
@@ -336,6 +337,11 @@ func (c *askCountingCounter) ExtractableExtensionCounts(_ context.Context, _ str
 	return c.counts, nil
 }
 
+// TestStartupCoverage_DaemonChildNeverRunsTheProbe_949 pins that the startup
+// extraction-coverage probe asks the store once in the foreground and returns
+// a verdict, but never touches the store and returns nothing in a verified
+// daemon child (#949): the child prints no banner, and a failed count there
+// would land in server.log as a false server fault.
 func TestStartupCoverage_DaemonChildNeverRunsTheProbe_949(t *testing.T) {
 	skipOnWindows(t, "daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
 	cfg := config.Config{}
@@ -354,7 +360,7 @@ func TestStartupCoverage_DaemonChildNeverRunsTheProbe_949(t *testing.T) {
 
 	// Daemon child: a verified handshake makes this process the child, and the
 	// probe must not touch the store.
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	childEnv, cleanup, err := cli.DaemonChildHandshakeEnvForTest(stateDir)
 	if err != nil {
 		t.Fatalf("prepare daemon handshake: %v", err)

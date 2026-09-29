@@ -9,10 +9,8 @@ import (
 var cwdMu sync.Mutex
 
 // WithWorkingDir runs fn with process cwd switched to dir and restores it.
-// On Windows it also registers the retrying removal of dir (see ReleaseTempDir).
 func WithWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
-	ReleaseTempDir(t, dir)
 
 	cwdMu.Lock()
 	defer cwdMu.Unlock()

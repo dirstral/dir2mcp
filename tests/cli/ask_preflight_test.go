@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func clearProviderEnv(t *testing.T) {
@@ -25,7 +26,7 @@ func clearProviderEnv(t *testing.T) {
 
 // No embed provider resolves -> generalized CONFIG_INVALID preflight.
 func TestAskPreflight_NoProviderRejected(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{})
@@ -44,7 +45,7 @@ func TestAskPreflight_NoProviderRejected(t *testing.T) {
 // A non-Mistral embed credential satisfies the preflight (no longer
 // Mistral-specific): the command proceeds past it and search succeeds.
 func TestAskPreflight_NonMistralCredentialPasses(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("OPENAI_API_KEY", "ok")
 
@@ -73,7 +74,7 @@ func TestAskPreflight_NonMistralCredentialPasses(t *testing.T) {
 // An explicit, incapable embed binding surfaces the resolver's
 // actionable *provider.ConfigError verbatim (not the generic message).
 func TestAskPreflight_IncapableExplicitBindingSurfacesConfigError(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	clearProviderEnv(t)
 	t.Setenv("ANTHROPIC_API_KEY", "ak")
 	if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"),

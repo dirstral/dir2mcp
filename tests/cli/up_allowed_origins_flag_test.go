@@ -8,10 +8,14 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
+// TestUpAllowedOriginsFlag_IsAcceptedByCLI pins that the `up` flag parser
+// accepts --allowed-origins: with no API key the run fails later, in config
+// validation (exit 2, MISTRAL_API_KEY), and not with "invalid up flags".
 func TestUpAllowedOriginsFlag_IsAcceptedByCLI(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 
 	var stdout bytes.Buffer

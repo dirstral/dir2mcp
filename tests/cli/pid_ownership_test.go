@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // requireStartTokens skips a test when the platform can't read a process
@@ -81,7 +82,7 @@ func TestDown_RecycledPid_LeavesProcessUntouched(t *testing.T) {
 // matches — holds the index open and warrants refusal.
 func TestReindex_ProceedsWhenPidRecycled(t *testing.T) {
 	realToken := requireStartTokens(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -122,7 +123,7 @@ func TestReindex_ProceedsWhenPidRecycled(t *testing.T) {
 // refusal returns before the fork).
 func TestUp_RefusesWhenOurDaemonLive(t *testing.T) {
 	realToken := requireStartTokens(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// A non-empty key so the parent's config preflight passes and reaches the
 	// pid-file ownership check (the check runs after preflight, before fork).
 	t.Setenv("MISTRAL_API_KEY", "test-key-not-used")

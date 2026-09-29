@@ -16,6 +16,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #736: TTML export's optional SMIL companion probed filepath.Join(RootDir,
@@ -123,7 +124,7 @@ func writeS3TTMLConfig(t *testing.T, dir, prefix string) string {
 func stubFFprobeOnPATH(t *testing.T) string {
 	t.Helper()
 	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	record := filepath.Join(dir, "probed.txt")
 	script := `#!/bin/sh
 target=""
@@ -171,7 +172,7 @@ func probedPaths(t *testing.T, record string) []string {
 // fetched at all, the path handed to ffprobe was the localized copy (not
 // RootDir/rel_path, which does not exist), and the SMIL landed on disk.
 func TestExportSMILProbesMediaThroughCorpusFS(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	const rel = "videos/game.mp4"
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), rel, `{"language":"en"}`)
 	cfgPath := writeS3TTMLConfig(t, tmp, "corpus/")
@@ -242,7 +243,7 @@ func TestExportSMILProbesMediaThroughCorpusFS(t *testing.T) {
 // the CorpusFS did not change local behavior: a local corpus is probed at its
 // real in-root path (no copy, no download) and still yields SMIL.
 func TestExportSMILLocalCorpusProbesInRootFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	const rel = "media/talk.mp4"
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), rel, `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, true)
@@ -298,7 +299,7 @@ func TestExportSMILLocalCorpusProbesInRootFile(t *testing.T) {
 // open — the export succeeds, the TTML stands, SMIL is omitted — and that the
 // reason is reported distinctly from "could not fetch the media".
 func TestExportSMILUnprobeableMediaWarnsAndFailsOpen(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	const rel = "media/corrupt.mp4"
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), rel, `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, true)
@@ -342,7 +343,7 @@ func TestExportSMILUnprobeableMediaWarnsAndFailsOpen(t *testing.T) {
 // why SMIL is missing — including under --json/--quiet, where the old
 // stdout-only note was suppressed entirely. stdout must stay machine-safe.
 func TestExportSMILUnfetchableMediaWarnsAndFailsOpen(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	const rel = "videos/missing.mp4"
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), rel, `{"language":"en"}`)
 	cfgPath := writeS3TTMLConfig(t, tmp, "corpus/")

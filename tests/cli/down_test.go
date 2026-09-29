@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestDown_NoPidFile_IsIdempotent: dir2mcp down on a directory with no
@@ -273,7 +274,7 @@ func TestDown_IsIdempotentWithoutConnectionFile(t *testing.T) {
 // pre-created. The state dir is what the down command operates on.
 func newDownFixture(t *testing.T) (root, stateDir string) {
 	t.Helper()
-	root = t.TempDir()
+	root = testutil.TempDir(t)
 	stateDir = filepath.Join(root, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)

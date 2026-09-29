@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // daemonChildEnvName is the marker the daemon parent sets on the child it
@@ -33,7 +34,7 @@ const daemonHandshakeEnvName = "DIR2MCP_DAEMON_HANDSHAKE"
 // server.log is the observable: the foreground tee creates it, and the daemon
 // child never does. A run that produces the file took the foreground path.
 func TestForegroundIgnoresUnverifiedDaemonMarker(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 	// A marker of exactly the real nonce length, with no handshake behind it.
@@ -70,7 +71,7 @@ func TestForegroundIgnoresUnverifiedDaemonMarker(t *testing.T) {
 // evidence here.
 func TestForegroundHonoursVerifiedDaemonHandshake(t *testing.T) {
 	skipOnWindows(t, "daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 
@@ -117,7 +118,7 @@ func TestForegroundHonoursVerifiedDaemonHandshake(t *testing.T) {
 // nothing was consumed and nothing was compared.
 func TestDaemonHandshakeIsSingleUse(t *testing.T) {
 	skipOnWindows(t, "daemon mode (the detached child and its handshake) is unix-only; Windows runs up in the foreground")
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 

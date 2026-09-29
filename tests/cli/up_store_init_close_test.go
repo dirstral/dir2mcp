@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // initFailStore fails Init after the database would be open, and counts Close.
@@ -30,7 +31,7 @@ func (s *initFailStore) Close() error {
 // without a Close, so the handle leaked in the process (a real exit freed it,
 // an embedding process kept it).
 func TestUp_StoreInitFailureClosesTheStore(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 	st := &initFailStore{}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestDaemonParent_MissingMistralAPIKeyFailsFast is the regression test
@@ -35,7 +36,7 @@ import (
 // Forks never happen because the preflight fails first, so this test
 // stays in the unit budget (no RUN_INTEGRATION_TESTS gate).
 func TestDaemonParent_MissingMistralAPIKeyFailsFast(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// Explicitly clear MISTRAL_API_KEY for this test even if the host
 	// environment has it set — the whole point is the missing-key path.
 	t.Setenv("MISTRAL_API_KEY", "")

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #730: `export --format ttml` documents --lang as optional and correctly
@@ -29,7 +30,7 @@ import (
 //
 // Fails before the fix: emits xml:lang="" and bare <span>.
 func TestExportTTMLOmittedLangUsesRecordedLanguage730(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -60,7 +61,7 @@ func TestExportTTMLOmittedLangUsesRecordedLanguage730(t *testing.T) {
 func TestExportTTMLOmittedLangMatchesExplicitLang730(t *testing.T) {
 	render := func(t *testing.T, args ...string) string {
 		t.Helper()
-		tmp := t.TempDir()
+		tmp := testutil.TempDir(t)
 		seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", `{"language":"en"}`)
 		cfgPath := writeTTMLConfig(t, tmp, false)
 		var stdout, stderr bytes.Buffer
@@ -92,7 +93,7 @@ func TestExportTTMLOmittedLangMatchesExplicitLang730(t *testing.T) {
 // players act on (track selection, font/shaping). An absent tag degrades; a
 // wrong tag misroutes.
 func TestExportTTMLUntaggedTranscriptEmitsNoLanguage730(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3", "")
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -124,7 +125,7 @@ func TestExportTTMLUntaggedTranscriptEmitsNoLanguage730(t *testing.T) {
 // resolved from their representations: with --lang omitted the primary tag comes
 // from the selected (first) transcript, and the secondary run keeps its own.
 func TestExportTTMLBilingualOmittedLangResolvesBothTags730(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedBilingualStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -157,7 +158,7 @@ func TestExportTTMLBilingualOmittedLangResolvesBothTags730(t *testing.T) {
 // matching is case-insensitive, so "EN"/"FR" select the same transcripts and
 // must still render the canonical recorded "en"/"fr".
 func TestExportTTMLSecondaryLangTagComesFromRepresentation730(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedBilingualStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgPath := writeTTMLConfig(t, tmp, false)
 
@@ -192,7 +193,7 @@ func TestExportTTMLSecondaryLangTagComesFromRepresentation730(t *testing.T) {
 // Fails before the fix: systemLanguage is omitted entirely because opts.lang was
 // empty.
 func TestExportTTMLSMILUsesResolvedLanguage730(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	const rel = "media/talk.mp4"
 	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), rel, `{"language":"en"}`)
 	cfgPath := writeTTMLConfig(t, tmp, true)

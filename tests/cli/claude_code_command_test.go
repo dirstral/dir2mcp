@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // fakeClaudeScript is a stand-in for the `claude` CLI. It keeps one file per
@@ -123,8 +124,13 @@ func readFakeEntry(t *testing.T, fake, name string) map[string]interface{} {
 	return entry
 }
 
+// TestClaudeCodeInstallCallsAddJSONWithHTTPEntry pins the claude calls that
+// `install claude-code` makes (a probe add under a temporary name, then remove
+// and add-json) and the http entry it registers: url, protocol header, and a
+// headersHelper that reads the token file. The token never reaches argv or a
+// static Authorization header.
 func TestClaudeCodeInstallCallsAddJSONWithHTTPEntry(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-install")
 	fake := installFakeClaude(t, tmp)
 
@@ -175,7 +181,7 @@ func TestClaudeCodeInstallCallsAddJSONWithHTTPEntry(t *testing.T) {
 // TestClaudeCodeHeadersHelperPrintsAuthorization runs the helper command in
 // a real shell, as Claude Code does, and checks its JSON output.
 func TestClaudeCodeHeadersHelperPrintsAuthorization(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-helper")
 	fake := installFakeClaude(t, tmp)
 	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
@@ -199,7 +205,7 @@ func TestClaudeCodeHeadersHelperPrintsAuthorization(t *testing.T) {
 // surrounding whitespace (an editor's trailing newline, a pasted space) gives
 // the same header the server accepts: the server trims the token too.
 func TestClaudeCodeHeadersHelperTrimsWhitespace(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-trim")
 	if err := os.WriteFile(tokenPath, []byte("  tok-cc-trim\r\n\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -228,7 +234,7 @@ func TestClaudeCodeHeadersHelperTrimsWhitespace(t *testing.T) {
 // The error must not quote the token.
 func TestClaudeCodeInstallRejectsANonBearerToken(t *testing.T) {
 	for _, bad := range []string{`tok"quote`, `tok\slash`, "tok with space", "tok\x01ctl"} {
-		tmp := t.TempDir()
+		tmp := testutil.TempDir(t)
 		stateDir, _ := writeClaudeStateFixture(t, tmp, bad)
 		fake := installFakeClaude(t, tmp)
 		code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes")
@@ -250,7 +256,7 @@ func TestClaudeCodeInstallRejectsANonBearerToken(t *testing.T) {
 // the entry under a probe name first and touches the old entry only after
 // claude accepts it.
 func TestClaudeCodeFailedReinstallKeepsTheOldRegistration(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-keep")
 	fake := installFakeClaude(t, tmp)
 	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
@@ -282,7 +288,7 @@ func TestClaudeCodeFailedReinstallKeepsTheOldRegistration(t *testing.T) {
 // token is checked as the helper reads it. strings.TrimSpace drops U+00A0 but
 // the helper's tr does not, so such a file would send an invalid header.
 func TestClaudeCodeInstallRejectsUnicodeWhitespaceAroundTheToken(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-nbsp")
 	if err := os.WriteFile(tokenPath, []byte("tok-cc-nbsp\u00a0\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -298,8 +304,11 @@ func TestClaudeCodeInstallRejectsUnicodeWhitespaceAroundTheToken(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeReinstallIsIdempotent pins that a second `install claude-code`
+// under the same name reports replaced=true and leaves exactly one registered
+// server, with the chosen scope echoed in the JSON payload.
 func TestClaudeCodeReinstallIsIdempotent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-again")
 	fake := installFakeClaude(t, tmp)
 
@@ -325,8 +334,11 @@ func TestClaudeCodeReinstallIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeInstallRejectsProjectScope pins that `install claude-code
+// --scope project` exits 2 with an explanation about .mcp.json and never runs
+// claude: a project-scope entry lands in the shared .mcp.json of the repo.
 func TestClaudeCodeInstallRejectsProjectScope(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-project")
 	fake := installFakeClaude(t, tmp)
 
@@ -342,9 +354,13 @@ func TestClaudeCodeInstallRejectsProjectScope(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeInstallWithoutClaudePrintsCommand pins that `install
+// claude-code` without the claude CLI on PATH fails, and prints the exact
+// `claude mcp add-json` command with the url and the token file path to stderr,
+// without the token value.
 func TestClaudeCodeInstallWithoutClaudePrintsCommand(t *testing.T) {
 	skipClaudeCodeOnWindows(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-nocli")
 	t.Setenv("PATH", filepath.Join(tmp, "empty-bin"))
 
@@ -365,8 +381,11 @@ func TestClaudeCodeInstallWithoutClaudePrintsCommand(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeUninstallRemovesOnlyOurServer pins that `uninstall
+// claude-code` removes the named server from Claude Code and leaves an
+// unrelated registered server in place.
 func TestClaudeCodeUninstallRemovesOnlyOurServer(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	fake := installFakeClaude(t, tmp)
 	for _, name := range []string{"notes", "some-other-tool"} {
 		if err := os.WriteFile(filepath.Join(fake, "server-"+name), []byte("x\n"), 0o600); err != nil {
@@ -389,8 +408,11 @@ func TestClaudeCodeUninstallRemovesOnlyOurServer(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeUninstallIsIdempotentWhenAbsent pins that `uninstall
+// claude-code` for a name that is not registered exits 0 and reports
+// removed=false with reason entry_not_present.
 func TestClaudeCodeUninstallIsIdempotentWhenAbsent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	installFakeClaude(t, tmp)
 
 	code, stdout, stderr := runCLI(t, "--state-dir", filepath.Join(tmp, "state"), "--json", "uninstall", "claude-code", "--name", "notes")
@@ -406,8 +428,11 @@ func TestClaudeCodeUninstallIsIdempotentWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeDoctorReportsRegistration pins that `doctor claude-code`
+// reports "not registered" (ok=false) before install and an empty
+// registered_error after install, and never prints the token.
 func TestClaudeCodeDoctorReportsRegistration(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-doctor")
 	installFakeClaude(t, tmp)
 
@@ -438,9 +463,13 @@ func TestClaudeCodeDoctorReportsRegistration(t *testing.T) {
 	}
 }
 
+// TestClaudeCodePrintConfigNeverPrintsToken pins that `print-config
+// claude-code` emits the add-json command, the token file path and the entry
+// without the token value, and that the printed command works when a user
+// pastes it into a shell.
 func TestClaudeCodePrintConfigNeverPrintsToken(t *testing.T) {
 	skipClaudeCodeOnWindows(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-print")
 
 	code, stdout, stderr := runCLI(t, "--state-dir", stateDir, "--json", "print-config", "claude-code", "--name", "notes")
@@ -473,8 +502,11 @@ func TestClaudeCodePrintConfigNeverPrintsToken(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeDoctorFlagsStaleURL pins that `doctor claude-code` fails and
+// names both urls when the daemon url in connection.json differs from the
+// registered entry, as after a restart on another port.
 func TestClaudeCodeDoctorFlagsStaleURL(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-cc-stale")
 	installFakeClaude(t, tmp)
 	if code, _, stderr := runCLI(t, "--state-dir", stateDir, "install", "claude-code", "--name", "notes"); code != 0 {
@@ -524,7 +556,7 @@ func TestClaudeCodeRefusedOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only behavior")
 	}
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-cc-win")
 	for _, cmd := range [][]string{{"install", "claude-code"}, {"print-config", "claude-code"}} {
 		code, _, stderr := runCLI(t, append([]string{"--state-dir", stateDir}, cmd...)...)

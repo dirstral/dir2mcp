@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // reindexNoopIngestor satisfies model.Ingestor and lets us drive
@@ -29,7 +30,7 @@ func (reindexNoopIngestor) Reindex(context.Context) error { return nil }
 // "open a second terminal and poll status" workaround the original
 // user complained about.
 func TestReindex_PrintsProgressAndDoneLines(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
@@ -59,7 +60,7 @@ func TestReindex_PrintsProgressAndDoneLines(t *testing.T) {
 // stderr stream silent so script-driving callers don't get a wall of
 // progress chatter mixed in.
 func TestReindex_QuietSuppressesProgress(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{

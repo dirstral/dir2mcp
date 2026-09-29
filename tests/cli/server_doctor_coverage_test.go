@@ -62,10 +62,10 @@ func seedDoctorStore(t *testing.T, tmp string, fn func(ctx context.Context, st *
 // extractor is available, so they never become searchable. The check must be
 // an error and name the remedy.
 func TestServerDoctor_ExtractionCoverage_NoExtractor(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")             // no Mistral OCR fallback
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "off") // force extractor decision to disabled
-	t.Setenv("PATH", t.TempDir())               // no docling on PATH
+	t.Setenv("PATH", testutil.TempDir(t))       // no docling on PATH
 
 	seedDoctorStore(t, tmp, func(ctx context.Context, st *store.SQLiteStore) {
 		for _, p := range []string{"a.pdf", "b.pdf"} {
@@ -92,7 +92,7 @@ func TestServerDoctor_ExtractionCoverage_NoExtractor(t *testing.T) {
 // TestServerDoctor_ExtractionCoverage_NoEmbeddings pins the second silent
 // failure: chunks were created but none embedded, so search matches nothing.
 func TestServerDoctor_ExtractionCoverage_NoEmbeddings(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// A docling command makes the extractor "available" so we exercise the
 	// embedding branch, not the no-extractor branch. `cat` is a harmless stand-in.
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "docling")
@@ -139,10 +139,10 @@ func TestServerDoctor_ExtractionCoverage_NoEmbeddings(t *testing.T) {
 // index-eligible (status='ok') extractable documents are counted: a skipped
 // PDF must not trip the "needs extraction" error on its own.
 func TestServerDoctor_ExtractionCoverage_SkippedNotCounted(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("DIR2MCP_INGEST_EXTRACTOR", "off")
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 
 	seedDoctorStore(t, tmp, func(ctx context.Context, st *store.SQLiteStore) {
 		// One ok PDF (counts) and one skipped PDF (must NOT count).
@@ -170,7 +170,7 @@ func TestServerDoctor_ExtractionCoverage_SkippedNotCounted(t *testing.T) {
 // TestServerDoctor_ExtractionCoverage_NoIndex confirms the check passes
 // cleanly when there is no index yet (fresh install, nothing ingested).
 func TestServerDoctor_ExtractionCoverage_NoIndex(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	c := findCheck(runDoctorReport(t, tmp), "extraction_coverage")
 	if c == nil {

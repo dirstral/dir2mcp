@@ -14,8 +14,12 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
+// TestSearchCommandUsesConnectionMetadataAndPrintsJSON pins that `search` reads
+// the server URL from .dir2mcp/connection.json, calls the search tool with the
+// query, and prints the structured result as JSON on stdout.
 func TestSearchCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	ts := newMCPTestServer(t, func(name string, args map[string]interface{}) map[string]interface{} {
 		if name != protocol.ToolNameSearch {
@@ -36,7 +40,7 @@ func TestSearchCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	})
 	defer ts.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, ts.URL, "")
 
 	var stdout, stderr bytes.Buffer
@@ -57,6 +61,9 @@ func TestSearchCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	}
 }
 
+// TestOpenFileCommandUsesConnectionMetadataAndPrintsJSON pins that `open-file`
+// reads the server URL from connection.json, calls the open_file tool with the
+// rel_path, and prints the structured result as JSON on stdout.
 func TestOpenFileCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	ts := newMCPTestServer(t, func(name string, args map[string]interface{}) map[string]interface{} {
 		if name != protocol.ToolNameOpenFile {
@@ -74,7 +81,7 @@ func TestOpenFileCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	})
 	defer ts.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, ts.URL, "")
 
 	var stdout, stderr bytes.Buffer
@@ -95,6 +102,8 @@ func TestOpenFileCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	}
 }
 
+// TestListFilesCommandPrintsOneJSONLinePerFile pins that `list-files` prints
+// the files array as NDJSON: one JSON object per file, each with a rel_path.
 func TestListFilesCommandPrintsOneJSONLinePerFile(t *testing.T) {
 	ts := newMCPTestServer(t, func(name string, args map[string]interface{}) map[string]interface{} {
 		if name != protocol.ToolNameListFiles {
@@ -112,7 +121,7 @@ func TestListFilesCommandPrintsOneJSONLinePerFile(t *testing.T) {
 	})
 	defer ts.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, ts.URL, "")
 
 	var stdout, stderr bytes.Buffer
@@ -139,8 +148,11 @@ func TestListFilesCommandPrintsOneJSONLinePerFile(t *testing.T) {
 	}
 }
 
+// TestRemoteCommandsReturnNonZeroWhenServerIsUnavailable pins that ask, search,
+// open-file and list-files exit non-zero and write an error to stderr when the
+// server in connection.json cannot be reached.
 func TestRemoteCommandsReturnNonZeroWhenServerIsUnavailable(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, "http://127.0.0.1:0/mcp", "")
 
 	commands := [][]string{{"ask", "q"}, {"search", "q"}, {"open-file", "docs/a.md"}, {"list-files"}}
@@ -161,6 +173,9 @@ func TestRemoteCommandsReturnNonZeroWhenServerIsUnavailable(t *testing.T) {
 	}
 }
 
+// TestAskCommandUsesConnectionMetadataAndPrintsJSON pins that `--json ask` reads
+// the server URL from connection.json, calls the ask tool with the question, and
+// prints the structured answer as JSON on stdout.
 func TestAskCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	ts := newMCPTestServer(t, func(name string, args map[string]interface{}) map[string]interface{} {
 		if name != protocol.ToolNameAsk {
@@ -179,7 +194,7 @@ func TestAskCommandUsesConnectionMetadataAndPrintsJSON(t *testing.T) {
 	})
 	defer ts.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, ts.URL, "")
 
 	var stdout, stderr bytes.Buffer
@@ -251,7 +266,7 @@ func TestRemoteClientCompletesHandshakeBeforeToolTraffic(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, ts.URL, "")
 
 	var stdout, stderr bytes.Buffer
@@ -311,7 +326,7 @@ func TestRemoteClientFailsWhenInitializedIsNotAccepted(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeConnectionMetadata(t, tmp, ts.URL, "")
 
 	var stdout, stderr bytes.Buffer

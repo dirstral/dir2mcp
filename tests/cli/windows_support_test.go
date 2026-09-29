@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The Claude Desktop config lives in %APPDATA%\Claude on Windows. The helper
@@ -60,7 +61,7 @@ func TestUpDaemonFlag_RejectedOnWindows(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 	var code int
-	withWorkingDir(t, t.TempDir(), func() {
+	withWorkingDir(t, testutil.TempDir(t), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		code = app.RunWithContext(ctx, []string{"up", "--daemon", "--listen", "127.0.0.1:0"})

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #783: an embed failure with a provider-side cause (a revoked or rotated
@@ -96,7 +97,7 @@ func runCLIInDir(t *testing.T, tmp string, args []string) (int, string, string) 
 // the failed chunks return to the embed queue, and no ingestor is constructed,
 // so extraction is never re-run.
 func TestReindexEmbeddingsOnly_RequeuesProviderFailures(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	seedEmbedFailure(t, stateDir, "docs/a.md", "auth")
 
@@ -120,7 +121,7 @@ func TestReindexEmbeddingsOnly_RequeuesProviderFailures(t *testing.T) {
 // is a property of the stored input is not retried: re-sending identical bytes
 // to the same provider re-fails deterministically and only spends quota.
 func TestReindexEmbeddingsOnly_LeavesTerminalCategories(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	seedEmbedFailure(t, stateDir, "docs/huge.md", "payload_too_large")
 
@@ -139,7 +140,7 @@ func TestReindexEmbeddingsOnly_LeavesTerminalCategories(t *testing.T) {
 // TestReindexEmbeddingsOnly_JSONPayload pins the machine-readable shape a
 // recovery script consumes.
 func TestReindexEmbeddingsOnly_JSONPayload(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	seedEmbedFailure(t, stateDir, "docs/a.md", "auth")
 
@@ -170,7 +171,7 @@ func TestReindexEmbeddingsOnly_JSONPayload(t *testing.T) {
 // TestReindexEmbeddingsOnly_ErrorCategoryFilter pins the --error-category
 // filter and its validation.
 func TestReindexEmbeddingsOnly_ErrorCategoryFilter(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	seedEmbedFailure(t, stateDir, "docs/a.md", "auth")
 	seedEmbedFailure(t, stateDir, "docs/b.md", "rate_limit")
@@ -195,7 +196,7 @@ func TestReindexEmbeddingsOnly_ErrorCategoryFilter(t *testing.T) {
 // TestReindex_StillRejectsPositionalArguments guards the pre-existing CLI
 // contract: adding flags must not turn `reindex extra` into a valid invocation.
 func TestReindex_StillRejectsPositionalArguments(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	code, _, stderr := runCLIInDir(t, tmp, []string{"reindex", "extra"})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2 (stderr=%q)", code, stderr)

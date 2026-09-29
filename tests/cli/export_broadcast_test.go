@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedWordTimedExportStore seeds a transcript with a SINGLE time-spanned chunk
@@ -73,7 +74,7 @@ var srtTimingRE = regexp.MustCompile(`(\d\d):(\d\d):(\d\d),(\d\d\d) --> (\d\d):(
 // chunk is re-segmented into multiple cues, each within the 6 s duration cap and
 // the 2x42 char limit — whereas the default renders it as one long cue.
 func TestExportBroadcastSegmentationSplitsLongCue(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedWordTimedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgYAML := strings.Join([]string{
 		"media:",
@@ -105,7 +106,7 @@ func TestExportBroadcastSegmentationSplitsLongCue(t *testing.T) {
 // same word-timed chunk renders as a single cue (historical behavior), so the
 // feature is strictly opt-in.
 func TestExportDefaultSegmentationOneCue(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedWordTimedExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 
 	var stdout, stderr bytes.Buffer
@@ -181,7 +182,7 @@ func TestExportBroadcastReflowsChunkWithoutWordTimings(t *testing.T) {
 	text := strings.TrimSpace(strings.Repeat(
 		"we have submitted a formal request to the ministry and expect an answer ", 4))
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedTranscriptChunks(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3",
 		[]seedChunk{{text, startMS, endMS}})
 	cfgYAML := strings.Join([]string{

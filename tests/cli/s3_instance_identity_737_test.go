@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/identity"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #737: the automatic instance identity was derived only from RootDir. For
@@ -207,7 +208,7 @@ func s3Config(bucket, prefix string) string {
 // explicit server_name. Before the fix both resolved from the same local root
 // and produced one name.
 func TestTheCLIDerivesDistinctNamesForTwoBucketsInOneDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	first := derivedNameFor(t, filepath.Join(dir, "a"), s3Config("customer-a", "corpus/"))
 	second := derivedNameFor(t, filepath.Join(dir, "b"), s3Config("customer-b", "corpus/"))
 	if first == second {
@@ -222,7 +223,7 @@ func TestTheCLIDerivesDistinctNamesForTwoBucketsInOneDirectory(t *testing.T) {
 // new branch.
 func TestAnExplicitServerNameWinsOnS3Too(t *testing.T) {
 	body := s3Config("customer-a", "corpus/") + "server_name: chosen-by-hand\n"
-	if got := derivedNameFor(t, t.TempDir(), body); got != "chosen-by-hand" {
+	if got := derivedNameFor(t, testutil.TempDir(t), body); got != "chosen-by-hand" {
 		t.Fatalf("derived %q, want the explicit name", got)
 	}
 }

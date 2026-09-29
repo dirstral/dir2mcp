@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // s3ConfigYAML renders a minimal, valid native-S3 corpus config whose corpus
@@ -54,7 +55,7 @@ func prepareS3UpEnv(t *testing.T) {
 // reach the embed preflight (the next check after root validation) and fail
 // there instead.
 func TestUpS3SourceDoesNotRequireLocalRoot_738(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, "state")
 	missingRoot := filepath.Join(tmp, "does-not-exist")
 	writeConfig(t, tmp, s3ConfigYAML(missingRoot, stateDir))
@@ -81,7 +82,7 @@ func TestUpS3SourceDoesNotRequireLocalRoot_738(t *testing.T) {
 // The local-corpus contract is unchanged: a missing root_dir is still a hard
 // startup failure for the default source.kind.
 func TestUpLocalSourceStillRequiresLocalRoot_738(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, "state")
 	missingRoot := filepath.Join(tmp, "does-not-exist")
 	writeConfig(t, tmp, "root_dir: "+missingRoot+"\nstate_dir: "+stateDir+"\n")
@@ -104,7 +105,7 @@ func TestUpLocalSourceStillRequiresLocalRoot_738(t *testing.T) {
 
 // nfs is a mounted filesystem path, so it keeps the local-root requirement too.
 func TestUpNFSSourceStillRequiresLocalRoot_738(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, "state")
 	missingRoot := filepath.Join(tmp, "does-not-exist")
 	writeConfig(t, tmp,

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The legacy model-override flags (--embed-model-text/-code,
@@ -15,7 +16,7 @@ import (
 // providers:/model: in .dir2mcp.yaml. The parser must now reject them
 // so the removal is explicit and guarded against re-introduction.
 func TestUpModelFlags_RemovedInCleanBreak(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 
 	cases := [][]string{

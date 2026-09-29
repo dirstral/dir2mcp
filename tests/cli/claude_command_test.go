@@ -12,10 +12,14 @@ import (
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/identity"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
+// TestClaudePrintConfigEmitsMCPServerBlock pins that `print-config claude`
+// with --json emits an mcpServers block that holds the named server with a
+// non-empty command, so the output can go straight into the Claude Desktop config.
 func TestClaudePrintConfigEmitsMCPServerBlock(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)
@@ -67,8 +71,11 @@ func TestClaudePrintConfigEmitsMCPServerBlock(t *testing.T) {
 	}
 }
 
+// TestClaudeInstallUpdatesConfigFile pins that `install claude` writes the named
+// server into an existing claude_desktop_config.json and keeps the unrelated
+// top-level keys (preferences) that were already there.
 func TestClaudeInstallUpdatesConfigFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)
@@ -131,8 +138,11 @@ func TestClaudeInstallUpdatesConfigFile(t *testing.T) {
 	}
 }
 
+// TestClaudeInstallDefaultsToResolvedServerName pins that `install claude`
+// without --name derives the server name from the corpus root (the identity
+// prefix) and no longer writes the legacy fixed name "dir2mcp".
 func TestClaudeInstallDefaultsToResolvedServerName(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	rootDir := filepath.Join(tmp, "stas-legal-main")
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
@@ -213,8 +223,11 @@ func withCWD(t *testing.T, dir string) {
 	})
 }
 
+// TestClaudeDoctorPassesWithValidState pins that `doctor claude` reports no
+// bridge, url or token file error for a valid state dir. The endpoint probe may
+// fail because no daemon runs; then the exit code is 1 and endpoint_error is set.
 func TestClaudeDoctorPassesWithValidState(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-doctor")
 
 	var stdout, stderr bytes.Buffer
@@ -253,8 +266,11 @@ func TestClaudeDoctorPassesWithValidState(t *testing.T) {
 	}
 }
 
+// TestClaudeDoctorFailsMissingToken pins that `doctor claude` exits non-zero
+// and names the token file read failure when connection.json points at a token
+// file that does not exist.
 func TestClaudeDoctorFailsMissingToken(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, tokenPath := writeClaudeStateFixture(t, tmp, "tok-missing")
 	if err := os.Remove(tokenPath); err != nil {
 		t.Fatalf("remove token: %v", err)
@@ -275,8 +291,11 @@ func TestClaudeDoctorFailsMissingToken(t *testing.T) {
 	}
 }
 
+// TestClaudeInstallFailsMissingBridge pins that `install claude` fails with a
+// clear error when neither bunx nor npx is on PATH: the Claude Desktop entry
+// needs the mcp-remote bridge to run.
 func TestClaudeInstallFailsMissingBridge(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, _ := writeClaudeStateFixture(t, tmp, "tok-install")
 	configPath := filepath.Join(tmp, "claude_desktop_config.json")
 	if err := os.WriteFile(configPath, []byte("{}\n"), 0o644); err != nil {
@@ -331,8 +350,11 @@ func writeClaudeStateFixture(t *testing.T, root, token string) (stateDir string,
 	return stateDir, tokenPath
 }
 
+// TestClaudeUninstallRemovesEntryAndPreservesUnrelatedKeys pins that
+// `uninstall claude` removes only the named entry: unrelated MCP servers and
+// other top-level keys (preferences) survive.
 func TestClaudeUninstallRemovesEntryAndPreservesUnrelatedKeys(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	configPath := filepath.Join(tmp, "claude_desktop_config.json")
 	initial := map[string]interface{}{
 		"preferences": map[string]interface{}{"coworkWebSearchEnabled": true},
@@ -386,8 +408,11 @@ func TestClaudeUninstallRemovesEntryAndPreservesUnrelatedKeys(t *testing.T) {
 	}
 }
 
+// TestClaudeUninstallDropsEmptyMCPServersBlock pins that `uninstall claude`
+// drops the mcpServers key when the removed entry was the last one, so no empty
+// block stays in the config.
 func TestClaudeUninstallDropsEmptyMCPServersBlock(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	configPath := filepath.Join(tmp, "claude_desktop_config.json")
 	initial := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
@@ -423,8 +448,10 @@ func TestClaudeUninstallDropsEmptyMCPServersBlock(t *testing.T) {
 	}
 }
 
+// TestClaudeUninstallIsIdempotentWhenEntryAbsent pins that `uninstall claude`
+// on a config without our entry exits 0 and reports "nothing to remove".
 func TestClaudeUninstallIsIdempotentWhenEntryAbsent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	configPath := filepath.Join(tmp, "claude_desktop_config.json")
 	if err := os.WriteFile(configPath, []byte("{\"preferences\":{\"x\":1}}\n"), 0o644); err != nil {
 		t.Fatalf("write initial config: %v", err)
@@ -490,8 +517,11 @@ func setupAtomicInstallFixture(t *testing.T, tmp string) (stateDir, configDir, c
 	return stateDir, configDir, configPath
 }
 
+// TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers pins
+// that `install claude` writes the config with mode 0600 (it embeds a bearer
+// token), leaves no temp file next to it, and keeps the unrelated server entry.
 func TestClaudeInstallWritesConfigAtomically0600AndPreservesOtherServers(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir, configDir, configPath := setupAtomicInstallFixture(t, tmp)
 
 	var stdout, stderr bytes.Buffer

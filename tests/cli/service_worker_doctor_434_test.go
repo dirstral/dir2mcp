@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestForegroundRefusesSecondInstance pins the #434 fix: `up --foreground`
@@ -26,7 +27,7 @@ import (
 // The test pre-plants a pid file pointing at the (live) test process, then
 // starts `up --foreground`; the guard must bail before serving.
 func TestForegroundRefusesSecondInstance(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 
@@ -62,7 +63,7 @@ func TestForegroundRefusesSecondInstance(t *testing.T) {
 // A pid that is not alive must be removed and the foreground server must
 // then acquire the lock and run until the context ends.
 func TestForegroundCleansStalePidAndStarts(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 
@@ -98,7 +99,7 @@ func TestForegroundCleansStalePidAndStarts(t *testing.T) {
 // report a bogus "already running" (#434). Without the fix the O_EXCL
 // claim over the still-present malformed file fails and every start bails.
 func TestForegroundClearsMalformedPidAndStarts(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 
@@ -134,7 +135,7 @@ func TestForegroundClearsMalformedPidAndStarts(t *testing.T) {
 // distributed prerequisites are satisfied so the broker check is what
 // fails.
 func TestEmbedWorkerRejectsInProcessMemoryBroker(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	// Distributed on + a shared Tier-C backend (qdrant) so we get past those
 	// prerequisites; the broker is left unset, defaulting to the in-process
 	// memory broker that the standalone worker must reject.
@@ -174,7 +175,7 @@ func TestDoctorDeepProbeFailsOnBadCreds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeWorkerConfig(t, tmp, ""+
 		"root_dir: .\nstate_dir: .dir2mcp\n"+
 		"providers:\n"+
@@ -238,7 +239,7 @@ func TestDoctorWithoutDeepDoesNotProbe(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	writeWorkerConfig(t, tmp, ""+
 		"root_dir: .\nstate_dir: .dir2mcp\n"+
 		"providers:\n"+

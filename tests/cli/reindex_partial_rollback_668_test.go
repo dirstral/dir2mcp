@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Partial reindex rollback: dir2mcp #668.
@@ -78,7 +79,7 @@ func assertRollbackReport(t *testing.T, stderr string) {
 // artifacts go back, and the command must still say that the metadata rows did
 // not.
 func TestReindex_FailedRebuild_ReportsWhatTheRollbackDidNotRestore(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -115,7 +116,7 @@ func TestReindex_FailedRebuild_ReportsWhatTheRollbackDidNotRestore(t *testing.T)
 func TestReindex_FailedRebuild_NetworkedBackend_ReportsTheUnrollbackableIndex(t *testing.T) {
 	for _, backend := range []string{"qdrant", "pgvector"} {
 		t.Run(backend, func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			stateDir := filepath.Join(tmp, ".dir2mcp")
 			if err := os.MkdirAll(stateDir, 0o700); err != nil {
 				t.Fatalf("mkdir state dir: %v", err)
@@ -141,7 +142,7 @@ func TestReindex_FailedRebuild_NetworkedBackend_ReportsTheUnrollbackableIndex(t 
 // is about a rollback, so a run that committed must not print it. A warning that
 // appears on a healthy run is a warning operators learn to ignore.
 func TestReindex_SuccessfulRebuild_ReportsNoPartialRollback(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -166,7 +167,7 @@ func TestReindex_SuccessfulRebuild_ReportsNoPartialRollback(t *testing.T) {
 // was rewritten and the rollback IS complete. Reporting a partial rollback there
 // would make the message untrue in the opposite direction.
 func TestReindex_UnbuiltIngestor_ReportsNoPartialRollback(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

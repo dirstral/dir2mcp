@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestForegroundStartsOverRecycledPid pins the issue #665 fix: the
@@ -28,7 +29,7 @@ import (
 // as pidRecycled.
 func TestForegroundStartsOverRecycledPid(t *testing.T) {
 	realToken := requireStartTokens(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 
@@ -63,7 +64,7 @@ func TestForegroundStartsOverRecycledPid(t *testing.T) {
 // file left intact (issue #665 must not weaken the #434 single-instance rule).
 func TestForegroundRefusesLiveOwnerWithMatchingToken(t *testing.T) {
 	realToken := requireStartTokens(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "test-token")
 

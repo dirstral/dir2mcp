@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Reindex commit order: dir2mcp #796.
@@ -88,7 +89,7 @@ func indexBackupsIn(stateDir string) []string {
 // backup is still on disk, because that pair is exactly the state recovery
 // reads as "roll the index back, the hashes are already current".
 func TestReindex_CommitsTheIndexBeforeDroppingTheHashUndo(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -137,7 +138,7 @@ func TestReindex_CommitsTheIndexBeforeDroppingTheHashUndo(t *testing.T) {
 // ordering serves: a committed reindex owns both halves, so neither undo record
 // survives it. A leftover of either kind is a crash window that stayed open.
 func TestReindex_LeavesNoUndoRecordsAfterSuccess(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

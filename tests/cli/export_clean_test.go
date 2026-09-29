@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedChunk is one time-coded transcript chunk for seedTranscriptChunks.
@@ -100,7 +101,7 @@ func TestExportDropsForeignScriptCues(t *testing.T) {
 	}
 	run := func(t *testing.T, cfgYAML string) (int, string, string) {
 		t.Helper()
-		tmp := t.TempDir()
+		tmp := testutil.TempDir(t)
 		seed(t, tmp)
 		if cfgYAML != "" {
 			if err := os.WriteFile(filepath.Join(tmp, ".dir2mcp.yaml"), []byte(cfgYAML), 0o644); err != nil {
@@ -150,7 +151,7 @@ func TestExportDropsForeignScriptCues(t *testing.T) {
 // rewrite, repetition-collapse, and URL drop all applied via the export command
 // when media.subtitles.{glossary,collapse_repeats,drop_urls} are configured.
 func TestExportAppliesCueCleaning(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedCleanExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 	cfgYAML := strings.Join([]string{
 		"media:",
@@ -201,7 +202,7 @@ func TestExportAppliesCueCleaning(t *testing.T) {
 // TestExportNoCleaningConfigUnchanged pins that without cleaning config the
 // export is unaffected (all cues, including the would-be-cleaned ones, survive).
 func TestExportNoCleaningConfigUnchanged(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	seedCleanExportStore(t, filepath.Join(tmp, ".dir2mcp"), "media/talk.mp3")
 
 	var stdout, stderr bytes.Buffer

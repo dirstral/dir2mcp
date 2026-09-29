@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestHelpFlag_PrintsUsageAndSucceeds pins that -h/-help/--help work on the
@@ -32,7 +33,7 @@ func TestHelpFlag_PrintsUsageAndSucceeds(t *testing.T) {
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			t.Chdir(t.TempDir())
+			t.Chdir(testutil.TempDir(t))
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
 			code := app.RunWithContext(context.Background(), args)
@@ -56,7 +57,7 @@ func TestHelpFlag_PrintsUsageAndSucceeds(t *testing.T) {
 // is an operand and not a help request. version rejects any operand, so the
 // command must fail and must not print the usage.
 func TestHelpFlag_AfterTerminatorIsAnOperand(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Chdir(testutil.TempDir(t))
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 	code := app.RunWithContext(context.Background(), []string{"version", "--", "--help"})

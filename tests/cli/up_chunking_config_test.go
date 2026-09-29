@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestUpRejectsInvalidChunkingConfig pins the config-validation half of #405 on
@@ -19,7 +20,7 @@ import (
 // flag overlay so a flag-supplied value cannot slip past validation either; this
 // exercises the same validation gate end-to-end through the command.
 func TestUpRejectsInvalidChunkingConfig(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "")
 	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 

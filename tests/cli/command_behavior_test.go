@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 type commandTestNoopStore struct{}
@@ -84,8 +85,11 @@ func (s *commandTestRetrieverStub) IndexingComplete(_ context.Context) (bool, er
 // compile-time assertion ensuring our stub satisfies the Retriever interface
 var _ model.Retriever = (*commandTestRetrieverStub)(nil)
 
+// TestStatusReadsCorpusSnapshotHuman pins that a plain `status` reads the
+// corpus.json snapshot and prints its source, the indexing counters and the
+// per-type document counts in the human output.
 func TestStatusReadsCorpusSnapshotHuman(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -152,7 +156,7 @@ func runningCorpusJSON() string {
 // file), so status must reconcile the snapshot to "stopped" instead of
 // reporting a stale, perpetual "running".
 func TestStatusStaleRunningReportsStopped(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -183,7 +187,7 @@ func TestStatusStaleRunningReportsStopped(t *testing.T) {
 // TestStatusStaleRunningJSONReconcilesRunningFalse asserts the JSON envelope
 // reports running=false and flags stale_running when the snapshot is stale.
 func TestStatusStaleRunningJSONReconcilesRunningFalse(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -224,7 +228,7 @@ func TestStatusStaleRunningJSONReconcilesRunningFalse(t *testing.T) {
 // owns the state dir (pid file names a running process), a running snapshot is
 // reported as running, not reconciled away.
 func TestStatusLiveDaemonReportsRunning(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -267,8 +271,10 @@ func TestStatusLiveDaemonReportsRunning(t *testing.T) {
 	}
 }
 
+// TestStatusJSONMode pins that `--json status` returns one envelope with
+// source=corpus_json, the snapshot totals and a non-empty state_dir.
 func TestStatusJSONMode(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -314,8 +320,11 @@ func TestStatusJSONMode(t *testing.T) {
 	}
 }
 
+// TestStatusFallsBackToComputedSnapshot pins that status computes the snapshot
+// from meta.sqlite when corpus.json is absent: source=computed, and the
+// document, lifecycle, representation and chunk counters come from the store.
 func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -407,8 +416,12 @@ func seedComputedSnapshotStore(t *testing.T, stateDir string) {
 	}
 }
 
+// TestStatusJSONComputedSnapshotDoesNotEmitExtraNDJSONEvents pins that a
+// computed snapshot under --json writes exactly one JSON payload to stdout,
+// also when a document has an unknown status; a stray NDJSON event would break
+// the parse for scripts.
 func TestStatusJSONComputedSnapshotDoesNotEmitExtraNDJSONEvents(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -453,8 +466,10 @@ func TestStatusJSONComputedSnapshotDoesNotEmitExtraNDJSONEvents(t *testing.T) {
 	}
 }
 
+// TestStatusNoStateReturnsExitCode1 pins that status exits 1 and reports "no
+// state found" on stderr when the directory has no state dir.
 func TestStatusNoStateReturnsExitCode1(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -470,8 +485,11 @@ func TestStatusNoStateReturnsExitCode1(t *testing.T) {
 	}
 }
 
+// TestConfigInitCreatesConfigFile pins that `config init` writes .dir2mcp.yaml
+// with the baseline keys (root_dir, state_dir) and never persists the
+// MISTRAL_API_KEY secret into the file.
 func TestConfigInitCreatesConfigFile(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -517,7 +535,7 @@ func TestConfigInitLeavesAnExistingFileUnchanged(t *testing.T) {
 		"      ky: [local]\n"
 	for _, args := range [][]string{{"config", "init"}, {"--json", "config", "init"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			path := filepath.Join(tmp, ".dir2mcp.yaml")
 			if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
 				t.Fatalf("write initial config: %v", err)
@@ -561,8 +579,10 @@ func TestConfigInitLeavesAnExistingFileUnchanged(t *testing.T) {
 	}
 }
 
+// TestConfigInitJSONOutput pins the `--json config init` envelope: the
+// relative path, created=true, updated=false and a non-empty next_steps list.
 func TestConfigInitJSONOutput(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -593,8 +613,11 @@ func TestConfigInitJSONOutput(t *testing.T) {
 	}
 }
 
+// TestAskAnswerModeWithFlagsAndCitations pins that `ask` forwards the question
+// and every filter flag (k, index, path-prefix, file-glob, doc-types) to the
+// retriever unchanged, and prints the answer with a Citations section.
 func TestAskAnswerModeWithFlagsAndCitations(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	stub := &commandTestRetrieverStub{
@@ -659,8 +682,10 @@ func TestAskAnswerModeWithFlagsAndCitations(t *testing.T) {
 	}
 }
 
+// TestAskSearchOnlyCallsSearch pins that `ask --mode search_only` calls Search
+// and never Ask, and prints the hits under a "Search results" heading.
 func TestAskSearchOnlyCallsSearch(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	stub := &commandTestRetrieverStub{
@@ -694,8 +719,11 @@ func TestAskSearchOnlyCallsSearch(t *testing.T) {
 	}
 }
 
+// TestAskJSONOutput pins the `--json ask` envelope: question, answer,
+// citations, hits and indexing_complete are all present and carry the
+// retriever's values.
 func TestAskJSONOutput(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	stub := &commandTestRetrieverStub{
@@ -747,7 +775,7 @@ func TestAskJSONOutput(t *testing.T) {
 // state. The implementation obtains the boolean via the dedicated
 // IndexingComplete accessor, so only Search (not Ask) is invoked.
 func TestAskSearchOnlyJSONIncludesIndexingComplete(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	stub := &commandTestRetrieverStub{
@@ -793,8 +821,10 @@ func TestAskSearchOnlyJSONIncludesIndexingComplete(t *testing.T) {
 	}
 }
 
+// TestAskNoContextResponse pins that an ask with no relevant context exits 0
+// and prints the retriever's no-context sentence as the answer.
 func TestAskNoContextResponse(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	stub := &commandTestRetrieverStub{
@@ -822,12 +852,14 @@ func TestAskNoContextResponse(t *testing.T) {
 	}
 }
 
+// TestAskNonPositiveKDefaultsToSearchK pins that `--k 0` and `--k -1` are not
+// errors: the query reaches the retriever with k set to mcp.DefaultSearchK.
 func TestAskNonPositiveKDefaultsToSearchK(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
 	for _, rawK := range []string{"0", "-1"} {
 		t.Run("k="+rawK, func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 
 			stub := &commandTestRetrieverStub{
 				askResult: model.AskResult{
@@ -861,8 +893,11 @@ func TestAskNonPositiveKDefaultsToSearchK(t *testing.T) {
 	}
 }
 
+// TestAskKAboveMaxFails pins that a k above mcp.MaxSearchK is rejected before
+// any retrieval: exit 2 and an "invalid ask flags" message that states the
+// upper bound.
 func TestAskKAboveMaxFails(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -879,8 +914,10 @@ func TestAskKAboveMaxFails(t *testing.T) {
 	}
 }
 
+// TestAskMissingQuestionFails pins that `ask` without a question argument
+// exits 2 and names the missing operand on stderr.
 func TestAskMissingQuestionFails(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -895,8 +932,11 @@ func TestAskMissingQuestionFails(t *testing.T) {
 	}
 }
 
+// TestStatusJSONErrorOutputWhenStateMissing pins that the no-state failure
+// under --json is a structured error envelope on stderr: code GENERIC_ERROR,
+// exit_code 1 and the "no state found" message.
 func TestStatusJSONErrorOutputWhenStateMissing(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -925,8 +965,11 @@ func TestStatusJSONErrorOutputWhenStateMissing(t *testing.T) {
 	}
 }
 
+// TestAskMissingQuestionJSONErrorOutput pins that a missing question under
+// --json yields a CONFIG_INVALID envelope on stderr with exit_code 2 and the
+// "requires a question argument" message.
 func TestAskMissingQuestionJSONErrorOutput(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -955,8 +998,11 @@ func TestAskMissingQuestionJSONErrorOutput(t *testing.T) {
 	}
 }
 
+// TestReindexJSONErrorOutputForUnexpectedArgs pins that `reindex` rejects a
+// positional argument under --json with a CONFIG_INVALID envelope (exit 2)
+// that says the command accepts no arguments.
 func TestReindexJSONErrorOutputForUnexpectedArgs(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -985,8 +1031,11 @@ func TestReindexJSONErrorOutputForUnexpectedArgs(t *testing.T) {
 	}
 }
 
+// TestConfigUnknownSubcommandJSONErrorOutput pins that an unknown config
+// subcommand under --json yields a CONFIG_INVALID envelope (exit 2) that names
+// the unknown subcommand.
 func TestConfigUnknownSubcommandJSONErrorOutput(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -1015,8 +1064,11 @@ func TestConfigUnknownSubcommandJSONErrorOutput(t *testing.T) {
 	}
 }
 
+// TestStatusJSONTrueGlobalFlagUsesJSONEnvelope pins that the explicit
+// `--json=true` form selects the JSON envelope like the bare flag: the
+// no-state error arrives as GENERIC_ERROR with exit_code 1.
 func TestStatusJSONTrueGlobalFlagUsesJSONEnvelope(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -1041,8 +1093,12 @@ func TestStatusJSONTrueGlobalFlagUsesJSONEnvelope(t *testing.T) {
 	}
 }
 
+// TestUnknownCommandTrailingJSONFlagUsesJSONEnvelope pins that a `--json` flag
+// after the command word still selects the JSON envelope for an unknown
+// command: the error is a GENERIC_ERROR envelope (exit 1) that names the
+// bogus command.
 func TestUnknownCommandTrailingJSONFlagUsesJSONEnvelope(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -1109,7 +1165,7 @@ func TestZeroOperandCommandsRejectExtraArgs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -1156,7 +1212,7 @@ func TestZeroOperandCommandsRejectExtraArgsJSON(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			var stdout, stderr bytes.Buffer
 			app := cli.NewAppWithIO(&stdout, &stderr)
 
@@ -1190,7 +1246,7 @@ func TestZeroOperandCommandsRejectExtraArgsJSON(t *testing.T) {
 // TestConfigPrintZeroOperandFormStillWorks: the valid form is unchanged by the
 // stricter argument check.
 func TestConfigPrintZeroOperandFormStillWorks(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
