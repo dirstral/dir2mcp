@@ -214,6 +214,18 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
+    # The tests fail at random on temp-dir cleanup with "meta.sqlite: The
+    # process cannot access the file because it is being used by another
+    # process", after dir2mcp has closed the store: on macOS, lsof shows no
+    # handle and no dir2mcp goroutine once up returns (#1073, #1085, and two
+    # cases on main at 48833bcb). The holder is outside the process, and it is
+    # not Defender: the image already excludes C:\ and D:\ from the scan.
+    # Every failure so far was under the user temp on C:. Put the tests' temp
+    # dirs on the runner's own temp on D: instead. The test-side retries stay,
+    # so a lock is still tolerated for up to 30 s.
+    env:
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
     steps:
       # Keep LF line endings. Fixtures and golden files compare bytes, and the
       # runner default (core.autocrlf=true) rewrites them to CRLF.
@@ -228,20 +240,6 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-
-      # The tests fail at random on temp-dir cleanup with "meta.sqlite: The
-      # process cannot access the file because it is being used by another
-      # process", after dir2mcp has closed the store (on macOS, lsof shows no
-      # handle once up returns; #1073, #1085, and a third case on main at
-      # 48833bcb). A file that is locked for a moment right after it was
-      # written is the shape of Defender's real-time scan. Exclude the temp
-      # dir and the workspace from it. The test-side retries stay, so a lock
-      # from anything else is still tolerated for up to 30 s.
-      - name: Exclude the temp dir from Defender
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP", "$env:TEMP", "${{ github.workspace }}" -ErrorAction Stop
-          (Get-MpPreference).ExclusionPath
 
       - name: Build
         run: go build ./...
