@@ -29,6 +29,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 var cwdMu sync.Mutex
@@ -1147,8 +1148,13 @@ func scanLines(t *testing.T, text string) []string {
 	return lines
 }
 
+// withWorkingDir runs fn with the process cwd switched to dir and restores it
+// afterwards. On Windows it also registers the retrying removal of dir, so a
+// sqlite file that `up` left "in use" for a moment does not fail the test at
+// t.TempDir's own cleanup.
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
+	testutil.ReleaseTempDir(t, dir)
 
 	cwdMu.Lock()
 	defer cwdMu.Unlock()

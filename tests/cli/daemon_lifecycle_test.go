@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestDaemonLifecycle_UpForksThenDownStops drives the full fork → poll →
@@ -30,7 +32,7 @@ func TestDaemonLifecycle_UpForksThenDownStops(t *testing.T) {
 		t.Skip("set RUN_INTEGRATION_TESTS=1 to exercise the daemon lifecycle")
 	}
 	bin := buildDir2mcpBinary(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	logPath := filepath.Join(stateDir, "server.log")
 	pidPath := filepath.Join(stateDir, "server.pid")
@@ -191,7 +193,7 @@ func TestDaemonLifecycle_BindBusyReportsClearError(t *testing.T) {
 	addr := holder.Addr().String()
 
 	bin := buildDir2mcpBinary(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	env := append(os.Environ(),
 		"MISTRAL_API_KEY=test-key",
 		"DIR2MCP_AUTH_TOKEN=",

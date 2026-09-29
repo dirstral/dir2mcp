@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §7.7 makes the coverage report a STARTUP diagnostic: "Startup diagnostics
@@ -21,7 +22,7 @@ import (
 // daemon banner names a partially decoded transcript, states the shortfall, and
 // prints the section above the ready line.
 func TestDaemonReady_NamesAPartialTranscriptOnTheDefaultPath(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	_ = st.Close()
@@ -49,7 +50,7 @@ func TestDaemonReady_NamesAPartialTranscriptOnTheDefaultPath(t *testing.T) {
 func TestDaemonReady_ACleanCorpusKeepsTheBannerShort(t *testing.T) {
 	// The sections are silent when there is nothing to report, so the default
 	// banner does not grow for a healthy corpus.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/complete.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 4, 4, 40*minute, 40*minute)})
 	_ = st.Close()
@@ -79,7 +80,7 @@ func TestDaemonReady_TheStillStartingPathReportsNoCoverage(t *testing.T) {
 	// Asserted through the banner renderer that path does NOT reach: if the
 	// coverage ever moved above the readiness wait, printDaemonReady would no
 	// longer be the only place it renders and this pairing would need revisiting.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := seedTranscripts(t, dir, seedRep{relPath: "archive/interview.mp4",
 		metaJSON: coverageMeta(t, "whisper", "large-v3", 8, 1, rfeDecodedMS, rfeDurationMS)})
 	_ = st.Close()

@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestCorePath_ForegroundUpAskDown drives the core user path against a real
@@ -36,7 +38,7 @@ func TestCorePath_ForegroundUpAskDown(t *testing.T) {
 	}
 	fake := newFakeOpenAIServer(t)
 	bin := buildDir2mcpBinaryPortable(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeCorePathCorpus(t, root, fake.URL+"/v1")
 	env, home := corePathEnv(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
