@@ -61,12 +61,12 @@ type summarySourceReader interface {
 func (svc *Service) resolveSummaryBinding(cfg config.Config) {
 	if !cfg.HierarchicalDocumentLevelEnabled() {
 		if cfg.HierarchicalSectionLevelRequested() {
-			svc.warnSectionSummariesUnsupported()
+			svc.warnSectionSummariesUnsupported(false)
 		}
 		return
 	}
 	if cfg.HierarchicalSectionLevelRequested() {
-		svc.warnSectionSummariesUnsupported()
+		svc.warnSectionSummariesUnsupported(true)
 	}
 	prof, err := cfg.Providers().ResolveExplicit(provider.CapChat, cfg.RetrievalHierarchicalProvider, false)
 	if err != nil {
@@ -86,10 +86,18 @@ func (svc *Service) resolveSummaryBinding(cfg config.Config) {
 // warnSectionSummariesUnsupported records, once per service, that section-level
 // summaries were requested but are not implemented yet: section windows simply
 // do not exist. Document-level summaries are derived only when `document` is also
-// among the levels. Honest coverage beats a silent no-op (§9.7).
-func (svc *Service) warnSectionSummariesUnsupported() {
-	svc.getLogger().Printf("hierarchical retrieval: retrieval.hierarchical.levels requests %q, which is not implemented yet; only document-level summaries are derived",
-		config.HierarchicalLevelSection)
+// among the levels, so the warning names which of the two outcomes applies:
+// withDocument true means document-level summaries are still derived, false
+// means no summaries are derived at all. Honest coverage beats a silent no-op
+// (§9.7).
+func (svc *Service) warnSectionSummariesUnsupported(withDocument bool) {
+	if withDocument {
+		svc.getLogger().Printf("hierarchical retrieval: retrieval.hierarchical.levels requests %q, which is not implemented yet; only document-level summaries are derived",
+			config.HierarchicalLevelSection)
+		return
+	}
+	svc.getLogger().Printf("hierarchical retrieval: retrieval.hierarchical.levels requests only %q, which is not implemented yet; no summaries are derived. Add %q to the levels for document-level summaries",
+		config.HierarchicalLevelSection, config.HierarchicalLevelDocument)
 }
 
 // SetSummarizer overrides the summary-generation binding, primarily for tests.
