@@ -45,12 +45,15 @@ Choose **full** for batteries-included local extraction; choose **lean** if you 
 Each release publishes a multi-arch image (linux/amd64, linux/arm64):
 
 ```bash
-docker run --rm -p 8080:8080 \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -v "$PWD:/corpus:ro" -v dir2mcp-state:/state \
   ghcr.io/dirstral/dir2mcp:latest
 ```
 
-The container serves `http://localhost:8080/mcp` with bearer-token auth. Read
+The container serves `http://localhost:8080/mcp` with bearer-token auth, on the
+loopback interface only: the token travels in clear text over HTTP, so publish
+the port on `127.0.0.1` as above. For access from other machines, put TLS in
+front of it ([tunnels and reverse proxies](deployment.md)). Read
 the token with `docker run --rm -v dir2mcp-state:/state alpine cat /state/secret.token`.
 
 Models: a `.dir2mcp.yaml` in the mounted folder is used when there is one.

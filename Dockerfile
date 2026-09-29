@@ -3,7 +3,7 @@
 # dir2mcp in a container: serve a mounted folder as an MCP server.
 #
 #   docker build -t dir2mcp .
-#   docker run --rm -p 8080:8080 -v "$PWD:/corpus:ro" -v dir2mcp-state:/state dir2mcp
+#   docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD:/corpus:ro" -v dir2mcp-state:/state dir2mcp
 #
 # The server listens on 0.0.0.0:8080 inside the container with the default
 # bearer-token auth. The token is /state/secret.token; read it with

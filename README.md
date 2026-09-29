@@ -142,7 +142,7 @@ removes it. Details: [connect an MCP client](docs/cli.md#connect-an-mcp-client).
 |---|---|
 | macOS, Linux (Homebrew) | `brew tap dirstral/tap && brew install dirstral/tap/dir2mcp` |
 | With bundled docling | `brew install dirstral/tap/dir2mcp-full` (about 6.3 GB) |
-| Docker | `docker run --rm -p 8080:8080 -v "$PWD:/corpus:ro" -v dir2mcp-state:/state ghcr.io/dirstral/dir2mcp` |
+| Docker | `docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD:/corpus:ro" -v dir2mcp-state:/state ghcr.io/dirstral/dir2mcp` |
 | Nix | `nix run github:dirstral/dir2mcp -- version` |
 | Windows | zip from [Releases](https://github.com/dirstral/dir2mcp/releases); read the [Windows limits](docs/install.md#windows) |
 | From source | `git clone --recurse-submodules https://github.com/dirstral/dir2mcp && cd dir2mcp && make build` (Go 1.25.13+) |
