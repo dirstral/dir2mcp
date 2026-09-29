@@ -244,7 +244,14 @@ jobs:
           test -n "$token"
           DIR2MCP_DEMO_URL="http://127.0.0.1:8080/mcp" DIR2MCP_DEMO_TOKEN="$token" ./scripts/smoke_hosted_demo.sh
           # The preflight writes the warning to stderr; docker logs keeps the
-          # two streams apart, so merge them before the grep.
+          # two streams apart, so merge them before the grep. The probe's DNS
+          # lookup of host.docker.internal can outlast the smoke on the runner
+          # (a first run on main failed on this line with the warning printed
+          # two seconds later), so wait for it instead of reading once.
+          for i in $(seq 1 30); do
+            if docker logs d2m 2>&1 | grep -q "not reachable"; then break; fi
+            sleep 1
+          done
           docker logs d2m 2>&1 | grep -q "not reachable" || { echo "expected the unreachable-provider warning"; docker logs d2m 2>&1; exit 1; }
           docker rm -f d2m >/dev/null
 
