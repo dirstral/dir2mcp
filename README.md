@@ -201,8 +201,10 @@ An end-to-end benchmark runs the real binary on a public corpus (120 questions
 from SQuAD 2.0, CC BY-SA 4.0) with local models only (`nomic-embed-text` and
 `qwen2.5:7b`). On the published run, 75% of the answers contain the gold
 answer, 98.7% of the inline citations name the correct file, and dir2mcp
-declines 25% of the questions that the corpus cannot answer. Method, raw
-results and how to run it again: [bench/README.md](bench/README.md).
+declines 25% of the questions that the corpus cannot answer. With
+`rag.verify_faithfulness: true` it declines 75%, and 67.5% of the answers
+contain the gold answer. Method, raw results and how to run it again:
+[bench/README.md](bench/README.md).
 
 ## Security
 
