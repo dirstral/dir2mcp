@@ -229,6 +229,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The tests fail at random on temp-dir cleanup with "meta.sqlite: The
+      # process cannot access the file because it is being used by another
+      # process", after dir2mcp has closed the store (on macOS, lsof shows no
+      # handle once up returns; #1073, #1085, and a third case on main at
+      # 48833bcb). A file that is locked for a moment right after it was
+      # written is the shape of Defender's real-time scan. Exclude the temp
+      # dir and the workspace from it. The test-side retries stay, so a lock
+      # from anything else is still tolerated for up to 30 s.
+      - name: Exclude the temp dir from Defender
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP", "$env:TEMP", "${{ github.workspace }}" -ErrorAction Stop
+          (Get-MpPreference).ExclusionPath
+
       - name: Build
         run: go build ./...
 
