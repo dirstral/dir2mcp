@@ -56,6 +56,11 @@ func (m *mutableCorpusStore) setDocs(docs []model.Document) {
 	m.docs = append([]model.Document(nil), docs...)
 }
 
+// TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning pins that the
+// corpus writer rewrites corpus.json while indexing runs, so a document added
+// mid-run shows up in the snapshot without a restart. It waits on the file's
+// content rather than its existence, because on Windows the file can exist
+// while the writer's rename still holds it (#1090).
 func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	stateDir := t.TempDir()
 	store := &mutableCorpusStore{}
@@ -566,6 +571,8 @@ func (d *drainingCorpusStore) CorpusStats(context.Context) (model.CorpusStats, e
 	return d.stats, nil
 }
 
+// setStats replaces the corpus stats the fake store reports, under its lock,
+// so a test can move the embed queue while the writer polls.
 func (d *drainingCorpusStore) setStats(s model.CorpusStats) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
