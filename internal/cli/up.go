@@ -1284,6 +1284,12 @@ func (a *App) runEventLoop(
 				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, logSink, emitter)
 				continue
 			}
+			if ingestStoppedByCancel(runCtx, ingestErr) {
+				// The stop cancelled the initial ingest. That is the same
+				// graceful stop as the runCtx.Done case, not an ingestion
+				// failure, so it must not exit 3 (#1091).
+				return exitSuccess
+			}
 			writeCLIError(logSink, emitter.enabled, exitIngestionFatal, fmt.Sprintf("ingestion failed: %v", ingestErr))
 			emitter.Emit("error", "file_error", map[string]interface{}{
 				"message": ingestErr.Error(),
@@ -1303,6 +1309,27 @@ func (a *App) runEventLoop(
 			})
 		}
 	}
+}
+
+// ingestStoppedByCancel reports whether an ingest error is only the echo of a
+// cancelled run context. It is true when runCtx is done and ingestErr wraps
+// context.Canceled or context.DeadlineExceeded.
+//
+// The daemon publishes connection.json and starts serving before the initial
+// ingest ends. So a SIGTERM (a `down`, a service stop) can cancel runCtx while
+// the scan still runs. The scan then returns the context error. The event loop
+// can receive that error before it sees runCtx.Done, because select picks at
+// random among ready cases. Without this check the loop reports the stop as a
+// fatal ingestion error (exit 3, SPEC §2.4), and a supervisor respawns the
+// daemon (#434, #1091).
+//
+// A real ingestion failure keeps exit 3. That includes a context error that
+// arrives while runCtx is still live, because the stop did not cause it.
+func ingestStoppedByCancel(runCtx context.Context, ingestErr error) bool {
+	if ingestErr == nil || runCtx.Err() == nil {
+		return false
+	}
+	return errors.Is(ingestErr, context.Canceled) || errors.Is(ingestErr, context.DeadlineExceeded)
 }
 
 // embeddedChunkPreloadPageSize is how many already-embedded chunks the startup
