@@ -560,6 +560,41 @@ beats `episode.en.vtt`. An untagged bare-stem sidecar (`episode.ttml`) binds onl
 when no language-tagged sidecar binds, so it never overwrites an authored
 per-language transcript. Name it `episode.ru.ttml` to ingest it beside the VTTs.
 
+**How a transcript is cut into chunks (SPEC §8.6.1).** Each authored cue of a
+sidecar, like each STT segment, is one transcript segment. Consecutive segments
+merge into one retrieval chunk under these rules:
+
+- A chunk closes when the next segment would make it longer than
+  `media.transcript_chunk_sec`.
+- A chunk closes when the silence before the next segment is longer than
+  `media.transcript_chunk_gap_sec`. This rule applies to sidecar cues and to STT
+  transcripts that carry real per-segment end times. In a flat timestamped STT
+  transcript, a segment ends where the next one starts, so the gap is always
+  zero. Only the duration rule bounds such a transcript.
+- A chunk closes at a speaker change.
+- A sidecar chunk also closes before its text grows past 1200 characters.
+
+One authored cue that is longer than the window, or longer than 1200
+characters, still becomes its own chunk. Apart from that, a sidecar chunk never
+spans more than `transcript_chunk_sec`. `chunking.max_tokens` does not apply to
+transcripts.
+
+```yaml
+media:
+  transcript_chunk_sec: 40       # default; 0 turns the merge off
+  transcript_chunk_gap_sec: 6    # default; 0 turns the silence rule off
+```
+
+`transcript_chunk_sec: 0` restores the chunks from before the window existed: one
+chunk per STT segment, and for a sidecar, cues packed to 1200 characters with no
+time bound.
+
+Subtitle export rebuilds its cues from the stored chunks. With the window on, a
+merged chunk records the boundaries of its member segments, so export splits it
+back into the authored cues (or the STT segments). With
+`transcript_chunk_sec: 0`, a sidecar chunk is a block of cues packed to 1200
+characters with no recorded boundaries, so export renders that block as one cue.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition

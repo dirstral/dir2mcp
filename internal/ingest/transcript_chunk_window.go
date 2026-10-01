@@ -18,11 +18,20 @@ import (
 // the silence before the next segment is longer than GapMS.
 //
 // ChunkMS of 0 disables merging and restores one chunk per segment.
+//
+// MaxChars, when above 0, is an upper bound on the merged text in runes: the
+// window also closes when the next segment would make the joined text longer.
+// The sidecar path sets it to TranscriptChunkMaxChars, so a window of authored
+// cues never grows past the size the character packer allowed before the cues
+// reached the window (dir2mcp #1096). A single segment longer than MaxChars
+// still becomes its own chunk. The STT path leaves it 0.
 type transcriptWindow struct {
-	ChunkMS int
-	GapMS   int
+	ChunkMS  int
+	GapMS    int
+	MaxChars int
 }
 
+// active reports whether the window merges at all. A ChunkMS of 0 disables it.
 func (w transcriptWindow) active() bool { return w.ChunkMS > 0 }
 
 // mergeTranscriptChunkWindows applies the window to already-chunked, already-
@@ -78,6 +87,8 @@ func mergeTranscriptChunkWindows(segs []chunkSegment, w transcriptWindow) []chun
 	return out
 }
 
+// isMergeableTimeSpan reports whether seg can join a chunk window: a "time"
+// span that does not run backwards and that carries text.
 func isMergeableTimeSpan(seg chunkSegment) bool {
 	return strings.EqualFold(strings.TrimSpace(seg.Span.Kind), "time") &&
 		seg.Span.EndMS >= seg.Span.StartMS &&
@@ -101,7 +112,9 @@ func startWindow(seg chunkSegment) *chunkSegment {
 // The duration rule is measured on the span the merged window would have. The
 // silence rule is measured from the window's current end, which is exact when
 // the transcript carries real per-segment timing and is the chunker's estimated
-// end otherwise; either way it separates a pause from a continuous turn.
+// end otherwise; either way it separates a pause from a continuous turn. The
+// optional character cap (MaxChars) is measured on the text the merged window
+// would have, the joining space included.
 //
 // A speaker change always closes the window. A speaker turn is already the right
 // retrieval unit, and merging across one would attribute a chunk to a speaker
@@ -124,9 +137,15 @@ func windowAccepts(cur, seg chunkSegment, w transcriptWindow) bool {
 	if w.GapMS > 0 && seg.Span.StartMS-cur.Span.EndMS > w.GapMS {
 		return false
 	}
+	// The join adds one space between the window text and the segment text.
+	if w.MaxChars > 0 &&
+		utf8.RuneCountInString(cur.Text)+1+utf8.RuneCountInString(seg.Text) > w.MaxChars {
+		return false
+	}
 	return true
 }
 
+// sameSpeaker reports whether two spans carry the same speaker id and label.
 func sameSpeaker(a, b model.Span) bool {
 	return strings.TrimSpace(a.Speaker) == strings.TrimSpace(b.Speaker) &&
 		strings.TrimSpace(a.SpeakerLabel) == strings.TrimSpace(b.SpeakerLabel)
