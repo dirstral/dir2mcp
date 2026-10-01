@@ -541,7 +541,7 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 	perLang := make(map[string][]chunkSegment, len(langs))
 	var allText strings.Builder
 	for _, lang := range langs {
-		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
+		segments := s.sidecarSegments(groups[lang])
 		segments = applyCueCleaningToSegments(segments, cleanOpts)
 		// SPEC 8.6.1 transcript chunk window. An authored cue is an editorial
 		// unit of a few seconds, so a sidecar transcript has the same retrieval
@@ -550,7 +550,7 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 		// renders the sidecar's own cues (SPEC 8.6.3) and a round-trip through
 		// dir2mcp does not re-cut a human's subtitles. A <v> voice tag already
 		// sits on the span here, so a window never crosses a speaker change.
-		segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
+		segments = mergeTranscriptChunkWindows(segments, s.sidecarTranscriptWindow())
 		if len(segments) == 0 {
 			continue
 		}
@@ -581,6 +581,35 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 		ingested = true
 	}
 	return ingested, nil
+}
+
+// sidecarSegments turns one language's sorted sidecar cues into the transcript
+// segments that the cue cleaning and the SPEC 8.6.1 chunk window receive.
+//
+// With the window active, each authored cue is its own segment, which is what
+// SPEC 8.6.1 names a sidecar transcript segment. The window then bounds every
+// chunk by media.transcript_chunk_sec and media.transcript_chunk_gap_sec. Before
+// dir2mcp #1096 the cues were first packed to TranscriptChunkMaxChars, and the
+// window, which only merges, could not split a packed chunk: in sparse speech
+// one chunk spanned many minutes.
+//
+// With the window off (media.transcript_chunk_sec: 0) the cues are packed by
+// characters exactly as before the window existed, so that setting keeps the
+// spans it is documented to pin.
+func (s *Service) sidecarSegments(cues []subtitle.Cue) []chunkSegment {
+	if s.transcriptWindow().active() {
+		return subtitleCueSegments(cues, s.captionWordFilter())
+	}
+	return chunkSubtitleCuesFiltered(cues, s.captionWordFilter())
+}
+
+// sidecarTranscriptWindow is the SPEC 8.6.1 chunk window for a sidecar
+// transcript: the configured window, with the character cap that the packer
+// applied before the cues reached the window kept as an upper bound.
+func (s *Service) sidecarTranscriptWindow() transcriptWindow {
+	w := s.transcriptWindow()
+	w.MaxChars = TranscriptChunkMaxChars
+	return w
 }
 
 // collectSidecarCues parses every sidecar of the media document and groups the

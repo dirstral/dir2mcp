@@ -560,6 +560,27 @@ beats `episode.en.vtt`. An untagged bare-stem sidecar (`episode.ttml`) binds onl
 when no language-tagged sidecar binds, so it never overwrites an authored
 per-language transcript. Name it `episode.ru.ttml` to ingest it beside the VTTs.
 
+**How a transcript is cut into chunks (SPEC §8.6.1).** Each authored cue of a
+sidecar, like each STT segment, is one transcript segment. Consecutive segments
+merge into one retrieval chunk. A chunk closes when the next segment would make
+it longer than `media.transcript_chunk_sec`, or when the silence before the next
+segment is longer than `media.transcript_chunk_gap_sec`. It also closes at a
+speaker change. A sidecar chunk also closes before its text grows past 1200
+characters. So a sidecar chunk never spans more than `transcript_chunk_sec`,
+unless one authored cue alone is longer. `chunking.max_tokens` does not apply to
+transcripts.
+
+```yaml
+media:
+  transcript_chunk_sec: 40       # default; 0 turns the merge off
+  transcript_chunk_gap_sec: 6    # default; 0 turns the silence rule off
+```
+
+`transcript_chunk_sec: 0` restores the chunks from before the window existed: one
+chunk per STT segment, and for a sidecar, cues packed to 1200 characters with no
+time bound. Subtitle export always renders the authored cues, whatever the
+window.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition

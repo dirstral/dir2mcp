@@ -2159,6 +2159,26 @@ func chunkSubtitleCues(cues []subtitle.Cue) []chunkSegment {
 // metadata only: it never changes chunk text or span bounds, and a transcript
 // with no <v> tags produces byte-identical output to before.
 func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter) []chunkSegment {
+	return packSubtitleCues(cues, filter, TranscriptChunkMaxChars)
+}
+
+// subtitleCueSegments turns parsed subtitle cues into one time-spanned segment
+// per authored cue, the SPEC 8.6.1 transcript segment of a sidecar. It applies
+// the same caption word filter, empty-cue drop and <v> speaker attribution as
+// chunkSubtitleCuesFiltered, but it packs nothing: the SPEC 8.6.1 chunk window
+// (mergeTranscriptChunkWindows) then joins the cues under its duration, silence
+// and speaker rules. The sidecar path uses this whenever the window is active,
+// so a chunk never spans more than media.transcript_chunk_sec unless one cue
+// alone is longer (dir2mcp #1096).
+func subtitleCueSegments(cues []subtitle.Cue, filter *subtitle.WordFilter) []chunkSegment {
+	return packSubtitleCues(cues, filter, 0)
+}
+
+// packSubtitleCues is the shared body of chunkSubtitleCuesFiltered and
+// subtitleCueSegments. It joins consecutive cues of one speaker with "\n" until
+// the text would exceed maxChars runes. A maxChars of 0 or less closes the chunk
+// before every cue after the first, so each surviving cue is its own segment.
+func packSubtitleCues(cues []subtitle.Cue, filter *subtitle.WordFilter, maxChars int) []chunkSegment {
 	out := make([]chunkSegment, 0, len(cues))
 	ids := newSpeakerIDAssigner()
 	var (
@@ -2201,9 +2221,9 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 		cueLen := utf8.RuneCountInString(text)
 		// flush() joins buffered cue texts with "\n", so budget one rune for the
 		// separator that will precede this cue when the buffer is non-empty;
-		// otherwise a merged chunk can exceed TranscriptChunkMaxChars by the
-		// number of joins. sepLen is 0 when no chunk is open (the first cue needs
-		// no separator) and resets to 0 after a flush.
+		// otherwise a merged chunk can exceed maxChars by the number of joins.
+		// sepLen is 0 when no chunk is open (the first cue needs no separator)
+		// and resets to 0 after a flush.
 		sepLen := 0
 		if haveOpen {
 			sepLen = 1
@@ -2212,7 +2232,7 @@ func chunkSubtitleCuesFiltered(cues []subtitle.Cue, filter *subtitle.WordFilter)
 		// overflow the transcript chunk size OR when the speaker changes (so a
 		// chunk never mixes two speakers); a single oversized cue still becomes
 		// its own chunk.
-		if haveOpen && (bufLen+sepLen+cueLen > TranscriptChunkMaxChars || cueID != speaker) {
+		if haveOpen && (bufLen+sepLen+cueLen > maxChars || cueID != speaker) {
 			flush()
 			sepLen = 0
 		}

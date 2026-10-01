@@ -1099,7 +1099,9 @@ type Config struct {
 	// closes when the next segment would make it longer than
 	// MediaTranscriptChunkSec, or when the silence before that segment is longer
 	// than MediaTranscriptChunkGapSec (a turn boundary). The merged window is
-	// what retrieval scores and what a time-span citation names.
+	// what retrieval scores and what a time-span citation names. A subtitle
+	// sidecar's segment is one authored cue, so the same bound holds for a
+	// sidecar chunk (dir2mcp #1096).
 	//
 	// MediaTranscriptChunkSec of 0 DISABLES merging and restores one chunk per
 	// provider segment. It is a real value, not "unset": Default() ships 40, so
