@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/rand"
@@ -55,6 +56,11 @@ func (m *mutableCorpusStore) setDocs(docs []model.Document) {
 	m.docs = append([]model.Document(nil), docs...)
 }
 
+// TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning pins that the
+// corpus writer rewrites corpus.json while indexing runs, so a document added
+// mid-run shows up in the snapshot without a restart. It waits on the file's
+// content rather than its existence, because on Windows the file can exist
+// while the writer's rename still holds it (#1090).
 func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	stateDir := t.TempDir()
 	store := &mutableCorpusStore{}
@@ -82,15 +88,19 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	}()
 
 	corpusPath := filepath.Join(stateDir, "corpus.json")
+	// Wait on the content, not on the file. On Windows the file can exist while
+	// the writer's rename still holds it, so a read right after os.Stat can fail
+	// (#1090). The predicate keeps the snapshot it accepted, so the checks below
+	// do not read the file a second time.
+	var initial corpusSnapshot
 	waitForCondition(t, 2*time.Second, func() bool {
-		_, err := os.Stat(corpusPath)
-		return err == nil
+		snap, err := readCorpusFileMaybe(t, corpusPath)
+		if err != nil {
+			return false
+		}
+		initial = snap
+		return snap.TotalDocs == 2
 	})
-
-	initial := readCorpusFile(t, corpusPath)
-	if initial.TotalDocs != 2 {
-		t.Fatalf("expected initial total_docs=2, got %d", initial.TotalDocs)
-	}
 	eps := 1e-3
 	if math.Abs(initial.CodeRatio-0.5) > eps {
 		t.Fatalf("expected initial code_ratio around 0.5 (±%f), got %f", eps, initial.CodeRatio)
@@ -102,15 +112,16 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 		{RelPath: "docs/b.md", DocType: "md"},
 	})
 
+	var updated corpusSnapshot
 	waitForCondition(t, 2*time.Second, func() bool {
-		updated, err := readCorpusFileMaybe(t, corpusPath)
+		snap, err := readCorpusFileMaybe(t, corpusPath)
 		if err != nil {
-			// ignore transient read/unmarshal errors during partial writes
+			// A transient read failure while the writer replaces the file.
 			return false
 		}
-		return updated.TotalDocs == 3 && updated.DocCounts["md"] == 2
+		updated = snap
+		return snap.TotalDocs == 3 && snap.DocCounts["md"] == 2
 	})
-	updated := readCorpusFile(t, corpusPath)
 	if math.Abs(updated.CodeRatio-0.3333) > eps {
 		t.Fatalf("expected updated code_ratio around 0.3333 (±%f), got %f", eps, updated.CodeRatio)
 	}
@@ -560,17 +571,22 @@ func (d *drainingCorpusStore) CorpusStats(context.Context) (model.CorpusStats, e
 	return d.stats, nil
 }
 
+// setStats replaces the corpus stats the fake store reports, under its lock,
+// so a test can move the embed queue while the writer polls.
 func (d *drainingCorpusStore) setStats(s model.CorpusStats) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.stats = s
 }
 
-func readEmbeddedOK(t *testing.T, path string) int64 {
-	t.Helper()
+// readEmbeddedOK reads indexing.embedded_ok from the corpus.json at path. It
+// returns an error when the file cannot be read or does not parse. A caller
+// that polls a live writer must treat that error as "not readable yet": on
+// Windows a read can fail while the writer's rename holds the file (#1090).
+func readEmbeddedOK(path string) (int64, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return -1
+		return 0, err
 	}
 	var snap struct {
 		Indexing struct {
@@ -579,9 +595,37 @@ func readEmbeddedOK(t *testing.T, path string) int64 {
 		} `json:"indexing"`
 	}
 	if err := json.Unmarshal(raw, &snap); err != nil {
-		return -1
+		return 0, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
 	}
-	return snap.Indexing.EmbeddedOK
+	return snap.Indexing.EmbeddedOK, nil
+}
+
+// pollEmbeddedOK polls readEmbeddedOK until a read succeeds and accept returns
+// true for its value, and returns that value. A failed read counts as "not
+// readable yet", so the poll continues. The test fails only after timeout, and
+// the message names the last value and the last read error.
+func pollEmbeddedOK(t *testing.T, path string, timeout time.Duration, accept func(int64) bool) int64 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var (
+		lastVal int64 = -1
+		lastErr error
+	)
+	for {
+		v, err := readEmbeddedOK(path)
+		if err == nil {
+			lastVal, lastErr = v, nil
+			if accept(v) {
+				return v
+			}
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("embedded_ok not accepted within %s: last value %d, last read error: %v", timeout, lastVal, lastErr)
+		}
+		time.Sleep(time.Duration(10+rand.Intn(11)) * time.Millisecond)
+	}
 }
 
 // TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008 pins
@@ -623,13 +667,9 @@ func TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008(t *
 	}()
 
 	corpusPath := filepath.Join(stateDir, "corpus.json")
-	waitForCondition(t, 2*time.Second, func() bool {
-		_, err := os.Stat(corpusPath)
-		return err == nil
-	})
-	if got := readEmbeddedOK(t, corpusPath); got != 0 {
-		t.Fatalf("initial embedded_ok = %d, want 0", got)
-	}
+	// Wait on the value, not on the file (#1090): the file can exist while a
+	// read of it still fails on Windows.
+	pollEmbeddedOK(t, corpusPath, 2*time.Second, func(v int64) bool { return v == 0 })
 
 	// The embed worker drains the queue while nothing is scanning.
 	store.setStats(model.CorpusStats{
@@ -637,9 +677,7 @@ func TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008(t *
 		ChunksTotal: 5, EmbeddedOK: 5, EmbeddedPending: 0,
 	})
 
-	waitForCondition(t, 2*time.Second, func() bool {
-		return readEmbeddedOK(t, corpusPath) == 5
-	})
+	pollEmbeddedOK(t, corpusPath, 2*time.Second, func(v int64) bool { return v == 5 })
 
 	// And once the queue is empty with no run active, it must stop rewriting:
 	// an idle daemon should not churn an unchanged file forever.
@@ -648,7 +686,9 @@ func TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008(t *
 		ChunksTotal: 5, EmbeddedOK: 99, EmbeddedPending: 0,
 	})
 	time.Sleep(150 * time.Millisecond) // many ticks at a 10ms interval
-	if got := readEmbeddedOK(t, corpusPath); got != 5 {
+	// Accept the first successful read: a transient read failure is not a
+	// measurement, but any value that parses is, and it must still be 5.
+	if got := pollEmbeddedOK(t, corpusPath, 2*time.Second, func(int64) bool { return true }); got != 5 {
 		t.Fatalf("embedded_ok = %d after the queue drained; the writer kept "+
 			"rewriting an idle corpus, want it parked at 5", got)
 	}
