@@ -579,14 +579,15 @@ func (d *drainingCorpusStore) setStats(s model.CorpusStats) {
 	d.stats = s
 }
 
-// readEmbeddedOK reads indexing.embedded_ok from the corpus.json at path. It
-// returns an error when the file cannot be read or does not parse. A caller
-// that polls a live writer must treat that error as "not readable yet": on
-// Windows a read can fail while the writer's rename holds the file (#1090).
-func readEmbeddedOK(path string) (int64, error) {
+// readEmbeddedCounts reads indexing.embedded_ok and indexing.embedded_pending
+// from the corpus.json at path. It returns an error when the file cannot be
+// read or does not parse. A caller that polls a live writer must treat that
+// error as "not readable yet": on Windows a read can fail while the writer's
+// rename holds the file (#1090).
+func readEmbeddedCounts(path string) (ok, pending int64, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	var snap struct {
 		Indexing struct {
@@ -595,34 +596,47 @@ func readEmbeddedOK(path string) (int64, error) {
 		} `json:"indexing"`
 	}
 	if err := json.Unmarshal(raw, &snap); err != nil {
-		return 0, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+		return 0, 0, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
 	}
-	return snap.Indexing.EmbeddedOK, nil
+	return snap.Indexing.EmbeddedOK, snap.Indexing.EmbeddedPending, nil
 }
 
-// pollEmbeddedOK polls readEmbeddedOK until a read succeeds and accept returns
-// true for its value, and returns that value. A failed read counts as "not
-// readable yet", so the poll continues. The test fails only after timeout, and
-// the message names the last value and the last read error.
+// pollEmbeddedOK polls corpus.json until a read succeeds and accept returns
+// true for its embedded_ok value, and returns that value. It is
+// pollEmbeddedCounts with only embedded_ok in view: a failed read counts as
+// "not readable yet", and the test fails only after timeout.
 func pollEmbeddedOK(t *testing.T, path string, timeout time.Duration, accept func(int64) bool) int64 {
+	t.Helper()
+	ok, _ := pollEmbeddedCounts(t, path, timeout, func(ok, _ int64) bool { return accept(ok) })
+	return ok
+}
+
+// pollEmbeddedCounts polls readEmbeddedCounts until a read succeeds and accept
+// returns true for its embedded_ok and embedded_pending values, and returns
+// them. A failed read counts as "not readable yet", so the poll continues. The
+// test fails only after timeout, and the message names the last values and the
+// last read error.
+func pollEmbeddedCounts(t *testing.T, path string, timeout time.Duration, accept func(ok, pending int64) bool) (int64, int64) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var (
-		lastVal int64 = -1
-		lastErr error
+		lastOK      int64 = -1
+		lastPending int64 = -1
+		lastErr     error
 	)
 	for {
-		v, err := readEmbeddedOK(path)
+		ok, pending, err := readEmbeddedCounts(path)
 		if err == nil {
-			lastVal, lastErr = v, nil
-			if accept(v) {
-				return v
+			lastOK, lastPending, lastErr = ok, pending, nil
+			if accept(ok, pending) {
+				return ok, pending
 			}
 		} else {
 			lastErr = err
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("embedded_ok not accepted within %s: last value %d, last read error: %v", timeout, lastVal, lastErr)
+			t.Fatalf("corpus.json counts not accepted within %s: last embedded_ok %d, "+
+				"last embedded_pending %d, last read error: %v", timeout, lastOK, lastPending, lastErr)
 		}
 		time.Sleep(time.Duration(10+rand.Intn(11)) * time.Millisecond)
 	}
@@ -691,6 +705,92 @@ func TestRunCorpusWriterWithInterval_KeepsRefreshingWhileTheQueueDrains_1008(t *
 	if got := pollEmbeddedOK(t, corpusPath, 2*time.Second, func(int64) bool { return true }); got != 5 {
 		t.Fatalf("embedded_ok = %d after the queue drained; the writer kept "+
 			"rewriting an idle corpus, want it parked at 5", got)
+	}
+}
+
+// TestRunCorpusWriterWithInterval_RefreshesAfterAnotherWriterLeftWorkQueued_1097
+// pins that the writer loop keeps on when ANOTHER writer left work queued in
+// corpus.json.
+//
+// The sequence is the one from #1097. The loop writes a snapshot with 0
+// pending while the scan runs. The scan ends before the next tick, and the
+// event loop writes its end-of-ingest snapshot with 25 chunks pending. The
+// embed worker then drains the queue. The loop used to decide from its own
+// last write (0 pending), so it skipped every later tick and the file stayed
+// on embedded_ok=0, embedded_pending=25 forever.
+func TestRunCorpusWriterWithInterval_RefreshesAfterAnotherWriterLeftWorkQueued_1097(t *testing.T) {
+	stateDir := t.TempDir()
+	store := &drainingCorpusStore{}
+	store.setDocs([]model.Document{{RelPath: "a.md", DocType: "md"}})
+	// The scan runs and no chunk exists yet.
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 0, EmbeddedOK: 0, EmbeddedPending: 0,
+	})
+	idxState := appstate.NewIndexingState(appstate.ModeIncremental)
+	idxState.SetRunning(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, nil, 10*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("corpus writer goroutine did not exit after cancel")
+		}
+	}()
+
+	corpusPath := filepath.Join(stateDir, "corpus.json")
+	// 1. The writer loop writes a snapshot with 0 pending.
+	pollEmbeddedCounts(t, corpusPath, 2*time.Second, func(ok, pending int64) bool {
+		return ok == 0 && pending == 0
+	})
+
+	// 2. The scan ends before the next tick. The scan enqueued 25 chunks, and
+	// the event loop writes its end-of-ingest snapshot (up.go). The writes are
+	// serialized, so this snapshot reads the store after any loop write that
+	// is still in flight.
+	idxState.SetRunning(false)
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 25, EmbeddedOK: 0, EmbeddedPending: 25,
+	})
+	if err := writeCorpusSnapshot(ctx, stateDir, store, idxState, io.Discard, nil); err != nil {
+		t.Fatalf("end-of-ingest writeCorpusSnapshot: %v", err)
+	}
+	pollEmbeddedCounts(t, corpusPath, 2*time.Second, func(ok, pending int64) bool {
+		return ok == 0 && pending == 25
+	})
+
+	// 3. The embed worker drains the queue while nothing scans.
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 25, EmbeddedOK: 25, EmbeddedPending: 0,
+	})
+
+	// The file must reach the true final values. An unchanged file times out
+	// here and fails the test.
+	ok, pending := pollEmbeddedCounts(t, corpusPath, 2*time.Second, func(_, pending int64) bool {
+		return pending == 0
+	})
+	if ok != 25 || pending != 0 {
+		t.Fatalf("final corpus.json embedded_ok=%d embedded_pending=%d, want 25 and 0", ok, pending)
+	}
+
+	// 4. With nothing queued and no run active, the loop must stop rewriting.
+	store.setStats(model.CorpusStats{
+		DocCounts: map[string]int64{"md": 1}, TotalDocs: 1,
+		ChunksTotal: 25, EmbeddedOK: 99, EmbeddedPending: 0,
+	})
+	time.Sleep(150 * time.Millisecond) // many ticks at a 10ms interval
+	if got := pollEmbeddedOK(t, corpusPath, 2*time.Second, func(int64) bool { return true }); got != 25 {
+		t.Fatalf("embedded_ok = %d after the queue drained; the writer kept "+
+			"rewriting an idle corpus, want it parked at 25", got)
 	}
 }
 

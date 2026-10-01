@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -2133,8 +2134,9 @@ func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, index
 }
 
 // runCorpusWriterWithInterval emits an initial corpus snapshot, then
-// refreshes it every interval while indexing is running, returning when ctx
-// is cancelled. A non-positive interval defaults to 5s.
+// refreshes it every interval while indexing is running or the corpus.json on
+// disk shows embeddings pending, returning when ctx is cancelled. A
+// non-positive interval defaults to 5s.
 func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -2151,14 +2153,23 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 	// stopped the three first-party readers depending on the file; this stops
 	// the file itself from lying to anything that reads it raw (#1008).
 	//
-	// So keep writing while a run is active OR the last snapshot still showed
+	// So keep writing while a run is active OR the file on disk still shows
 	// work queued, and stop once neither holds. An idle daemon must not
 	// rewrite an unchanged file every five seconds.
-	pending, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
+	//
+	// "The file on disk" is deliberately not "this loop's last write". The
+	// event loop writes its own snapshot when the initial ingest ends. When
+	// this loop's last write saw 0 pending and the scan ended before the next
+	// tick, the final file said running=false with chunks pending, and every
+	// later tick skipped. The file then never reached embedded_pending=0
+	// (#1097). corpusFileStateFor records what the last write of ANY writer
+	// put on disk, so the decision no longer depends on which writer wrote it.
+	file := corpusFileStateFor(filepath.Join(stateDir, "corpus.json"))
+	_, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
 	logSnapshotErr(stderr, err)
 	// A failed write teaches nothing about the queue, so assume work remains
 	// and try again. Reporting a stale file as settled is the worse error.
-	draining := err != nil || pending > 0
+	retry := err != nil
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -2168,16 +2179,37 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 			return
 		case <-ticker.C:
 			running := indexingState == nil || indexingState.Snapshot().Running
-			if !running && !draining {
+			if !running && !retry && !file.queued.Load() {
 				continue
 			}
-			pending, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
+			_, err := writeCorpusSnapshotPending(ctx, stateDir, st, indexingState, stderr, emitter)
 			logSnapshotErr(stderr, err)
-			// -1 means the store could not aggregate, so the depth is
-			// unknown; do not spin on it.
-			draining = err != nil || pending > 0
+			retry = err != nil
 		}
 	}
+}
+
+// corpusFileState records, for one corpus.json path, what the last successful
+// write put on disk. mu serializes each whole write (build and rename), so the
+// write that lands last is also the one that read the store last, and queued
+// always describes the file on disk. queued is true when that file shows
+// embeddings pending. An unknown depth (-1) does not count as queued, so the
+// writer loop cannot spin on a store that cannot aggregate.
+type corpusFileState struct {
+	mu     sync.Mutex
+	queued atomic.Bool
+}
+
+// corpusFileStates holds one corpusFileState for each corpus.json path that
+// this process writes. The set of paths is small and fixed (one per state
+// directory), so the map does not grow without bound.
+var corpusFileStates sync.Map // cleaned path -> *corpusFileState
+
+// corpusFileStateFor returns the shared corpusFileState for the corpus.json at
+// path. All writers of one path get the same value, in any path spelling.
+func corpusFileStateFor(path string) *corpusFileState {
+	v, _ := corpusFileStates.LoadOrStore(filepath.Clean(path), &corpusFileState{})
+	return v.(*corpusFileState)
 }
 
 // logSnapshotErr writes a corpus-snapshot error to stderr unless it is a
@@ -2203,10 +2235,21 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 }
 
 // writeCorpusSnapshotPending writes the snapshot and reports the queue depth it
-// recorded, so the writer loop can tell whether work is still in flight. It
-// returns the EmbeddedPending the snapshot carries, which is -1 when the store
-// could not aggregate and the depth is therefore unknown.
+// recorded. It returns the EmbeddedPending the snapshot carries, which is -1
+// when the store could not aggregate and the depth is therefore unknown.
+//
+// Each write of one path holds that path's corpusFileState lock from the store
+// read to the rename, and a successful write records in queued whether the
+// file now shows work pending. The writer loop reads queued to decide whether
+// to keep refreshing, so a snapshot from any caller (the loop itself or the
+// event loop at the end of the initial ingest) keeps the loop on until a file
+// with nothing pending lands (#1097).
 func writeCorpusSnapshotPending(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (int64, error) {
+	path := filepath.Join(stateDir, "corpus.json")
+	file := corpusFileStateFor(path)
+	file.mu.Lock()
+	defer file.mu.Unlock()
+
 	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, stderr, emitter)
 	if err != nil {
 		return 0, err
@@ -2222,10 +2265,10 @@ func writeCorpusSnapshotPending(ctx context.Context, stateDir string, st model.S
 	// snapshot (paths, titles, counts), so it is corpus content in another
 	// shape rather than a public artifact (#726). atomicWriteFile chmods the
 	// temp file before the rename, so the mode is never briefly wider.
-	path := filepath.Join(stateDir, "corpus.json")
 	if err := atomicWriteFile(path, raw, statefs.FileMode); err != nil {
 		return 0, fmt.Errorf("write corpus snapshot: %w", err)
 	}
+	file.queued.Store(snapshot.Indexing.EmbeddedPending > 0)
 	return snapshot.Indexing.EmbeddedPending, nil
 }
 
