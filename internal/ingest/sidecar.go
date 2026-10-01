@@ -595,7 +595,8 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 //
 // With the window off (media.transcript_chunk_sec: 0) the cues are packed by
 // characters exactly as before the window existed, so that setting keeps the
-// spans it is documented to pin.
+// spans it is documented to pin. Such a packed chunk records no cue boundaries,
+// so subtitle export renders it as one cue, not as the authored cues.
 func (s *Service) sidecarSegments(cues []subtitle.Cue) []chunkSegment {
 	if s.transcriptWindow().active() {
 		return subtitleCueSegments(cues, s.captionWordFilter())

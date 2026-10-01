@@ -1106,8 +1106,12 @@ type Config struct {
 	// MediaTranscriptChunkSec of 0 DISABLES merging and restores one chunk per
 	// provider segment. It is a real value, not "unset": Default() ships 40, so
 	// writing 0 in the config is how an operator pins the pre-0.62 behavior.
-	// Subtitle export is unaffected and keeps the provider segments (SPEC
-	// 8.6.3). Defaults: 40 s and 6 s.
+	// Subtitle export rebuilds cues from the stored chunks (SPEC 8.6.3). With
+	// the window on, a merged chunk records its member segments and export
+	// splits it back into them. With 0, an STT chunk is one provider segment,
+	// but a sidecar chunk is a block of cues packed to 1200 characters with no
+	// recorded boundaries, so export renders that block as one cue. Defaults:
+	// 40 s and 6 s.
 	MediaTranscriptChunkSec    int
 	MediaTranscriptChunkGapSec int
 
