@@ -2446,6 +2446,13 @@ func isMetaSpanKind(kind string) bool {
 	return kind == "page" || kind == "time"
 }
 
+// openFile implements dir2mcp_open_file (SPEC §15.4). It resolves relPath
+// inside the corpus root, returns MEDIA_NO_TEXT for a media-only document,
+// serves a page/time span from the stored chunk metadata, serves a binary
+// document type (PDF, image, audio) from its OCR/transcript text only
+// (openBinaryDocText, never the file bytes), and serves a text-native file
+// from its source bytes. It returns the content, a truncation flag and an
+// error from the model error set.
 func (s *Service) openFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
