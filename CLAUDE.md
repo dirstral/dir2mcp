@@ -95,8 +95,17 @@ make release-smoke STATE_DIR=... ARGS='--question "What is the leave policy?"'
 
 It speaks MCP to the daemon and asserts: indexing stopped + `errors=0` +
 `embedded_ok>0`; each question returns a grounded answer **with citations**;
-`search` returns hits; `open_file page=1` returns text. Any failure exits
-non-zero — do not tag until it is all-pass. Run **both** transports:
+`search` returns hits; `open_file page=1` on an extracted PDF returns text. Any
+failure exits non-zero — do not tag until it is all-pass. Three rules (#1101):
+
+- Every `--question` must be one the corpus can answer. An answer that
+  abstains ("there is no information", "the context does not contain", a
+  server refusal, `evidence=insufficient`) is a FAIL, even with citations.
+- `open_file` text that is raw PDF syntax (`%PDF-`, `endobj`, `endstream`,
+  `xref`) is a FAIL, and so is a corpus whose PDFs were all skipped.
+- A corpus with no PDF reports the open_file check as `SKIPPED`. A skip exits
+  0, but the summary reads `PASS with 1 SKIPPED`, not `ALL PASS`. Tag only on
+  `ALL PASS`, from a corpus that holds a PDF. Run **both** transports:
 `TRANSPORT=http` (default) hits the daemon directly; `TRANSPORT=stdio` drives the
 same `bunx mcp-remote` bridge Claude Desktop uses, so it also catches
 client/bridge-layer regressions (the "Failed to call tool" class). (Manual gate:
