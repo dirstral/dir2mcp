@@ -96,7 +96,7 @@ make release-smoke STATE_DIR=... ARGS='--question "What is the leave policy?"'
 It speaks MCP to the daemon and asserts: indexing stopped + `errors=0` +
 `embedded_ok>0`; each question returns a grounded answer **with citations**;
 `search` returns hits; `open_file page=1` on an extracted PDF returns text. Any
-failure exits non-zero — do not tag until it is all-pass. Three rules (#1101):
+failure exits non-zero: do not tag until it is all-pass. Three rules (#1101):
 
 - Every `--question` must be one the corpus can answer. An answer that
   abstains ("there is no information", "the context does not contain", a

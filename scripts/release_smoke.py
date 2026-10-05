@@ -418,7 +418,7 @@ def run_checks(client, questions):
     names of the failed checks and of the skipped ones."""
     fails, skips = [], []
     def report(name, status, detail=""):
-        print(f"  [{status}] {name}{(' — ' + detail) if detail else ''}")
+        print(f"  [{status}] {name}{(': ' + detail) if detail else ''}")
         if status == "FAIL":
             fails.append(name)
         elif status == "SKIPPED":
