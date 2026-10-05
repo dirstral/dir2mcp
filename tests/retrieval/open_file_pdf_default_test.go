@@ -108,12 +108,13 @@ func TestOpenFile_PDFNoCache_ReturnsErrOCRNotReady(t *testing.T) {
 	}
 }
 
-func TestOpenFile_PDFWithPage_StillReadsRawBytesPath(t *testing.T) {
-	// With page=N the service routes through the existing page-slicing path
-	// rather than the new OCR-cache fallback. Use a text file that contains
-	// form-feed page separators to mimic OCR'd content the page slicer
-	// understands; the .pdf extension on the rel_path triggers the
-	// "binary doc type" branch only when no span is set.
+// TestOpenFile_PDFWithPage_NoMetadata_ReturnsErrDocTypeUnsupported pins issue
+// #1100: a page=N read on a PDF that has no stored page text is never served
+// from the file bytes, even when those bytes look like paged text. SPEC §15.4
+// says "If page provided -> return OCR page text (if available; else error
+// DOC_TYPE_UNSUPPORTED)". Before #1100 this test asserted the opposite: the
+// page slicer read the raw .pdf file and split it on form feeds.
+func TestOpenFile_PDFWithPage_NoMetadata_ReturnsErrDocTypeUnsupported(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, ".dir2mcp")
 	filePath := filepath.Join(root, "docs", "paged.pdf")
@@ -129,11 +130,11 @@ func TestOpenFile_PDFWithPage_StillReadsRawBytesPath(t *testing.T) {
 	svc.SetStateDir(stateDir)
 
 	out, err := svc.OpenFile(context.Background(), "docs/paged.pdf", model.Span{Kind: "page", Page: 2}, 200)
-	if err != nil {
-		t.Fatalf("OpenFile with page=2 err: %v", err)
+	if !errors.Is(err, model.ErrDocTypeUnsupported) {
+		t.Fatalf("page=2 with no page metadata: want ErrDocTypeUnsupported, got err=%v out=%q", err, out)
 	}
-	if out != "page2-content" {
-		t.Fatalf("page=2 should yield page 2 content, got %q", out)
+	if out != "" {
+		t.Fatalf("page=2 with no page metadata returned file bytes: %q", out)
 	}
 }
 

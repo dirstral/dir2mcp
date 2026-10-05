@@ -2501,23 +2501,67 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		}
 	}
 
-	// For binary documents (PDF, audio) with no explicit span — OR with a
-	// line-range span, which is meaningless for OCR/transcript text — return the
-	// cached OCR/transcript markdown rather than the raw bytes. page=N / time
-	// spans were already served from metadata above. Without this, a caller that
-	// passes start_line/end_line on a PDF (a very natural thing for a model to
-	// try) gets bounced with DOC_TYPE_UNSUPPORTED instead of the text it wanted
-	// (issue #364; see also #177). Text-native types (md, txt, code, html) keep
-	// the existing default of returning file bytes with line slicing.
-	if isBinaryDocType(normalizedRel) && (kind == "" || kind == "lines") {
-		content, truncated, err := s.openFileFromOCRCache(ctx, corpusFS, stateDir, resolvedAbs, normalizedRel, secretPatterns, maxChars)
-		if err != nil {
-			return "", false, err
-		}
-		return content, truncated, nil
+	// A binary document (PDF, image, audio) is never served from its file bytes,
+	// whatever the span (SPEC §15.4: the handler MUST NOT emit raw binary bytes,
+	// and PDFs/audio resolve through the OCR/transcript cache, never a direct
+	// file read). Text-native types (md, txt, code, html) keep the existing
+	// default of returning file bytes with line and page slicing.
+	if isBinaryDocType(normalizedRel) {
+		return s.openBinaryDocText(ctx, corpusFS, stateDir, resolvedAbs, normalizedRel, secretPatterns, kind, maxChars)
 	}
 
 	return s.openFileFromResolvedPath(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
+}
+
+// openBinaryDocText answers open_file for a binary document type
+// (isBinaryDocType) after the stored page/time metadata did not serve the
+// request. It returns text from the OCR/transcript cache or an error, and it
+// never reads the file bytes as the answer (issue #1100).
+//
+// With no span, or with a line-range span, it returns the cached OCR/transcript
+// markdown (issue #364; see also #177). A cache miss maps to the retryable
+// OCR_NOT_READY while extraction can still produce the text, and to the
+// non-retryable DOC_TYPE_UNSUPPORTED when the scan recorded the document as
+// skipped (no extractor for the format), because no text will ever exist.
+//
+// A page or time span that the metadata did not serve has no text to return,
+// so it maps to DOC_TYPE_UNSUPPORTED (SPEC §15.4: "If page provided -> return
+// OCR page text (if available; else error DOC_TYPE_UNSUPPORTED)").
+func (s *Service) openBinaryDocText(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, maxChars int) (string, bool, error) {
+	if kind != "" && kind != "lines" {
+		return "", false, model.ErrDocTypeUnsupported
+	}
+	content, truncated, err := s.openFileFromOCRCache(ctx, corpusFS, stateDir, resolvedAbs, relPath, secretPatterns, maxChars)
+	if err != nil {
+		if errors.Is(err, model.ErrOCRNotReady) && s.isSkippedDoc(ctx, relPath) {
+			return "", false, model.ErrDocTypeUnsupported
+		}
+		return "", false, err
+	}
+	return content, truncated, nil
+}
+
+// isSkippedDoc reports whether the store recorded relPath as skipped by the
+// scan (documents.status="skipped", for example skip_reason
+// "unsupported_format" when no extractor handles the format). For such a
+// document no OCR/transcript text will be produced, so a cache miss is
+// permanent. It is conservative: a nil store, a missing row or a lookup error
+// returns false, so the caller keeps the retryable OCR_NOT_READY.
+func (s *Service) isSkippedDoc(ctx context.Context, relPath string) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	if store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			s.logf("open_file: skip-status lookup for %q failed: %v", relPath, err)
+		}
+		return false
+	}
+	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), "skipped")
 }
 
 // chunkModalityChecker is the optional store capability used to classify a
