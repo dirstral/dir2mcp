@@ -615,6 +615,64 @@ back into the authored cues (or the STT segments). With
 `transcript_chunk_sec: 0`, a sidecar chunk is a block of cues packed to 1200
 characters with no recorded boundaries, so export renders that block as one cue.
 
+### Subtitle write-back: subtitles beside the media as it is indexed (SPEC §8.6.14)
+
+`dir2mcp export` renders one document on demand. An archive whose editors,
+players or downstream tools read subtitle files from the media's own folder
+wants every document's subtitles **on disk**, kept current as the corpus grows,
+without an operator exporting 140,000 documents one at a time. Write-back does
+that. It is **off by default**.
+
+```yaml
+media:
+  subtitles:
+    ttml:
+      enabled: true         # only needed when `ttml` is listed below
+    emit:
+      enabled: true         # default false
+      formats: [vtt, ttml]  # subset of vtt|srt|ttml; default [vtt]
+      languages: []         # [] => every language the document has a transcript for
+      policy: if_missing    # if_missing (default) | refresh
+      dir: ""               # "" => beside the media; else mirror the corpus tree under this root
+```
+
+Once a media document's transcripts exist (STT, sidecar, translation), dir2mcp
+writes:
+
+| Artifact | Name | When |
+|---|---|---|
+| VTT / SRT | `<stem>.<lang>.vtt` (the [sidecar shape](#subtitle-sidecars-which-file-becomes-a-transcript-spec-864)) | once per transcript language |
+| TTML | `<stem>.ttml`, bilingual (source + first `media.translate.target_langs` entry the document has) | once per document |
+
+With `media.variants.group: true` the stem is the **group** stem
+(`episode_1080p.mp4` → `episode.ru.vtt`), so one set of files serves every
+rendition. The bytes are **identical to `dir2mcp export`** for the same document,
+language and format: one renderer, one cue pipeline (`filter_words`, the
+`media.subtitles.*` cleaning, `segmentation`). **SMIL is never written** by
+write-back: an archive's packaging manifests belong to whatever produced the
+media, and stay an on-demand `export --format ttml --out` concern.
+
+**A written file is dir2mcp's output, not a human's.** Every file written is
+recorded in the state database (path, size, mtime, content hash). While it is
+unchanged on disk it is **owned**: sidecar discovery skips it, so writing a VTT
+beside a video never changes the video's identity, never re-ingests the VTT as
+an "authored" transcript, never bypasses the quality gate, and never stops a
+better STT model from re-transcribing the video later. A written file someone
+**edits** stops being owned and becomes an authored sidecar from then on, with
+the usual precedence over STT. Files dir2mcp did not write are **never
+overwritten**: under `if_missing` an existing sidecar of that format and
+language simply counts as present, and under `refresh` only owned files whose
+render changed are rewritten (so a re-derived transcript reaches disk).
+
+Each write is atomic. A failed write is a non-fatal per-document outcome,
+recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)
+as `SUBTITLE_WRITE_FAILED`; the transcript stays indexed. Written artifacts
+appear in the manifest's `outputs` as `vtt:ru`, `srt:en`, `ttml`. Under
+`media.batch.two_phase` the files are written in the derivation pass and are the
+same files single-pass writes. Enabling write-back on an already-indexed corpus
+fills the files in on the next scan without a reindex. A `source.kind: s3`
+corpus has no filesystem to write beside the media and requires `dir`.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition

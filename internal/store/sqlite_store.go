@@ -909,6 +909,19 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS emitted_artifacts (
+  rel_path TEXT PRIMARY KEY,
+  doc_id INTEGER NOT NULL,
+  format TEXT NOT NULL,
+  lang TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  mtime_unix INTEGER NOT NULL DEFAULT 0,
+  content_sha256 TEXT NOT NULL DEFAULT '',
+  emitted_unix INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS emitted_artifacts_doc_idx ON emitted_artifacts(doc_id);
+
 CREATE TABLE IF NOT EXISTS mcp_sessions (
   session_id TEXT PRIMARY KEY,
   created_unix INTEGER NOT NULL,
@@ -2314,6 +2327,18 @@ func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) e
 			SELECT rep_id FROM representations
 			WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = ?)
 		 )`,
+		normalizedPath,
+	); err != nil {
+		return err
+	}
+	// A tombstoned document owns no subtitle write-back artifacts any more (SPEC
+	// §8.6.14 / df-003 §5.6): its records go with it. The files on disk are left
+	// alone, so if the media comes back they are seen as authored sidecars rather
+	// than silently re-adopted as outputs of a document that no longer exists.
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM emitted_artifacts
+		 WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = ?)`,
 		normalizedPath,
 	); err != nil {
 		return err

@@ -221,12 +221,12 @@ func distinctSpeakers(segments []chunkSegment) []Speaker {
 // PathExcludes are honoured here so an operator who excludes e.g. "**/*.vtt"
 // never has those files read or persisted as transcripts (the exclude contract).
 func (s *Service) setSidecarIndex(files []DiscoveredFile) {
-	idx := make(map[string]int64, len(files))
+	idx := make(map[string]sidecarStat, len(files))
 	for _, f := range files {
 		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
 			continue
 		}
-		idx[f.RelPath] = f.MTimeUnix
+		idx[f.RelPath] = sidecarStat{MTimeUnix: f.MTimeUnix, SizeBytes: f.SizeBytes}
 	}
 	s.sidecarMu.Lock()
 	s.sidecarIndex = idx
@@ -295,15 +295,21 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 		variantBase = variantSidecarBase(mediaRelPath, base)
 	}
 	var exact, variant []sidecarFile
-	for relPath, mtime := range index {
+	for relPath, st := range index {
 		ext := strings.ToLower(path.Ext(relPath))
 		if !isSidecarExt(ext) {
+			continue
+		}
+		// §8.6.14: a subtitle file this pipeline wrote, unchanged since, is an
+		// OWNED output, not an authored sidecar. Excluding it here is what keeps
+		// write-back from changing the document's identity or suppressing STT.
+		if s.isOwnedSidecar(ctx, relPath, st) {
 			continue
 		}
 		// stem is the sidecar path without its subtitle extension.
 		stem := strings.TrimSuffix(relPath, ext)
 		if lang, ok := sidecarLangForBase(stem, base, mediaExt); ok {
-			exact = append(exact, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
+			exact = append(exact, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: st.MTimeUnix})
 			continue
 		}
 		if variantBase == "" {
@@ -313,7 +319,7 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 		// stem is lower-cased for this comparison only. The recorded language token
 		// is therefore lower-case too, which §9.5 matches case-insensitively.
 		if lang, ok := sidecarLangForBase(strings.ToLower(stem), variantBase, mediaExt); ok {
-			variant = append(variant, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
+			variant = append(variant, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: st.MTimeUnix})
 		}
 	}
 	out := mergeSidecarCandidates(exact, variant)
@@ -456,7 +462,7 @@ func mergeSidecarCandidates(exact, variant []sidecarFile) []sidecarFile {
 // sidecarIndexOrWalk returns the scan-built sidecar index, falling back to a
 // one-shot corpus walk when none was set (direct/standalone calls). The walk
 // result is not cached so a standalone call always sees current mtimes.
-func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]int64 {
+func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]sidecarStat {
 	s.sidecarMu.RLock()
 	idx := s.sidecarIndex
 	s.sidecarMu.RUnlock()
@@ -468,14 +474,14 @@ func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]int64 {
 		s.getLogger().Printf("sidecar walk for %s failed: %v", s.cfg.RootDir, err)
 		return nil
 	}
-	out := make(map[string]int64, len(files))
+	out := make(map[string]sidecarStat, len(files))
 	for _, f := range files {
 		// Honour PathExcludes here too so excluded files (e.g. "**/*.vtt") are
 		// never used as sidecars on the standalone fallback path.
 		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
 			continue
 		}
-		out[f.RelPath] = f.MTimeUnix
+		out[f.RelPath] = sidecarStat{MTimeUnix: f.MTimeUnix, SizeBytes: f.SizeBytes}
 	}
 	return out
 }

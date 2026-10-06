@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/scancache"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -399,8 +400,19 @@ type Service struct {
 	// per scan (setSidecarIndex). The transcript path uses it to detect subtitle
 	// sidecars next to a media file and to mtime-gate their ingestion (§8.6.4).
 	// Nil until a scan sets it; direct callers fall back to a one-shot walk.
-	sidecarIndex map[string]int64
+	sidecarIndex map[string]sidecarStat
 	sidecarMu    sync.RWMutex
+
+	// Subtitle write-back state (SPEC §8.6.14, emit.go). ownedArtifacts is the
+	// in-memory projection of the df-003 §5.6 ownership rows, loaded once per
+	// scan (ownedLoaded) so sidecar discovery can exclude files this pipeline
+	// wrote. emitRenderer is the shared subtitle renderer, built once.
+	ownedArtifacts   map[string]ownedArtifact
+	ownedLoaded      bool
+	ownedMu          sync.RWMutex
+	emitRenderer     *subexport.Renderer
+	emitRendererOnce sync.Once
+	emitWarnOnce     sync.Once
 
 	// batch holds the optional per-scan batch-ergonomics state (SPEC §8.6.11):
 	// the JSONL run manifest writer and the side-channel progress reporter. It is
@@ -2049,6 +2061,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	// can detect subtitle sidecars next to any media rendition and mtime-gate
 	// their ingestion (§8.6.4) even for renditions dropped by variant grouping.
 	s.setSidecarIndex(discovered)
+	s.loadOwnedArtifacts(ctx)
 
 	// Collapse multi-rendition media to a single canonical file (spec §8.6.5)
 	// before ingestion so chunks/embeddings are not duplicated across renditions.
@@ -2560,6 +2573,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		// still retired. Retiring costs nothing to undo: both covered outputs are
 		// backed by an on-disk derivation cache.
 		s.reconcileDocumentOutputs(ctx, doc.RelPath)
+		// §8.6.14: an unchanged document already has every transcript this run
+		// would produce, so write-back runs here too. That is what lets an operator
+		// enable it on an already-indexed corpus and have the files appear without
+		// a reindex; under if_missing it is a stat per artifact on a steady state.
+		s.emitSubtitles(ctx, doc)
 		s.creditIndexed(indexedPending)
 		s.markActiveSkipped()
 		return nil
@@ -2614,6 +2632,12 @@ func (s *Service) settleProcessedDocument(
 	// recordAssetOutputs reads the representation types after processDocument
 	// returns.
 	s.reconcileDocumentOutputs(ctx, doc.RelPath)
+	// §8.6.14 subtitle write-back runs once every transcript representation of
+	// the document for this run has committed (single-pass; under two-phase the
+	// transcription pass is a no-op here and the derivation pass emits). It is
+	// per-document and non-fatal, and precedes the done marker so a crash between
+	// the two simply re-runs an idempotent step next time.
+	s.emitSubtitles(ctx, *doc)
 	// Stamp the withheld #402 done marker now that the
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and
@@ -2837,19 +2861,12 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	// reset at processDocument entry (deriveDocument is reached only from there),
 	// so a translation rejected in this derivation pass is counted once and cannot
 	// leak its dedup state into the next asset without a redundant reset here.
-	// No translation configured, or the multimodal "replace" mode that stands in
-	// for STT→text (so no transcript exists to translate): nothing to derive. This
-	// matches the single-pass gates so the corpus-wide output is identical.
-	if !s.translationConfigured() {
-		s.markActiveSkipped()
-		return nil
-	}
-
 	docType := ClassifyDocType(f.RelPath)
 	// Audio AND video carry model-derived transcripts (issue #495): a video's
 	// source transcript was produced from its extracted audio track in the
 	// transcription pass, so its translation is derived here exactly like audio.
-	if !isSidecarMediaType(docType) || s.transcriber == nil {
+	// Non-media assets have nothing to derive and nothing to write back.
+	if !isSidecarMediaType(docType) {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -2859,33 +2876,54 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 		return fmt.Errorf("get existing document: %w", err)
 	}
 	// A document the transcription pass did not record as a healthy media asset has
-	// no source transcript to translate; skip it.
+	// no source transcript to translate or to write back; skip it.
 	if isNotFoundError(err) || doc.Status != "ok" {
 		s.markActiveSkipped()
 		return nil
 	}
 	s.recordContentHash(doc.ContentHash)
 
+	derived := s.deriveDocumentTranslations(ctx, f, doc)
+	// §8.6.14: the derivation pass is the point where every transcript of the
+	// document for this run exists (source from the transcription pass,
+	// translations just above), so this is where write-back runs under two-phase.
+	// Observably the same files single-pass writes, in a different order.
+	s.emitSubtitles(ctx, doc)
+	if !derived {
+		s.markActiveSkipped()
+	}
+	return nil
+}
+
+// deriveDocumentTranslations runs the derivation pass's translation step for one
+// media document and reports whether translation work ran at all. It mirrors
+// the gating of the single-pass translation step exactly so the final set of
+// representations is observably identical: translation applies only to a
+// model-derived (STT) transcript of a media document, and only when translation
+// is configured. A provider failure is a non-fatal per-asset outcome recorded on
+// the manifest (TRANSLATE_FAILED, §8.6.11/§14.4); the source transcript stays
+// searchable, so documents.status is untouched.
+func (s *Service) deriveDocumentTranslations(ctx context.Context, f DiscoveredFile, doc model.Document) bool {
+	// No translation configured, or the multimodal "replace" mode that stands in
+	// for STT→text (so no transcript exists to translate): nothing to derive. This
+	// matches the single-pass gates so the corpus-wide output is identical.
+	if !s.translationConfigured() || s.transcriber == nil {
+		return false
+	}
 	content, err := s.readDocumentContent(ctx, f.RelPath)
 	if err != nil {
 		// A read failure in the derivation pass must not fail the run: the source
 		// transcript already exists. Record skipped and move on.
 		s.getLogger().Printf("two-phase derivation: read %s: %v (skipping translation)", f.RelPath, err)
-		s.markActiveSkipped()
-		return nil
+		return false
 	}
-
 	if err := s.deriveTranscriptTranslations(ctx, doc, content); err != nil {
 		s.getLogger().Printf("two-phase derivation translation skipped for %s: %v", f.RelPath, err)
 		s.addErrors(1)
-		// §8.6.11/§14.4: record the canonical translation-failure code
-		// (TRANSLATE_FAILED for a provider failure) on the derivation-pass manifest
-		// record; the source transcript (persisted in the transcription pass) stays
-		// searchable, so documents.status is untouched. No-op with no batch run.
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return nil
+	return true
 }
 
 // deriveTranscriptTranslations recomputes each selected track's source transcript

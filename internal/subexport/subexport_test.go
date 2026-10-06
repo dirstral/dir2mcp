@@ -1,4 +1,4 @@
-package cli
+package subexport_test
 
 import (
 	"reflect"
@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -21,7 +22,7 @@ func TestBuildCuesForSegmentationUsesWordTimings(t *testing.T) {
 			{T: 10000, D: 400, W: "Later."},
 		}},
 	}}
-	cues := buildCuesForSegmentation(chunks, "broadcast", false)
+	cues := subexport.BuildCuesForSegmentation(chunks, "broadcast", false)
 	if len(cues) != 2 {
 		t.Fatalf("word-timed path should split at the 10 s pause into 2 cues, got %d: %+v", len(cues), cues)
 	}
@@ -37,7 +38,7 @@ func TestBuildCuesForSegmentationReflowsWhenNoWordTimings(t *testing.T) {
 		Text: "We have submitted a formal request to the ministry today.",
 		Span: model.Span{Kind: "time", StartMS: 0, EndMS: 6000}, // no Words
 	}}
-	cues := buildCuesForSegmentation(chunks, "broadcast", false)
+	cues := subexport.BuildCuesForSegmentation(chunks, "broadcast", false)
 	if len(cues) == 0 {
 		t.Fatal("expected reflowed cues, got none")
 	}
@@ -82,7 +83,7 @@ func TestBuildCuesForSegmentationTranslationAlwaysReflows(t *testing.T) {
 	if native == nil {
 		t.Fatal("expected BuildBroadcastCues to honor the (fabricated) word timings")
 	}
-	got := buildCuesForSegmentation(chunks, "broadcast", true)
+	got := subexport.BuildCuesForSegmentation(chunks, "broadcast", true)
 	if reflect.DeepEqual(got, native) {
 		t.Fatal("translation must not reuse the fabricated word-timed segmentation")
 	}
@@ -91,12 +92,12 @@ func TestBuildCuesForSegmentationTranslationAlwaysReflows(t *testing.T) {
 	}
 }
 
-// TestTranscriptRepIsTranslation pins the meta_json classification, including the
+// TestRepIsTranslation pins the meta_json classification, including the
 // fail-closed rule: an empty meta or a native rep (no "source" key) is NOT a
 // translation, an explicit source=="translation" is, and non-empty-but-unparseable
 // meta is treated AS a translation so a corrupt rep cannot route fabricated
 // per-word timings into the broadcast path.
-func TestTranscriptRepIsTranslation(t *testing.T) {
+func TestRepIsTranslation(t *testing.T) {
 	cases := []struct {
 		name string
 		meta string
@@ -113,9 +114,22 @@ func TestTranscriptRepIsTranslation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := transcriptRepIsTranslation(tc.meta); got != tc.want {
-				t.Fatalf("transcriptRepIsTranslation(%q) = %v, want %v", tc.meta, got, tc.want)
+			if got := subexport.RepIsTranslation(tc.meta); got != tc.want {
+				t.Fatalf("RepIsTranslation(%q) = %v, want %v", tc.meta, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRepIsSidecar pins the authored-sidecar classification used by write-back
+// (SPEC §8.6.14) to tell a transcript it may re-render from one a human wrote.
+func TestRepIsSidecar(t *testing.T) {
+	if !subexport.RepIsSidecar(`{"source":"sidecar","language":"en"}`) {
+		t.Fatal("source=sidecar must classify as sidecar")
+	}
+	for _, meta := range []string{"", `{"source":"translation"}`, `{"language":"ru"}`, `{"source":"sidec`} {
+		if subexport.RepIsSidecar(meta) {
+			t.Fatalf("%q must not classify as sidecar", meta)
+		}
 	}
 }

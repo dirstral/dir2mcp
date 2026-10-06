@@ -1,0 +1,600 @@
+package ingest
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
+)
+
+// Subtitle write-back (SPEC §8.6.14).
+//
+// Once a media document's transcript representations exist, the pipeline
+// renders the configured subtitle formats and writes them beside the media (or
+// under media.subtitles.emit.dir). The bytes are exactly what `export` produces
+// for the same document, language and format: both go through
+// internal/subexport.
+//
+// The load-bearing rule is OWNERSHIP. A file this code wrote is an output, not
+// an authored sidecar. It is recorded (rel_path, size, mtime, content hash) in
+// the store, and sidecar discovery (§8.6.4) and the sidecar fingerprint (§7.6)
+// skip a recorded file whose size and mtime are unchanged. So writing a VTT
+// beside a video never changes the video's document identity, never re-ingests
+// the VTT as the video's "authored" transcript, never bypasses the §8.6.6 gate,
+// and never blocks a re-derivation when the STT or translation identity changes
+// (§8.6.7). A recorded file that HAS changed on disk — someone fixed a cue — is
+// no longer owned: the record is dropped and from then on it is an authored
+// sidecar with §8.6.4 precedence.
+
+// emittedArtifactStore is the optional store capability write-back needs: the
+// df-003 §5.6 ownership rows. The SQLite store implements it; a store that does
+// not disables write-back (logged once) rather than failing ingest.
+type emittedArtifactStore interface {
+	UpsertEmittedArtifact(ctx context.Context, a store.EmittedArtifact) error
+	DeleteEmittedArtifact(ctx context.Context, relPath string) error
+	EmittedArtifactsForDoc(ctx context.Context, docID int64) ([]store.EmittedArtifact, error)
+	AllEmittedArtifacts(ctx context.Context) ([]store.EmittedArtifact, error)
+}
+
+// manifestErrSubtitleWriteFailed (§14.4) classifies a §8.6.14 artifact that
+// could not be written. Non-fatal: the transcript stays indexed.
+const manifestErrSubtitleWriteFailed = "SUBTITLE_WRITE_FAILED"
+
+// emitFileMode is the mode of a written subtitle file before the umask. These
+// files are for players and editors, so unlike the state directory they are
+// world-readable by default.
+const emitFileMode = 0o644
+
+// ownedArtifact is the in-memory projection of one df-003 §5.6 row.
+type ownedArtifact struct {
+	DocID         int64
+	Format        string
+	Lang          string
+	SizeBytes     int64
+	MTimeUnix     int64
+	ContentSHA256 string
+}
+
+// sidecarStat is what the scan-built sidecar index records per file: the two
+// cheap stat fields the §8.6.4 mtime gate and the §8.6.14 ownership test need.
+type sidecarStat struct {
+	MTimeUnix int64
+	SizeBytes int64
+}
+
+// emitEnabled reports whether write-back is configured on.
+func (s *Service) emitEnabled() bool {
+	return s != nil && s.cfg.MediaSubtitlesEmitEnabled
+}
+
+// loadOwnedArtifacts replaces the in-memory ownership index with the store's
+// rows. Called once per scan, after discovery, so every sidecar lookup in the
+// scan sees the same ownership picture. A store without the capability leaves
+// the index empty, which is correct: nothing is owned.
+func (s *Service) loadOwnedArtifacts(ctx context.Context) {
+	if !s.emitEnabled() {
+		return
+	}
+	as, ok := s.store.(emittedArtifactStore)
+	if !ok {
+		return
+	}
+	rows, err := as.AllEmittedArtifacts(ctx)
+	if err != nil {
+		s.getLogger().Printf("subtitle write-back: load owned artifacts: %v (treating none as owned this scan)", err)
+		rows = nil
+	}
+	idx := make(map[string]ownedArtifact, len(rows))
+	for _, r := range rows {
+		idx[r.RelPath] = ownedArtifact{DocID: r.DocID, Format: r.Format, Lang: r.Lang,
+			SizeBytes: r.SizeBytes, MTimeUnix: r.MTimeUnix, ContentSHA256: r.ContentSHA256}
+	}
+	s.ownedMu.Lock()
+	s.ownedArtifacts = idx
+	s.ownedLoaded = true
+	s.ownedMu.Unlock()
+}
+
+// ensureOwnedLoaded loads the ownership index on first use so a standalone
+// call (outside Run) still honors ownership.
+func (s *Service) ensureOwnedLoaded(ctx context.Context) {
+	s.ownedMu.RLock()
+	loaded := s.ownedLoaded
+	s.ownedMu.RUnlock()
+	if !loaded {
+		s.loadOwnedArtifacts(ctx)
+	}
+}
+
+// lookupOwned returns the ownership record for relPath, if any. The map is
+// read under the lock: the scan loop and the filesystem watcher may consult it
+// while a write-back adds to it.
+func (s *Service) lookupOwned(ctx context.Context, relPath string) (ownedArtifact, bool) {
+	s.ensureOwnedLoaded(ctx)
+	s.ownedMu.RLock()
+	defer s.ownedMu.RUnlock()
+	rec, ok := s.ownedArtifacts[relPath]
+	return rec, ok
+}
+
+// rememberOwned records a freshly written artifact in the in-memory index.
+func (s *Service) rememberOwned(a store.EmittedArtifact) {
+	s.ownedMu.Lock()
+	defer s.ownedMu.Unlock()
+	if s.ownedArtifacts == nil {
+		s.ownedArtifacts = make(map[string]ownedArtifact)
+	}
+	s.ownedArtifacts[a.RelPath] = ownedArtifact{DocID: a.DocID, Format: a.Format, Lang: a.Lang,
+		SizeBytes: a.SizeBytes, MTimeUnix: a.MTimeUnix, ContentSHA256: a.ContentSHA256}
+}
+
+// forgetOwned drops an artifact from the index and the store: the file changed
+// on disk, so it is authored now.
+func (s *Service) forgetOwned(ctx context.Context, relPath string) {
+	s.ownedMu.Lock()
+	delete(s.ownedArtifacts, relPath)
+	s.ownedMu.Unlock()
+	if as, ok := s.store.(emittedArtifactStore); ok {
+		if err := as.DeleteEmittedArtifact(ctx, relPath); err != nil {
+			s.getLogger().Printf("subtitle write-back: drop ownership of %s: %v", relPath, err)
+		}
+	}
+}
+
+// isOwnedSidecar reports whether relPath is a subtitle file this pipeline wrote
+// and that is unchanged since (size and mtime match the record). It is the
+// §8.6.14 exclusion applied by sidecar discovery. A recorded file whose stat no
+// longer matches has been edited: it stops being owned here and now, and the
+// caller treats it as an authored sidecar.
+func (s *Service) isOwnedSidecar(ctx context.Context, relPath string, st sidecarStat) bool {
+	if !s.emitEnabled() {
+		return false
+	}
+	rec, ok := s.lookupOwned(ctx, relPath)
+	if !ok {
+		return false
+	}
+	if rec.MTimeUnix == st.MTimeUnix && rec.SizeBytes == st.SizeBytes {
+		return true
+	}
+	s.getLogger().Printf("subtitle write-back: %s changed on disk since it was written; it is an authored sidecar from now on", relPath)
+	s.forgetOwned(ctx, relPath)
+	return false
+}
+
+// subtitleRenderer builds the shared renderer once per service. A compile
+// failure is a configuration problem the loader should have caught; it is
+// logged once and disables write-back rather than failing every document.
+func (s *Service) subtitleRenderer() (*subexport.Renderer, bool) {
+	s.emitRendererOnce.Do(func() {
+		r, err := subexport.NewRenderer(s.cfg)
+		if err != nil {
+			s.getLogger().Printf("subtitle write-back disabled: %v", err)
+			return
+		}
+		s.emitRenderer = &r
+	})
+	return s.emitRenderer, s.emitRenderer != nil
+}
+
+// emitSubtitles is the §8.6.14 entry point, called once per media document
+// after ALL of its transcript representations for the run are persisted: at the
+// end of single-pass processing (including the unchanged-document path, so
+// enabling write-back on an already-indexed corpus fills in the files), and at
+// the end of the two-phase derivation pass. The transcription pass writes
+// nothing: its translations do not exist yet. Every failure here is per-document
+// and non-fatal.
+func (s *Service) emitSubtitles(ctx context.Context, doc model.Document) {
+	if !s.emitEnabled() || s.activePass == passTranscription {
+		return
+	}
+	if doc.DocID <= 0 || doc.Status != "ok" || !isSidecarMediaType(doc.DocType) {
+		return
+	}
+	ts, okTS := s.store.(subexport.Store)
+	as, okAS := s.store.(emittedArtifactStore)
+	if !okTS || !okAS {
+		s.emitWarnOnce.Do(func() {
+			s.getLogger().Printf("subtitle write-back disabled: store %T cannot read transcripts or record artifacts", s.store)
+		})
+		return
+	}
+	if !s.emitTargetWritable() {
+		return
+	}
+	renderer, ok := s.subtitleRenderer()
+	if !ok {
+		return
+	}
+	reps, err := ts.TranscriptRepresentations(ctx, doc.RelPath)
+	if err != nil || len(reps) == 0 {
+		return
+	}
+
+	plan := emitPlan{
+		doc:       doc,
+		stem:      s.emitStem(doc.RelPath),
+		langs:     s.emitLanguages(reps),
+		bound:     s.boundSidecars(ctx, doc.RelPath),
+		owned:     s.ownedForDoc(ctx, doc.DocID),
+		primary:   s.primaryTranscriptLanguage(reps),
+		secondary: s.emitSecondaryLanguage(reps),
+	}
+	for _, format := range sortedCopy(s.cfg.MediaSubtitlesEmitFormats) {
+		if format == "ttml" {
+			s.emitTTML(ctx, ts, as, renderer, plan)
+			continue
+		}
+		for _, lang := range plan.langs {
+			s.emitTimed(ctx, ts, as, renderer, plan, format, lang)
+		}
+	}
+}
+
+// emitPlan is the per-document input to the per-artifact writers.
+type emitPlan struct {
+	doc  model.Document
+	stem string
+	// langs are the transcript languages to write VTT/SRT for, sorted.
+	langs []string
+	// bound is the set of UNOWNED sidecars already bound to the document, keyed
+	// by boundKey(ext, lang); "ttml" is additionally present when any TTML binds.
+	bound map[string]struct{}
+	// owned are this document's recorded artifacts keyed by rel_path.
+	owned map[string]ownedArtifact
+	// primary/secondary are the TTML languages: the source transcript and the
+	// first configured translation target the document has (empty = none).
+	primary, secondary string
+}
+
+// emitTargetWritable reports whether there is a filesystem to write into: the
+// corpus itself for a local/NFS source, or an explicit output root otherwise.
+// The loader already rejects an s3 source with no dir; this is the runtime
+// guard for a non-local CorpusFS injected another way.
+func (s *Service) emitTargetWritable() bool {
+	if strings.TrimSpace(s.cfg.MediaSubtitlesEmitDir) != "" {
+		return true
+	}
+	if _, local := s.corpusFS().(*corpusfs.LocalFS); local {
+		return true
+	}
+	s.emitWarnOnce.Do(func() {
+		s.getLogger().Printf("subtitle write-back disabled: the corpus source has no writable filesystem; set media.subtitles.emit.dir")
+	})
+	return false
+}
+
+// emitStem returns the filename stem written beside the media: the media's own
+// stem, or, when renditions are grouped (§8.6.5), the group stem with rendition
+// markers stripped — so one set of files serves every rendition and binds back
+// under §8.6.4's normalized-base pass. Case is preserved (the grouping KEY is
+// lower-cased, a filename must not be).
+func (s *Service) emitStem(relPath string) string {
+	base := path.Base(relPath)
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	if !s.mediaVariantsGrouped() || !isMediaVariantFile(relPath) {
+		return stem
+	}
+	if g := stripRenditionMarkers(stem); g != "" {
+		return g
+	}
+	return stem
+}
+
+// stripRenditionMarkers removes every rendition marker from a filename stem,
+// preserving case. It is normalizeVariantName's stem rule without the
+// lower-casing, because the result names a file rather than keying a group.
+func stripRenditionMarkers(stem string) string {
+	prev := ""
+	for stem != prev {
+		prev = stem
+		stem = renditionMarkerPattern.ReplaceAllString(stem, "$1")
+	}
+	return strings.Trim(stem, "._-")
+}
+
+// emitLanguages lists the transcript languages to write VTT/SRT for: every
+// language the document has a transcript in, restricted by
+// media.subtitles.emit.languages when set, sorted for deterministic emission.
+// An untagged transcript contributes "" (written in the undifferentiated
+// `<stem>.<ext>` shape).
+func (s *Service) emitLanguages(reps []store.TranscriptRepresentation) []string {
+	allow := map[string]struct{}{}
+	for _, l := range s.cfg.MediaSubtitlesEmitLanguages {
+		allow[strings.ToLower(strings.TrimSpace(l))] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, rep := range reps {
+		lang := strings.ToLower(subexport.RepLanguage(rep.MetaJSON))
+		if _, dup := seen[lang]; dup {
+			continue
+		}
+		if len(allow) > 0 {
+			if _, ok := allow[lang]; !ok {
+				continue
+			}
+		}
+		seen[lang] = struct{}{}
+		out = append(out, lang)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// primaryTranscriptLanguage returns the TTML primary language: the document's
+// source (non-translation) transcript. When several non-translation transcripts
+// exist — an archive whose source AND translated subtitles were both authored
+// sidecars carries no translation provenance — the pinned STT language
+// (media.stt / SetTranscriptLanguage) decides, so a `ru` corpus with authored
+// `.ru.vtt` and `.en.vtt` still packages Russian as primary. Falls back to the
+// first representation's language when every transcript is a translation.
+func (s *Service) primaryTranscriptLanguage(reps []store.TranscriptRepresentation) string {
+	pinned := strings.ToLower(strings.TrimSpace(s.transcriptLanguage))
+	first := ""
+	for _, rep := range reps {
+		if subexport.RepIsTranslation(rep.MetaJSON) {
+			continue
+		}
+		lang := subexport.RepLanguage(rep.MetaJSON)
+		if pinned != "" && strings.ToLower(lang) == pinned {
+			return lang
+		}
+		if first == "" {
+			first = lang
+		}
+	}
+	if first != "" {
+		return first
+	}
+	if len(reps) > 0 {
+		return subexport.RepLanguage(reps[0].MetaJSON)
+	}
+	return ""
+}
+
+// emitSecondaryLanguage returns the TTML secondary language: the first
+// configured translation target (media.translate.target_langs, as resolved onto
+// the service) the document actually has a transcript for, excluding the
+// primary. Empty means monolingual TTML.
+func (s *Service) emitSecondaryLanguage(reps []store.TranscriptRepresentation) string {
+	primary := strings.ToLower(s.primaryTranscriptLanguage(reps))
+	have := map[string]struct{}{}
+	for _, rep := range reps {
+		have[strings.ToLower(subexport.RepLanguage(rep.MetaJSON))] = struct{}{}
+	}
+	for _, target := range s.translateTargetLangs {
+		t := strings.ToLower(strings.TrimSpace(target))
+		if t == "" || t == primary {
+			continue
+		}
+		if _, ok := have[t]; ok {
+			return t
+		}
+	}
+	return ""
+}
+
+// boundSidecars returns the UNOWNED sidecars currently bound to the media
+// document (findSidecars already excludes owned files), keyed by extension and
+// language, plus a bare "ttml" key when any TTML binds. Under `if_missing` a
+// bound sidecar means the (format, language) is present and is not written.
+func (s *Service) boundSidecars(ctx context.Context, relPath string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, sc := range s.findSidecars(ctx, relPath) {
+		out[boundKey(sc.Ext, sc.Lang)] = struct{}{}
+		if sc.Ext == ".ttml" {
+			out["ttml"] = struct{}{}
+		}
+	}
+	return out
+}
+
+func boundKey(ext, lang string) string {
+	return strings.ToLower(ext) + "|" + strings.ToLower(strings.TrimSpace(lang))
+}
+
+// ownedForDoc returns a copy of the document's recorded artifacts keyed by
+// rel_path, taken under the lock.
+func (s *Service) ownedForDoc(ctx context.Context, docID int64) map[string]ownedArtifact {
+	s.ensureOwnedLoaded(ctx)
+	s.ownedMu.RLock()
+	defer s.ownedMu.RUnlock()
+	out := map[string]ownedArtifact{}
+	for relPath, rec := range s.ownedArtifacts {
+		if rec.DocID == docID {
+			out[relPath] = rec
+		}
+	}
+	return out
+}
+
+// emitRelPath is the corpus-relative path of an artifact: the media's directory,
+// the (group) stem, the §8.6.4 language token when present, and the extension.
+func emitRelPath(doc model.Document, stem, lang, ext string) string {
+	name := stem
+	if lang != "" {
+		name += "." + lang
+	}
+	name += ext
+	dir := path.Dir(doc.RelPath)
+	if dir == "." || dir == "" {
+		return name
+	}
+	return dir + "/" + name
+}
+
+// emitAbsPath maps a corpus-relative artifact path to the filesystem path it is
+// written to: inside the corpus root by default, else mirrored under
+// media.subtitles.emit.dir.
+func (s *Service) emitAbsPath(relOut string) string {
+	root := strings.TrimSpace(s.cfg.MediaSubtitlesEmitDir)
+	if root == "" {
+		root = s.cfg.RootDir
+	}
+	return filepath.Join(root, filepath.FromSlash(relOut))
+}
+
+// emitTimed writes one VTT/SRT for one language, unless an unowned sidecar of
+// that format and language already binds to the document.
+func (s *Service) emitTimed(ctx context.Context, ts subexport.Store, as emittedArtifactStore, r *subexport.Renderer, plan emitPlan, format, lang string) {
+	ext := "." + format
+	if _, present := plan.bound[boundKey(ext, lang)]; present {
+		return
+	}
+	rendered, err := r.RenderTimed(ctx, ts, plan.doc.RelPath, lang, format)
+	if err != nil {
+		if !errors.Is(err, subexport.ErrNoCues) {
+			s.getLogger().Printf("subtitle write-back: render %s %s for %s: %v", format, lang, plan.doc.RelPath, err)
+		}
+		return
+	}
+	relOut := emitRelPath(plan.doc, plan.stem, lang, ext)
+	s.writeArtifact(ctx, as, plan, relOut, format, lang, []byte(rendered))
+}
+
+// emitTTML writes the document's (bilingual) TTML unless any unowned TTML
+// already binds to it.
+func (s *Service) emitTTML(ctx context.Context, ts subexport.Store, as emittedArtifactStore, r *subexport.Renderer, plan emitPlan) {
+	if _, present := plan.bound["ttml"]; present {
+		return
+	}
+	rendered, _, err := r.RenderTTML(ctx, ts, plan.doc.RelPath, plan.primary, plan.secondary)
+	if err != nil {
+		if !errors.Is(err, subexport.ErrNoCues) {
+			s.getLogger().Printf("subtitle write-back: render ttml for %s: %v", plan.doc.RelPath, err)
+		}
+		return
+	}
+	relOut := emitRelPath(plan.doc, plan.stem, "", ".ttml")
+	s.writeArtifact(ctx, as, plan, relOut, "ttml", "", []byte(rendered))
+}
+
+// writeArtifact applies the overwrite policy and, when a write is due, writes
+// the bytes atomically, records ownership, and labels the manifest output. It
+// never writes over a file this pipeline did not write.
+func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, plan emitPlan, relOut, format, lang string, data []byte) {
+	abs := s.emitAbsPath(relOut)
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+
+	rec, owned := plan.owned[relOut]
+	_, statErr := os.Stat(abs)
+	exists := statErr == nil
+	switch {
+	case owned && exists && s.cfg.MediaSubtitlesEmitPolicy != "refresh":
+		return // present and ours; if_missing leaves it
+	case owned && exists && rec.ContentSHA256 == sha:
+		return // refresh: nothing changed
+	case !owned && exists:
+		// A file at the target name that did not bind as a sidecar (excluded by
+		// path_excludes, or a shape §8.6.4 refuses). Not ours: never overwrite.
+		s.getLogger().Printf("subtitle write-back: %s exists and was not written by dir2mcp; leaving it untouched", relOut)
+		return
+	}
+
+	if err := writeSubtitleFileAtomic(abs, data); err != nil {
+		s.getLogger().Printf("subtitle write-back: write %s: %v", relOut, redactPathError(err))
+		s.addErrors(1)
+		s.markActiveErrored(manifestErrSubtitleWriteFailed, manifestErrSubtitleWriteFailed+": subtitle write-back failed for "+relOut)
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		s.getLogger().Printf("subtitle write-back: stat written %s: %v", relOut, err)
+		return
+	}
+	artifact := store.EmittedArtifact{
+		RelPath: relOut, DocID: plan.doc.DocID, Format: format, Lang: lang,
+		SizeBytes: info.Size(), MTimeUnix: info.ModTime().Unix(), ContentSHA256: sha,
+		EmittedUnix: time.Now().Unix(),
+	}
+	if err := as.UpsertEmittedArtifact(ctx, artifact); err != nil {
+		// The file is on disk but unrecorded: the next scan would read it as an
+		// authored sidecar. Remove it so the run stays consistent and retries.
+		_ = os.Remove(abs)
+		s.getLogger().Printf("subtitle write-back: record %s: %v (file removed; will retry next run)", relOut, err)
+		s.addErrors(1)
+		s.markActiveErrored(manifestErrSubtitleWriteFailed, manifestErrSubtitleWriteFailed+": could not record subtitle artifact for "+relOut)
+		return
+	}
+	s.rememberOwned(artifact)
+	s.activeOutcome.addOutput(emitOutputLabel(format, lang))
+}
+
+// emitOutputLabel is the manifest `outputs` tag for an artifact: `<format>:<lang>`,
+// or the bare format for a TTML or an untagged transcript.
+func emitOutputLabel(format, lang string) string {
+	if lang == "" {
+		return format
+	}
+	return format + ":" + lang
+}
+
+// writeSubtitleFileAtomic writes data to path via a sibling temporary file and
+// rename, so a reader never sees a partial file and a crash mid-write cannot
+// truncate an existing one. The directory is created if needed. The file lands
+// at emitFileMode (before umask): subtitles are for players, not secrets.
+func writeSubtitleFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".dir2mcp-subtitle-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	fail := func(err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, emitFileMode); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// redactPathError keeps an OS error's kind without echoing the absolute
+// filesystem path it carries (the log already names the corpus-relative path).
+func redactPathError(err error) string {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return fmt.Sprintf("%s: %v", pe.Op, pe.Err)
+	}
+	return err.Error()
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
