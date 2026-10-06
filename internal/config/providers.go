@@ -515,8 +515,12 @@ func parseMediaSTTLanguageProviders(raw []byte) (map[string]string, map[string][
 	all := make(map[string][]string, len(in))
 	for lang, names := range in {
 		key := provider.PrimarySubtag(lang)
-		if key == "" {
-			continue
+		// SPEC §8.2.4: a key that can never match a resolved language ("persian",
+		// "fa_IR", "") is a configuration error, not a route that silently never
+		// fires. A BCP-47 primary language subtag is 2 to 8 ASCII letters.
+		if !validLanguageSubtag(key) {
+			return nil, nil, fmt.Errorf(
+				"CONFIG_INVALID: media.stt.language_providers key %q is not a BCP-47 language tag (the primary subtag must be 2 to 8 ASCII letters, e.g. fa or pt-BR)", lang)
 		}
 		clean := make([]string, 0, len(names))
 		for _, n := range names {
@@ -534,6 +538,22 @@ func parseMediaSTTLanguageProviders(raw []byte) (map[string]string, map[string][
 		first[key] = clean[0]
 	}
 	return first, all, nil
+}
+
+// validLanguageSubtag reports whether key is a well-formed BCP-47 primary
+// language subtag: 2 to 8 ASCII letters (RFC 5646 §2.2.1). It is a shape check
+// only; no language list ships, so no registry lookup is made.
+func validLanguageSubtag(key string) bool {
+	if len(key) < 2 || len(key) > 8 {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 func parseProvidersDoc(raw []byte) (providersDoc, error) {

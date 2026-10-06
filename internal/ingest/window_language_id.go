@@ -54,6 +54,12 @@ func (s *Service) SetLanguageIdentifier(tr model.Transcriber, name string) {
 	s.identifier = &routedSTT{stt: tr, route: name}
 }
 
+// SetRouteErrorFallback overrides the resolved media.stt.on_route_error policy,
+// for tests that exercise the §8.2.4 fallback without a full config.
+func (s *Service) SetRouteErrorFallback(fallback bool) {
+	s.routeErrorFallback = fallback
+}
+
 // AddRouteCandidate appends a candidate to a language's route list, for tests
 // that exercise §8.2.3 fall-through without live profiles.
 func (s *Service) AddRouteCandidate(lang string, tr model.Transcriber, route string, coverage []string) {

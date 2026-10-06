@@ -123,6 +123,8 @@ type covLang struct {
 	LanguageConfidence *float64 `json:"language_confidence"`
 	Route              string   `json:"route"`
 	Covered            bool     `json:"covered"`
+	// FallbackFrom is the §8.2.4 route fallback record (dir2mcp #1059).
+	FallbackFrom string `json:"fallback_from"`
 }
 
 // covRefused is one coverage.refused entry.

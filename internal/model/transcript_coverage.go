@@ -102,6 +102,11 @@ type CoverageLanguage struct {
 	// Covered is false when the route's declared stt_languages omit Language
 	// (the §8.2.1 floor tripped under warn); true otherwise.
 	Covered bool `json:"covered"`
+	// FallbackFrom names the route candidate that failed with a transport or
+	// provider error before the default profile (Route) decoded the range under
+	// media.stt.on_route_error: default (SPEC §8.2.4). Absent otherwise. It is
+	// part of the coalescing key, so a fallen-back stretch is its own entry.
+	FallbackFrom string `json:"fallback_from,omitempty"`
 }
 
 // RefusedRange is one stretch of the recording that was not decoded by

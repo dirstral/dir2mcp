@@ -179,8 +179,18 @@ type transcriptMeta struct {
 	LanguageScope  string `json:"language_scope,omitempty"`
 	LanguageRoutes string `json:"language_routes,omitempty"`
 	// LanguageIdentifier names the §8.2.3 identifier profile that resolved the
-	// window languages, when one was bound (SPEC §8.2.3).
+	// window languages, when one was bound (SPEC §8.2.3). Under item scope it
+	// is recorded whenever an identifier is bound (SPEC §8.2.4).
 	LanguageIdentifier string `json:"language_identifier,omitempty"`
+	// Route names the STT provider profile that decoded an item-scoped
+	// transcript when the §8.2.4 identifier resolved its language: the
+	// language_providers candidate, or the default profile when no route
+	// matched. RouteFallbackFrom names the candidate that failed before the
+	// default profile decoded the item under media.stt.on_route_error: default.
+	// Both are absent under window scope (coverage.languages carries the route
+	// per range) and on a transcript the identifier gave no signal for.
+	Route             string `json:"route,omitempty"`
+	RouteFallbackFrom string `json:"route_fallback_from,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json
