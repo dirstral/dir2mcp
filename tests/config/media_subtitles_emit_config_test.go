@@ -166,3 +166,29 @@ media_subtitles_emit_policy: if_missing
 		t.Fatalf("flat keys not loaded: enabled=%v formats=%v policy=%q", cfg.MediaSubtitlesEmitEnabled, cfg.MediaSubtitlesEmitFormats, cfg.MediaSubtitlesEmitPolicy)
 	}
 }
+
+// TestMediaSubtitlesEmit_DirMustBeOutsideCorpus pins SPEC §8.6.14: a non-empty
+// output root inside the corpus (or equal to it) is CONFIG_INVALID when
+// write-back is enabled, because it would place subtitles beside other media;
+// a sibling or unrelated directory is accepted.
+func TestMediaSubtitlesEmit_DirMustBeOutsideCorpus(t *testing.T) {
+	root := t.TempDir()
+	for _, bad := range []string{root, filepath.Join(root, "subs"), filepath.Join(root, "a", "..", "b")} {
+		cfg := config.Default()
+		cfg.RootDir = root
+		cfg.MediaSubtitlesEmitEnabled = true
+		cfg.MediaSubtitlesEmitDir = bad
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "outside the corpus root") {
+			t.Fatalf("dir %q inside corpus must be rejected, got %v", bad, err)
+		}
+	}
+	for _, ok := range []string{t.TempDir(), root + "-subs"} {
+		cfg := config.Default()
+		cfg.RootDir = root
+		cfg.MediaSubtitlesEmitEnabled = true
+		cfg.MediaSubtitlesEmitDir = ok
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("dir %q outside corpus must validate, got %v", ok, err)
+		}
+	}
+}

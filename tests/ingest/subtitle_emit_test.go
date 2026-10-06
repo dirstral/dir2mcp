@@ -646,3 +646,50 @@ func TestSubtitleEmit_DeletedOwnedFileIsRecreatedAndRowRefreshed(t *testing.T) {
 		t.Fatalf("ownership row must describe the recreated file: before=%d after=%d disk=%d", before.MTimeUnix, after.MTimeUnix, info.ModTime().Unix())
 	}
 }
+
+// TestSubtitleEmit_RowsAreScopedToTheirOutputRoot pins SPEC §8.6.14: an
+// ownership row applies only under the output root it was written under. After
+// a run with `dir` set, switching to beside-the-media must not treat an
+// in-corpus file that shares the rel_path as owned — here an authored one.
+func TestSubtitleEmit_RowsAreScopedToTheirOutputRoot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	outRoot := t.TempDir()
+	h := newEmitHarness(t, func(cfg *config.Config) {
+		cfg.MediaSubtitlesEmitDir = outRoot
+		cfg.MediaSubtitlesEmitFormats = []string{"vtt"}
+	})
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	row := emitRows(t, h.store)["audio/one.de.vtt"]
+	if row.OutputRoot != filepath.Clean(outRoot) {
+		t.Fatalf("row must record its output root, got %q", row.OutputRoot)
+	}
+
+	// An authored file lands in the corpus at the same rel_path, then dir is
+	// switched off. The old row must not claim it.
+	authored := "WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhuman\n"
+	inCorpus := filepath.Join(h.root, "audio", "one.de.vtt")
+	mustWriteFile(t, inCorpus, []byte(authored))
+	h.cfg.MediaSubtitlesEmitDir = ""
+	svc2, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc2.Run(ctx); err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	if readFile(t, inCorpus) != authored {
+		t.Fatalf("authored in-corpus file was overwritten")
+	}
+	reps, _ := h.store.TranscriptRepresentations(ctx, "audio/one.mp3")
+	sawSidecar := false
+	for _, rep := range reps {
+		if subexport.RepIsSidecar(rep.MetaJSON) {
+			sawSidecar = true
+		}
+	}
+	if !sawSidecar {
+		t.Fatalf("the authored file must bind as a sidecar; a stale row from another root claimed it")
+	}
+}

@@ -5774,7 +5774,30 @@ func (c *Config) validateMediaSubtitlesEmit() error {
 		return errors.New("CONFIG_INVALID: media.subtitles.emit.dir is required when source.kind is s3: " +
 			"an object store has no filesystem to write beside the media (SPEC §8.6.14)")
 	}
+	if c.MediaSubtitlesEmitDir != "" && emitDirInsideCorpus(c.MediaSubtitlesEmitDir, c.RootDir) {
+		return errors.New("CONFIG_INVALID: media.subtitles.emit.dir must resolve outside the corpus root: " +
+			"an output root inside the corpus would place subtitles beside other media (SPEC §8.6.14)")
+	}
 	return nil
+}
+
+// emitDirInsideCorpus reports whether dir resolves to the corpus root or a path
+// below it. Both are made absolute and cleaned first; when either cannot be
+// resolved the check fails open (false), leaving the decision to the write path.
+func emitDirInsideCorpus(dir, root string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	absDir, err1 := filepath.Abs(dir)
+	absRoot, err2 := filepath.Abs(root)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absRoot, absDir)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // normalizeSubtitleEmitFormats lower-cases, trims and dedupes the write-back

@@ -669,7 +669,9 @@ overwritten**: under `if_missing` an existing sidecar of that format and
 language simply counts as present, and under `refresh` only owned files whose
 render changed are rewritten (so a re-derived transcript reaches disk). Files
 written under a separate `dir` are outputs only; discovery never looks there, so
-they neither bind as sidecars nor need excluding.
+they neither bind as sidecars nor need excluding. That root must lie outside the
+corpus, and each ownership record remembers the root it was written under, so
+changing `dir` later never lets an old record claim an in-corpus file.
 
 Each write is atomic. A failed write is a non-fatal per-document outcome,
 recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)

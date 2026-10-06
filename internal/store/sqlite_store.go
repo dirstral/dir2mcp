@@ -912,6 +912,7 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS emitted_artifacts (
   rel_path TEXT PRIMARY KEY,
   doc_id INTEGER NOT NULL,
+  output_root TEXT NOT NULL DEFAULT '',
   format TEXT NOT NULL,
   lang TEXT NOT NULL DEFAULT '',
   size_bytes INTEGER NOT NULL DEFAULT 0,

@@ -100,8 +100,16 @@ func (s *Service) loadOwnedArtifacts(ctx context.Context) {
 		s.getLogger().Printf("subtitle write-back: load owned artifacts: %v (treating none as owned this scan)", err)
 		rows = nil
 	}
+	// A row applies only under the output root it was written under (SPEC
+	// §8.6.14): after `dir` changes, rows from the previous root neither exclude
+	// nor describe any file, so a stale row can never mis-own an in-corpus file
+	// that shares its corpus-relative path.
+	root := s.emitOutputRoot()
 	idx := make(map[string]ownedArtifact, len(rows))
 	for _, r := range rows {
+		if r.OutputRoot != root {
+			continue
+		}
 		idx[r.RelPath] = ownedArtifact{DocID: r.DocID, Format: r.Format, Lang: r.Lang,
 			SizeBytes: r.SizeBytes, MTimeUnix: r.MTimeUnix, ContentSHA256: r.ContentSHA256}
 	}
@@ -441,11 +449,21 @@ func emitRelPath(doc model.Document, stem, lang, ext string) string {
 	return dir + "/" + name
 }
 
+// emitOutputRoot is the normalized media.subtitles.emit.dir recorded on every
+// ownership row: "" for beside-the-media, else the cleaned configured path.
+func (s *Service) emitOutputRoot() string {
+	root := strings.TrimSpace(s.cfg.MediaSubtitlesEmitDir)
+	if root == "" {
+		return ""
+	}
+	return filepath.Clean(root)
+}
+
 // emitAbsPath maps a corpus-relative artifact path to the filesystem path it is
 // written to: inside the corpus root by default, else mirrored under
 // media.subtitles.emit.dir.
 func (s *Service) emitAbsPath(relOut string) string {
-	root := strings.TrimSpace(s.cfg.MediaSubtitlesEmitDir)
+	root := s.emitOutputRoot()
 	if root == "" {
 		root = s.cfg.RootDir
 	}
@@ -509,7 +527,7 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 		return
 	}
 	artifact := store.EmittedArtifact{
-		RelPath: relOut, DocID: plan.doc.DocID, Format: format, Lang: lang,
+		RelPath: relOut, DocID: plan.doc.DocID, OutputRoot: s.emitOutputRoot(), Format: format, Lang: lang,
 		SizeBytes: info.Size(), MTimeUnix: info.ModTime().Unix(), ContentSHA256: sha,
 		EmittedUnix: time.Now().Unix(),
 	}

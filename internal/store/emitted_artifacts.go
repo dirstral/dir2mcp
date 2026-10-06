@@ -15,6 +15,11 @@ type EmittedArtifact struct {
 	RelPath string
 	// DocID is the media document the artifact was derived from.
 	DocID int64
+	// OutputRoot is the media.subtitles.emit.dir the file was written under, ""
+	// for beside-the-media. A row applies only under the same root, so a later
+	// change of dir cannot make a stale row mis-own an in-corpus file that shares
+	// its rel_path (SPEC §8.6.14).
+	OutputRoot string
 	// Format is vtt | srt | ttml.
 	Format string
 	// Lang is the transcript language written; empty for a TTML, which carries
@@ -54,17 +59,18 @@ func (s *SQLiteStore) UpsertEmittedArtifact(ctx context.Context, a EmittedArtifa
 	defer s.ReleaseDB()
 
 	_, err = db.ExecContext(ctx, `
-INSERT INTO emitted_artifacts (rel_path, doc_id, format, lang, size_bytes, mtime_unix, content_sha256, emitted_unix)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO emitted_artifacts (rel_path, doc_id, output_root, format, lang, size_bytes, mtime_unix, content_sha256, emitted_unix)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(rel_path) DO UPDATE SET
   doc_id = excluded.doc_id,
+  output_root = excluded.output_root,
   format = excluded.format,
   lang = excluded.lang,
   size_bytes = excluded.size_bytes,
   mtime_unix = excluded.mtime_unix,
   content_sha256 = excluded.content_sha256,
   emitted_unix = excluded.emitted_unix`,
-		relPath, a.DocID, format, strings.TrimSpace(a.Lang), a.SizeBytes, a.MTimeUnix, a.ContentSHA256, a.EmittedUnix)
+		relPath, a.DocID, strings.TrimSpace(a.OutputRoot), format, strings.TrimSpace(a.Lang), a.SizeBytes, a.MTimeUnix, a.ContentSHA256, a.EmittedUnix)
 	return err
 }
 
@@ -108,7 +114,7 @@ func (s *SQLiteStore) queryEmittedArtifacts(ctx context.Context, where string, a
 	defer s.ReleaseDB()
 
 	rows, err := db.QueryContext(ctx, `
-SELECT rel_path, doc_id, format, lang, size_bytes, mtime_unix, content_sha256, emitted_unix
+SELECT rel_path, doc_id, output_root, format, lang, size_bytes, mtime_unix, content_sha256, emitted_unix
 FROM emitted_artifacts `+where+` ORDER BY rel_path`, args...)
 	if err != nil {
 		return nil, err
@@ -118,7 +124,7 @@ FROM emitted_artifacts `+where+` ORDER BY rel_path`, args...)
 	out := []EmittedArtifact{}
 	for rows.Next() {
 		var a EmittedArtifact
-		if err := rows.Scan(&a.RelPath, &a.DocID, &a.Format, &a.Lang, &a.SizeBytes, &a.MTimeUnix, &a.ContentSHA256, &a.EmittedUnix); err != nil {
+		if err := rows.Scan(&a.RelPath, &a.DocID, &a.OutputRoot, &a.Format, &a.Lang, &a.SizeBytes, &a.MTimeUnix, &a.ContentSHA256, &a.EmittedUnix); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
