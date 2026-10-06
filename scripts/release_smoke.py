@@ -124,6 +124,9 @@ _ABSTAIN_OPENING_CHARS = 300
 _SOURCE_WORDS = r"(?:context|documents?|passages?|sources?|corpus|materials?|texts?|excerpts?)"
 _MODEL_ABSTAIN_RES = (
     re.compile(r"\b(?:no|not any|isn't any|is not any) (?:relevant |specific )?information\b"),
+    re.compile(r"\b(?:not enough|insufficient) (?:relevant |specific )?information\b"),
+    re.compile(r"\b(?:do not|don't|does not|doesn't|did not|didn't) have "
+               r"(?:enough|sufficient|any|the) (?:relevant |specific )?information\b"),
     re.compile(_SOURCE_WORDS + r"\b[^.]{0,40}?\b(?:does|do|did)(?: not|n't) "
                r"(?:contain|provide|include|mention|specify|address|cover)\b"),
     re.compile(r"\b(?:cannot|can't|can not|unable to) (?:answer|determine|find)\b"),
@@ -164,6 +167,44 @@ def ask_verdict(sc):
     if why:
         return False, f"{detail}, abstained: {why}"
     return True, detail
+
+
+_LIST_PAGE_SIZE = 500
+_LIST_MAX_PAGES = 20
+
+
+def list_all(call, args, validate):
+    """Return one list_files result that holds every page of the listing.
+
+    list_files sorts by rel_path and does not filter on status, so skipped
+    PDFs on the first page can hide an extracted PDF on a later page. call
+    takes the tool arguments and returns a tool result; validate takes a
+    result and returns False for a schema-nonconforming one. Returns the first
+    error result as is, or None when a page fails the schema. Reads at most
+    _LIST_MAX_PAGES pages."""
+    first = call({**args, "limit": _LIST_PAGE_SIZE, "offset": 0})
+    if first.get("isError"):
+        return first
+    if not validate(first):
+        return None
+    listing = dict(first.get("structuredContent") or {})
+    files = list(listing.get("files") or [])
+    total = listing.get("total") or len(files)
+    for page_no in range(1, _LIST_MAX_PAGES):
+        offset = page_no * _LIST_PAGE_SIZE
+        if offset >= total:
+            break
+        page = call({**args, "limit": _LIST_PAGE_SIZE, "offset": offset})
+        if page.get("isError"):
+            return page
+        if not validate(page):
+            return None
+        rows = (page.get("structuredContent") or {}).get("files") or []
+        if not rows:
+            break
+        files.extend(rows)
+    listing["files"] = files
+    return {**first, "structuredContent": listing}
 
 
 def open_file_verdict(list_result, open_page, max_probe=12):
@@ -481,10 +522,11 @@ def run_checks(client, questions):
     # `*` does not cross `/` (canonical glob dialect), so "*.pdf" saw only PDFs at
     # the corpus root and failed a corpus that keeps them in a subfolder.
     # "**/" also matches zero directories, so root-level PDFs still match.
-    # The limit is wider than the probe count (12) so a corpus with many
-    # skipped PDFs still offers extracted ones to probe.
-    lf = client.call("dir2mcp_list_files", {"glob": "**/*.pdf", "limit": 100})
-    if not lf.get("isError") and not validate("dir2mcp_list_files", lf):
+    # Read every page: skipped PDFs on the first page can hide an extracted
+    # one later in the listing.
+    lf = list_all(lambda a: client.call("dir2mcp_list_files", a), {"glob": "**/*.pdf"},
+                  lambda r: validate("dir2mcp_list_files", r))
+    if lf is None:
         return fails, skips  # schema failed; the files list can't be trusted to drive open_file
 
     def open_page(rp):
