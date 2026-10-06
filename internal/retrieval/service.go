@@ -293,6 +293,13 @@ type Service struct {
 	// for a path clears its tombstone, because a re-created file is a new live
 	// document (issue #687).
 	tombstonedRelPaths map[string]struct{}
+	// evidenceThreshold is the operator's rag.evidence_threshold choice and
+	// evidenceBaseline the null-baseline cache behind the calibrated cosine
+	// threshold (SPEC §9.4.3, spec 0.76.0; evidence_baseline.go). The zero
+	// settings keep the fixed floors. evidenceThreshold is guarded by metaMu;
+	// the cache carries its own mutex.
+	evidenceThreshold evidenceThresholdSettings
+	evidenceBaseline  evidenceBaselineCache
 	// metadataRegistered latches true on the first SetChunkMetadata* call. It is
 	// the explicit "the in-memory metadata is authoritative" state that payload
 	// fallback consults. The previous predicate was len(chunkByLabel) > 0, which
@@ -1664,8 +1671,10 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	hits = s.pruneTombstonedHits(ctx, hits)
 	// Name each hit's absolute evidence verdict (SPEC §9.4.3, spec 0.55.0) as
 	// the last step, so the verdict describes the hit the caller actually
-	// receives, after every re-scoring stage above.
-	stampEvidenceVerdicts(hits)
+	// receives, after every re-scoring stage above. The thresholds are the ones
+	// in effect now (calibrated or pinned, spec 0.76.0); under auto the first
+	// call computes the null baseline.
+	stampEvidenceVerdicts(s.effectiveEvidenceThresholds(ctx), hits)
 	return hits, nil
 }
 
@@ -2095,10 +2104,14 @@ func relativeToBest(hits []model.SearchHit) ([]float64, bool) {
 // citations array. It is a normal result, not an error (§14), and the rejected
 // candidates stay in `hits` so a caller can inspect what was turned down.
 func (s *Service) abstainOnWeakEvidence(ctx context.Context, question string, hits []model.SearchHit) (model.AskResult, bool) {
-	if len(hits) == 0 || classifyEvidence(hits) != evidenceInsufficient {
+	if len(hits) == 0 {
 		return model.AskResult{}, false
 	}
-	s.logf("ask: abstaining, none of %d eligible hits cleared the absolute evidence threshold", len(hits))
+	thresholds := s.effectiveEvidenceThresholds(ctx)
+	if classifyEvidence(thresholds, hits) != evidenceInsufficient {
+		return model.AskResult{}, false
+	}
+	s.logf("ask: abstaining, none of %d eligible hits cleared the absolute evidence threshold (cosine %.3f)", len(hits), thresholds[evidenceScaleCosine])
 	indexingComplete, _ := s.IndexingComplete(ctx)
 	return model.AskResult{
 		Question:         question,
@@ -2240,7 +2253,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 				// failed is the answer, so the eligible set's verdict is
 				// reported honestly rather than downgraded to look like a
 				// weak-evidence abstention.
-				EvidenceVerdict: aggregateEvidenceVerdict(hits),
+				EvidenceVerdict: aggregateEvidenceVerdict(s.effectiveEvidenceThresholds(ctx), hits),
 				// The answer-level verdict (SPEC §9.4.4, spec 0.57.0). A caller
 				// keying only on EvidenceVerdict would read "sufficient" here
 				// and take the refusal for an answer; this is what tells the two
@@ -2272,7 +2285,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		// uses, so this can never disagree with the abstention decision above. An
 		// empty set carries no absolute signal, so it aggregates to "unknown",
 		// which also covers the adaptive skip-retrieval path where no lookup ran.
-		EvidenceVerdict: aggregateEvidenceVerdict(hits),
+		EvidenceVerdict: aggregateEvidenceVerdict(s.effectiveEvidenceThresholds(ctx), hits),
 		// The answer-level verdict (SPEC §9.4.4, spec 0.57.0). Every path that
 		// reaches here published an answer, so this is "verified" only when the
 		// check actually ran and passed; the paths that never verify (feature

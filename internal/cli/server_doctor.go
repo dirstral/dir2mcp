@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/netutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -80,6 +81,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		indexingFailureCheck(ctx, a, cfg),
 		daemonLivenessCheck(cfg),
 		stuckPendingCheck(ctx, a, cfg),
+		evidenceThresholdCheck(cfg),
 	)
 	return a.renderDoctorReport(global, checks)
 }
@@ -882,6 +884,42 @@ func stuckPendingCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 	}
 	return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
 		"%d chunk(s) stuck pending embedding and no daemon is running to drain them; start it with `dir2mcp up` (or run `dir2mcp reindex`)", stats.EmbeddedPending)}
+}
+
+// evidenceThresholdCheck reports the absolute evidence threshold in effect on
+// the cosine scale and the null baseline behind it (SPEC §9.4.3, spec 0.76.0;
+// #1081). It reads the baseline the daemon cached in the state dir, so it
+// touches no provider and needs no daemon. The row is informational: a
+// baseline that is not computed yet is the normal state before the first
+// indexing run ends, and the service applies the fixed floor meanwhile, which
+// is the shipped behaviour of before.
+func evidenceThresholdCheck(cfg config.Config) doctorCheck {
+	const name = "evidence_threshold"
+	auto, pinned := cfg.EvidenceThreshold()
+	baseline, err := retrieval.LoadEvidenceBaseline(cfg.StateDir)
+	if err != nil {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"cached null baseline unreadable, the daemon recomputes it: %v", err)}
+	}
+	value, source := retrieval.EvidenceCosineThreshold(retrieval.EvidenceCosineFloor, baseline, auto, pinned)
+	var b strings.Builder
+	fmt.Fprintf(&b, "cosine threshold %.3f", value)
+	switch source {
+	case model.EvidenceThresholdSourceConfig:
+		b.WriteString(" pinned by rag.evidence_threshold")
+	case model.EvidenceThresholdSourceAuto:
+		b.WriteString(" from the null baseline p90")
+	default:
+		b.WriteString(" (fixed floor)")
+	}
+	if baseline != nil {
+		fmt.Fprintf(&b, "; null baseline over %d probes p50=%.3f p90=%.3f max=%.3f (%s, %d chunks)",
+			baseline.Probes, baseline.P50, baseline.P90, baseline.Max, baseline.EmbedModel, baseline.Chunks)
+	} else {
+		b.WriteString("; null baseline not computed yet: the daemon computes it when indexing stops or on the first ask")
+	}
+	fmt.Fprintf(&b, "; rerank %.2f", retrieval.EvidenceRerankFloor)
+	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: b.String()}
 }
 
 // egressCheck reports, per content-carrying capability (embed, chat, ocr,

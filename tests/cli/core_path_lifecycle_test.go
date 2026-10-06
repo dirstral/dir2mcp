@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -93,15 +95,42 @@ func newFakeOpenAIServer(t *testing.T) *fakeOpenAIServer {
 	return f
 }
 
-// fakeVector returns a deterministic, non-zero 8-dimension vector for s.
+// fakeVector returns a deterministic unit vector for s in which each word
+// adds a fixed signed pattern, so two texts that share words score a higher
+// cosine than two that do not. A hash of the WHOLE string gave every pair the
+// same random similarity, and the calibrated evidence guard (#1081) then
+// correctly refused the question: the shipped probe questions scored as high
+// against the corpus as the real question did. Shared words are the least an
+// embedder must reflect for an answerable question to clear the null baseline.
 func fakeVector(s string) []float64 {
-	sum := sha256.Sum256([]byte(s))
-	vec := make([]float64, 8)
+	const dim = 64
+	vec := make([]float64, dim)
+	for _, word := range fakeWords.FindAllString(strings.ToLower(s), -1) {
+		sum := sha256.Sum256([]byte(word))
+		for j := 0; j < 4; j++ {
+			sign := -1.0
+			if sum[8+j]%2 == 1 {
+				sign = 1.0
+			}
+			vec[int(sum[j])%dim] += sign
+		}
+	}
+	var norm float64
+	for _, v := range vec {
+		norm += v * v
+	}
+	if norm == 0 {
+		vec[0] = 1
+		return vec
+	}
+	norm = math.Sqrt(norm)
 	for i := range vec {
-		vec[i] = float64(sum[i]%97+1) / 100
+		vec[i] /= norm
 	}
 	return vec
 }
+
+var fakeWords = regexp.MustCompile(`[a-z0-9]+`)
 
 func writeCorePathCorpus(t *testing.T, root, baseURL string) {
 	t.Helper()

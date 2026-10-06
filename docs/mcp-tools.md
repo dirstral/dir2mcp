@@ -14,7 +14,7 @@
 | `dir2mcp_open_media_clip` | Extract the audio/video snippet for a media hit (time span) |
 | `dir2mcp_related` | Find chunks related to a chunk you already have |
 | `dir2mcp_list_files` | List indexed files with metadata |
-| `dir2mcp_stats` | Corpus statistics, including the extraction engine actually in use |
+| `dir2mcp_stats` | Corpus statistics, including the extraction engine actually in use and the `evidence` thresholds in effect with their null baseline (see [configuration](configuration.md#relevance-floor-and-insufficient-evidence-abstention)) |
 
 ### What a citation carries
 

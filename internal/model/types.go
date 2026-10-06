@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -1428,4 +1429,69 @@ func (s Stats) MarshalJSON() ([]byte, error) {
 		CorpusStatsFields: CorpusStatsFields(s.CorpusStats),
 	}
 	return json.Marshal(a)
+}
+
+// EvidenceBaseline is the null baseline of SPEC §9.4.3 (spec 0.76.0): the
+// distribution of the top cosine that each shipped probe question reached
+// against the indexed corpus. It is a property of the embedder and the corpus
+// together, which is what makes it comparable across embedding families where
+// one fixed cosine constant is not (issue #1081).
+//
+// The JSON names are the wire names of dir2mcp_stats.evidence.null_baseline
+// and of the state-dir cache file, so the two cannot drift.
+type EvidenceBaseline struct {
+	// Probes is the number of probe questions the statistics summarize.
+	Probes int `json:"probes"`
+	// ProbeSet identifies the shipped, versioned probe set. Two baselines are
+	// comparable only when it matches.
+	ProbeSet string `json:"probe_set"`
+	// P50, P90 and Max summarize the top cosine over the probes. P90 is the
+	// statistic the threshold rule applies; Max is reported, never applied.
+	P50 float64 `json:"p50"`
+	P90 float64 `json:"p90"`
+	Max float64 `json:"max"`
+	// Chunks is the indexed chunk count when the baseline was computed. A
+	// different count invalidates the cached baseline.
+	Chunks int `json:"chunks"`
+	// EmbedModel is the text embedding model the probes were embedded with.
+	EmbedModel string `json:"embed_model"`
+	// ComputedAt is the RFC 3339 time of the computation.
+	ComputedAt string `json:"computed_at,omitempty"`
+}
+
+// Sources of the cosine evidence threshold in effect (SPEC §15.6, evidence.
+// cosine_threshold_source).
+const (
+	// EvidenceThresholdSourceAuto: derived from the null baseline.
+	EvidenceThresholdSourceAuto = "auto"
+	// EvidenceThresholdSourceConfig: pinned by rag.evidence_threshold.
+	EvidenceThresholdSourceConfig = "config"
+	// EvidenceThresholdSourceFloor: the fixed value, because the baseline is
+	// unavailable or sits below it.
+	EvidenceThresholdSourceFloor = "floor"
+)
+
+// EvidenceReport is the dir2mcp_stats `evidence` object (SPEC §15.6, spec
+// 0.76.0): the absolute thresholds in effect and the null baseline they were
+// derived from, so a caller can reproduce an abstention from published numbers.
+type EvidenceReport struct {
+	// CosineThreshold is the abstention threshold in effect on the cosine scale.
+	CosineThreshold float64 `json:"cosine_threshold"`
+	// CosineThresholdSource is one of the EvidenceThresholdSource* names.
+	CosineThresholdSource string `json:"cosine_threshold_source"`
+	// RerankThreshold is the threshold in effect on the rerank scale.
+	RerankThreshold float64 `json:"rerank_threshold"`
+	// Baseline is nil until the null baseline has been computed.
+	Baseline *EvidenceBaseline `json:"null_baseline,omitempty"`
+}
+
+// EvidenceReporter is implemented by a retriever that can calibrate its
+// evidence threshold (SPEC §9.4.3). dir2mcp_stats declares and emits the
+// `evidence` object only while CalibratesEvidence reports true: a server that
+// does not calibrate omits the object and does not advertise it.
+type EvidenceReporter interface {
+	// CalibratesEvidence reports whether the calibrated rule or a pinned
+	// threshold is configured. It is cheap and never computes a baseline.
+	CalibratesEvidence() bool
+	EvidenceReport(ctx context.Context) EvidenceReport
 }

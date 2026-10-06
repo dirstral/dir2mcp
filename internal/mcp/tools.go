@@ -201,7 +201,7 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 			Name:         protocol.ToolNameStats,
 			Description:  "Status/progress/health for indexing and models.",
 			InputSchema:  statsInputSchema(),
-			OutputSchema: statsOutputSchema(),
+			OutputSchema: statsOutputSchema(s.calibratesEvidence()),
 			handler:      s.handleStatsTool,
 		},
 	}
@@ -470,6 +470,14 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	if reasons := skipReasonsForStats(retrievedStats.SkipSummary); len(reasons) > 0 {
 		structured["skip_reasons"] = reasons
 	}
+	// Optional additive `evidence` object (SPEC §9.4.3 and §15.6, spec 0.76.0,
+	// #1081): the absolute thresholds in effect and the null baseline behind
+	// them, so a caller can reproduce an abstention from published numbers.
+	// Emitted only by a retriever that calibrates; absence reads as "not
+	// reported", never as "no threshold".
+	if reporter, ok := s.retriever.(model.EvidenceReporter); ok && reporter.CalibratesEvidence() {
+		structured["evidence"] = evidenceForStats(reporter.EvidenceReport(ctx))
+	}
 
 	// No `sessions` block here on purpose (#850). See statsOutputSchema for the
 	// full reasoning: the transport session roster is not part of the §15.6
@@ -494,6 +502,72 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		},
 		StructuredContent: structured,
 	}, nil
+}
+
+// calibratesEvidence reports whether this server's retriever calibrates its
+// evidence threshold, which is when dir2mcp_stats declares and emits the
+// `evidence` object (SPEC §9.4.3: a calibrating server MUST emit it, and
+// MUST NOT emit a field its advertised schema does not declare).
+func (s *Server) calibratesEvidence() bool {
+	reporter, ok := s.retriever.(model.EvidenceReporter)
+	return ok && reporter.CalibratesEvidence()
+}
+
+// evidenceForStats renders the dir2mcp_stats `evidence` object from the
+// retriever's report. The baseline is included only once computed, with
+// exactly the stats.json field names.
+func evidenceForStats(report model.EvidenceReport) map[string]interface{} {
+	out := map[string]interface{}{
+		"cosine_threshold":        report.CosineThreshold,
+		"cosine_threshold_source": report.CosineThresholdSource,
+		"rerank_threshold":        report.RerankThreshold,
+	}
+	if b := report.Baseline; b != nil && b.Probes > 0 {
+		baseline := map[string]interface{}{
+			"probes":      b.Probes,
+			"probe_set":   b.ProbeSet,
+			"p50":         b.P50,
+			"p90":         b.P90,
+			"max":         b.Max,
+			"chunks":      b.Chunks,
+			"embed_model": b.EmbedModel,
+		}
+		if b.ComputedAt != "" {
+			baseline["computed_at"] = b.ComputedAt
+		}
+		out["null_baseline"] = baseline
+	}
+	return out
+}
+
+// statsEvidenceSchema is the dir2mcp_stats `evidence` object, with exactly the
+// stats.json field names of spec 0.76.0.
+func statsEvidenceSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"cosine_threshold":        map[string]interface{}{"type": "number", "minimum": 0, "maximum": 1},
+			"cosine_threshold_source": map[string]interface{}{"type": "string", "enum": []string{model.EvidenceThresholdSourceAuto, model.EvidenceThresholdSourceConfig, model.EvidenceThresholdSourceFloor}},
+			"rerank_threshold":        map[string]interface{}{"type": "number"},
+			"null_baseline": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"probes":      map[string]interface{}{"type": "integer", "minimum": 1},
+					"probe_set":   map[string]interface{}{"type": "string"},
+					"p50":         map[string]interface{}{"type": "number"},
+					"p90":         map[string]interface{}{"type": "number"},
+					"max":         map[string]interface{}{"type": "number"},
+					"chunks":      map[string]interface{}{"type": "integer", "minimum": 0},
+					"embed_model": map[string]interface{}{"type": "string"},
+					"computed_at": map[string]interface{}{"type": "string"},
+				},
+				"required": []string{"probes", "probe_set", "p50", "p90", "max", "chunks", "embed_model"},
+			},
+		},
+		"required": []string{"cosine_threshold", "cosine_threshold_source", "rerank_threshold"},
+	}
 }
 
 // resolvedStatsModels reports the models.* block of dir2mcp_stats: the provider
@@ -4906,8 +4980,8 @@ func statsInputSchema() map[string]interface{} {
 // only its own session, through headers. It defines no roster. On the stdio
 // transport a session id does not exist at all, so a required roster field
 // cannot mean anything for a stdio implementation.
-func statsOutputSchema() map[string]interface{} {
-	return map[string]interface{}{
+func statsOutputSchema(declareEvidence bool) map[string]interface{} {
+	schema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]interface{}{
@@ -5056,4 +5130,14 @@ func statsOutputSchema() map[string]interface{} {
 		},
 		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"},
 	}
+	if declareEvidence {
+		// Optional additive object (SPEC §9.4.3 and §15.6, spec 0.76.0, #1081):
+		// the thresholds in effect and the null baseline behind them. The output
+		// object closes with additionalProperties:false, so it is declared
+		// exactly when the retriever calibrates and emits it, and left out of
+		// the advertised contract otherwise.
+		schema["properties"].(map[string]interface{})["evidence"] = statsEvidenceSchema()
+	}
+	return schema
+
 }
