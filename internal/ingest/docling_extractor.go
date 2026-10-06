@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 )
 
@@ -44,16 +46,40 @@ const (
 	maxDoclingStderrBytes = 1 * 1024 * 1024
 )
 
-// doclingExtractTimeout bounds a single document's docling subprocess so one
-// pathological file can never wedge the whole indexer (issue #406). docling
-// streams tqdm/loguru progress for the lifetime of a slow extraction, so the
-// limit must sit comfortably above the slowest real document: large multi-
-// hundred-page legal PDFs (the corpus this protects) can take several minutes
-// on CPU-only hosts, so 15 minutes leaves generous headroom while still
-// guaranteeing forward progress. On expiry the document is marked failed
-// (retryable) instead of hanging indexing. It is a var (not a const) only so
-// tests can shorten it; production never reassigns it.
-var doclingExtractTimeout = 15 * time.Minute
+// doclingExtractTimeout is the default limit for a single document's docling
+// subprocess, so one pathological file can never wedge the whole indexer
+// (issue #406). It applies when the extractor has no configured limit; the
+// config key `ingest.docling.timeout_sec` (env DIR2MCP_DOCLING_TIMEOUT_SEC,
+// issue #1105) sets the limit for a run. On expiry the document is marked failed
+// (retryable) instead of hanging indexing, and the error names the document and
+// the limit. It is a var (not a const) only so tests can shorten it; production
+// never reassigns it.
+var doclingExtractTimeout = time.Duration(config.DefaultDoclingTimeoutSec) * time.Second
+
+// errDoclingTimeout is the context cause set when the per-document docling
+// limit expires. It tells this limit apart from a deadline on the caller's
+// context, so the error names the limit only when the limit applied. A
+// doclingTimeoutError unwraps to it.
+var errDoclingTimeout = errors.New("docling per-document time limit expired")
+
+// doclingTimeoutError is the error for a docling run that the per-document
+// limit stopped. It names the document and the limit, so an operator can find
+// the document and raise the limit (issue #1105).
+type doclingTimeoutError struct {
+	relPath string
+	limit   time.Duration
+}
+
+func (e *doclingTimeoutError) Error() string {
+	return fmt.Sprintf("docling timed out on %s after %s (limit set by ingest.docling.timeout_sec); raise the limit for large documents", e.relPath, e.limit)
+}
+
+// Unwrap lets errors.Is(err, errDoclingTimeout) identify a docling timeout.
+func (e *doclingTimeoutError) Unwrap() error { return errDoclingTimeout }
+
+// isDoclingTimeout reports whether err is a docling run that the per-document
+// limit stopped.
+func isDoclingTimeout(err error) bool { return errors.Is(err, errDoclingTimeout) }
 
 // doclingWaitDelay is a backstop after the context is cancelled (timeout or
 // shutdown): os/exec sends the kill signal, and if the child has not exited
@@ -91,6 +117,38 @@ func SanitizeDoclingEnv(env []string) []string {
 
 type doclingExtractor struct {
 	commandTemplate string
+	// timeout is the limit for one docling call on one document. Zero means
+	// doclingExtractTimeout.
+	timeout time.Duration
+}
+
+// limit returns the time limit for one docling call on one document.
+func (d *doclingExtractor) limit() time.Duration {
+	if d.timeout > 0 {
+		return d.timeout
+	}
+	return doclingExtractTimeout
+}
+
+// withLimit derives the per-document context from ctx. When the limit expires,
+// context.Cause of the returned context is errDoclingTimeout.
+func (d *doclingExtractor) withLimit(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, d.limit(), errDoclingTimeout)
+}
+
+// runError converts a failed docling run into the error recorded for the
+// document. When the per-document limit expired, the error names the document
+// and the limit so an operator can find the document and raise the limit
+// (issue #1105).
+func (d *doclingExtractor) runError(ctx context.Context, relPath string, runErr error, stderr *bytes.Buffer) error {
+	if errors.Is(context.Cause(ctx), errDoclingTimeout) {
+		return &doclingTimeoutError{relPath: relPath, limit: d.limit()}
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		msg = runErr.Error()
+	}
+	return fmt.Errorf("docling command failed: %s", msg)
 }
 
 // limitedBuffer caps how much it retains while still accepting every write.
@@ -131,9 +189,10 @@ func (w *limitedBuffer) Write(p []byte) (int, error) {
 func (w *limitedBuffer) Truncated() bool { return w.truncated }
 
 // NewDoclingExtractor returns a document extractor backed by a local docling
-// CLI invocation. If commandTemplate is blank, a default `docling` command is
-// used. The template may include `{input}` and `{output}`; when `{input}` is
-// omitted, input is appended.
+// CLI invocation, with the default per-document limit. It is
+// NewDoclingExtractorWithTimeout with a zero timeout. If commandTemplate is
+// blank, a default `docling` command is used. The template may include
+// `{input}` and `{output}`; when `{input}` is omitted, input is appended.
 //
 // A bare binary path (a single token, e.g. the dir2mcp-full wrapper's
 // DIR2MCP_DOCLING_COMMAND, which is just `…/docling-venv/bin/docling`) is
@@ -142,6 +201,14 @@ func (w *limitedBuffer) Truncated() bool { return w.truncated }
 // "empty output" and litters the corpus (issue #381). Expand it to the default
 // flags so docling writes structured JSON into the {output} temp dir we read back.
 func NewDoclingExtractor(commandTemplate string) *doclingExtractor {
+	return NewDoclingExtractorWithTimeout(commandTemplate, 0)
+}
+
+// NewDoclingExtractorWithTimeout is NewDoclingExtractor with a time limit for
+// one docling call on one document (config `ingest.docling.timeout_sec`, issue
+// #1105). A timeout of zero or less uses the default limit
+// (config.DefaultDoclingTimeoutSec).
+func NewDoclingExtractorWithTimeout(commandTemplate string, timeout time.Duration) *doclingExtractor {
 	tpl := strings.TrimSpace(commandTemplate)
 	switch {
 	case tpl == "":
@@ -149,7 +216,7 @@ func NewDoclingExtractor(commandTemplate string) *doclingExtractor {
 	case len(strings.Fields(tpl)) == 1:
 		tpl = tpl + " --to json --output " + doclingOutputPlaceholder + " {input}"
 	}
-	return &doclingExtractor{commandTemplate: tpl}
+	return &doclingExtractor{commandTemplate: tpl, timeout: timeout}
 }
 
 // StructuredExtraction is the result of structured docling extraction: the
@@ -196,16 +263,16 @@ func (d *doclingExtractor) run(ctx context.Context, relPath string, data []byte)
 	}
 
 	if strings.Contains(d.commandTemplate, doclingOutputPlaceholder) {
-		return d.runFileOutput(ctx, tmpPath)
+		return d.runFileOutput(ctx, relPath, tmpPath)
 	}
-	return d.runStdout(ctx, tmpPath)
+	return d.runStdout(ctx, relPath, tmpPath)
 }
 
 // runFileOutput runs docling with {output} pointed at a fresh temp directory and
 // returns the contents of the single file docling writes there (issue #376).
 // The output dir is isolated from the corpus so docling's artifacts can never be
 // re-ingested, and is removed when the call returns.
-func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) (string, error) {
+func (d *doclingExtractor) runFileOutput(ctx context.Context, relPath, inputPath string) (string, error) {
 	outDir, err := os.MkdirTemp("", "dir2mcp-docling-out-*")
 	if err != nil {
 		return "", fmt.Errorf("create docling output dir: %w", err)
@@ -216,7 +283,7 @@ func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) 
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, doclingExtractTimeout)
+	ctx, cancel := d.withLimit(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.WaitDelay = doclingWaitDelay
@@ -226,14 +293,7 @@ func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) 
 	var stderr bytes.Buffer
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("docling command timed out after %s", doclingExtractTimeout)
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", fmt.Errorf("docling command failed: %s", msg)
+		return "", d.runError(ctx, relPath, err, &stderr)
 	}
 
 	out, err := readDoclingOutputDir(outDir, inputPath, maxDoclingOutputBytes)
@@ -249,12 +309,12 @@ func (d *doclingExtractor) runFileOutput(ctx context.Context, inputPath string) 
 
 // runStdout is the legacy path for command templates without {output}: it reads
 // the extraction from the command's stdout (e.g. a custom `cat {input}` wrapper).
-func (d *doclingExtractor) runStdout(ctx context.Context, inputPath string) (string, error) {
+func (d *doclingExtractor) runStdout(ctx context.Context, relPath, inputPath string) (string, error) {
 	args, err := buildDoclingCommandArgs(d.commandTemplate, inputPath, "")
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, doclingExtractTimeout)
+	ctx, cancel := d.withLimit(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.WaitDelay = doclingWaitDelay
@@ -268,14 +328,7 @@ func (d *doclingExtractor) runStdout(ctx context.Context, inputPath string) (str
 	cmd.Stdout = stdoutBuf
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxDoclingStderrBytes}
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("docling command timed out after %s", doclingExtractTimeout)
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", fmt.Errorf("docling command failed: %s", msg)
+		return "", d.runError(ctx, relPath, err, &stderr)
 	}
 
 	// The buffer keeps draining past the cap (so the child never deadlocks on a
