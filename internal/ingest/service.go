@@ -396,11 +396,10 @@ type Service struct {
 	ocrCacheWrites     int
 	ocrCachePruneEvery int
 
-	// sidecarIndex maps every discovered file's rel_path to its mtime, built once
-	// per scan (setSidecarIndex). The transcript path uses it to detect subtitle
-	// sidecars next to a media file and to mtime-gate their ingestion (§8.6.4).
-	// Nil until a scan sets it; direct callers fall back to a one-shot walk.
-	sidecarIndex map[string]sidecarStat
+	// sidecarIndex holds every discovered subtitle file's stat, grouped by
+	// directory (sidecar.go buildSidecarIndex), built once per scan so sidecar
+	// binding is a per-directory lookup rather than a walk of the corpus.
+	sidecarIndex map[string]map[string]sidecarStat
 	sidecarMu    sync.RWMutex
 
 	// Subtitle write-back state (SPEC §8.6.14, emit.go). ownedArtifacts is the
