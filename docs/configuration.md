@@ -229,6 +229,7 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
 | `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
 | `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
+| `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `900`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
 | `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
 | _(Mistral endpoint)_ | — | The Mistral base URL is **not** configurable via an environment variable. To proxy Mistral or point at a private/custom endpoint, add a `providers:` entry with a `base_url` (see [Self-hosted / GPU-VPS provider endpoints](#self-hosted--gpu-vps-provider-endpoints-embed--ocr--stt)) |
@@ -416,6 +417,24 @@ The default stays `deep`, and no member changes meaning, because both come from 
 canonical SPEC §16.2 template. A real `deep` implementation needs a recursion bound, a
 byte budget for the expansion, and a defined outcome at the bound and on a cycle. The
 spec defines none of those today, so that decision belongs in `dirstral-spec` first.
+
+### docling time limit per document
+
+The docling CLI runs once for each document. Each run has a time limit, so one
+slow document cannot stop indexing. The default limit is 900 seconds (15
+minutes).
+
+```yaml
+ingest:
+  docling:
+    timeout_sec: 1800   # default: 900; must be greater than 0
+```
+
+- Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=1800`. The env value wins over the file.
+- A value of `0` or less stops startup with a config error. An env value that is not an integer is ignored, and startup shows a warning.
+- When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 15m0s (limit set by ingest.docling.timeout_sec)`.
+- Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of this type took about 13 minutes with docling on CPU. On a slower or busy host, set a higher limit.
+- The limit applies to the docling CLI only. `docling-serve` uses its own request limit.
 
 ### docling extraction over HTTP (docling-serve)
 
