@@ -1,4 +1,4 @@
-package subexport_test
+package tests
 
 import (
 	"reflect"

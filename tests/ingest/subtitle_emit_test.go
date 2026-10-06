@@ -531,3 +531,81 @@ func TestSubtitleEmit_OutputDirMirrorsCorpusTree(t *testing.T) {
 		t.Fatalf("output-root artifacts must be recorded by corpus-relative path")
 	}
 }
+
+// TestSubtitleEmit_OwnershipSurvivesDisablingWriteBack pins that ownership is a
+// property of the record, not of the feature flag: an operator who enables
+// write-back, scans, and then disables it must not find the files dir2mcp wrote
+// re-ingested as authored transcripts on the next scan.
+func TestSubtitleEmit_OwnershipSurvivesDisablingWriteBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newEmitHarness(t, nil)
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	doc1, _ := h.store.GetDocumentByPath(ctx, "audio/one.mp3")
+
+	h.cfg.MediaSubtitlesEmitEnabled = false
+	svc2, tr2 := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc2.Run(ctx); err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	doc2, _ := h.store.GetDocumentByPath(ctx, "audio/one.mp3")
+	if doc2.ContentHash != doc1.ContentHash || doc2.SidecarFingerprint != "" {
+		t.Fatalf("disabling write-back changed the document identity: hash %q -> %q, fingerprint %q", doc1.ContentHash, doc2.ContentHash, doc2.SidecarFingerprint)
+	}
+	if tr2.calls != 0 {
+		t.Fatalf("disabling write-back must not re-transcribe, got %d calls", tr2.calls)
+	}
+	reps, _ := h.store.TranscriptRepresentations(ctx, "audio/one.mp3")
+	for _, rep := range reps {
+		if subexport.RepIsSidecar(rep.MetaJSON) {
+			t.Fatalf("owned file became an authored transcript after write-back was disabled: %s", rep.MetaJSON)
+		}
+	}
+}
+
+// TestSubtitleEmit_RefreshNeverOverwritesSameStatEdit pins the hash check that
+// guards a rewrite: an edit that preserves the file's size AND mtime is invisible
+// to discovery's stat test, so under `refresh` the rewrite path must verify the
+// on-disk bytes against the recorded hash, treat the mismatch as an edit, drop
+// the record and leave the file alone.
+func TestSubtitleEmit_RefreshNeverOverwritesSameStatEdit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newEmitHarness(t, func(cfg *config.Config) {
+		cfg.MediaSubtitlesEmitPolicy = "refresh"
+		cfg.MediaSubtitlesEmitFormats = []string{"vtt"}
+	})
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	vttPath := filepath.Join(h.root, "audio", "one.de.vtt")
+	original := readFile(t, vttPath)
+	info, _ := os.Stat(vttPath)
+
+	// Same length, different bytes, and the mtime restored: a stat cannot tell.
+	edited := []byte(original)
+	edited[len(edited)-2] = 'X'
+	if err := os.WriteFile(vttPath, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(vttPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	svc2, _ := h.service(t, "[00:00] a completely new transcript\n[00:03] from a better model", "whisper-large-v4")
+	if err := svc2.Reindex(ctx); err != nil {
+		t.Fatalf("Reindex: %v", err)
+	}
+	if readFile(t, vttPath) != string(edited) {
+		t.Fatalf("refresh overwrote an edited file whose size and mtime matched the record")
+	}
+	if _, owned := emitRows(t, h.store)["audio/one.de.vtt"]; owned {
+		t.Fatalf("the edited file must no longer be recorded as owned")
+	}
+}

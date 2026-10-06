@@ -81,14 +81,17 @@ func (s *Service) emitEnabled() bool {
 
 // loadOwnedArtifacts replaces the in-memory ownership index with the store's
 // rows. Called once per scan, after discovery, so every sidecar lookup in the
-// scan sees the same ownership picture. A store without the capability leaves
-// the index empty, which is correct: nothing is owned.
+// scan sees the same ownership picture. It runs whether or not write-back is
+// currently enabled: ownership is a property of the record, not of the flag, so
+// an operator who enables write-back, runs a scan and then disables it does not
+// find the files it wrote re-ingested as authored transcripts. A store without
+// the capability leaves the index empty, which is correct: nothing is owned.
 func (s *Service) loadOwnedArtifacts(ctx context.Context) {
-	if !s.emitEnabled() {
-		return
-	}
 	as, ok := s.store.(emittedArtifactStore)
 	if !ok {
+		s.ownedMu.Lock()
+		s.ownedLoaded = true
+		s.ownedMu.Unlock()
 		return
 	}
 	rows, err := as.AllEmittedArtifacts(ctx)
@@ -155,13 +158,14 @@ func (s *Service) forgetOwned(ctx context.Context, relPath string) {
 
 // isOwnedSidecar reports whether relPath is a subtitle file this pipeline wrote
 // and that is unchanged since (size and mtime match the record). It is the
-// §8.6.14 exclusion applied by sidecar discovery. A recorded file whose stat no
-// longer matches has been edited: it stops being owned here and now, and the
-// caller treats it as an authored sidecar.
+// §8.6.14 exclusion applied by sidecar discovery, and it applies regardless of
+// whether write-back is currently enabled (see loadOwnedArtifacts). The test is
+// a stat, deliberately: discovery runs over every file on every scan and must
+// not read subtitle bytes; the content hash is verified where it matters, right
+// before a rewrite (writeArtifact). A recorded file whose stat no longer matches
+// has been edited: it stops being owned here and now, and the caller treats it
+// as an authored sidecar.
 func (s *Service) isOwnedSidecar(ctx context.Context, relPath string, st sidecarStat) bool {
-	if !s.emitEnabled() {
-		return false
-	}
 	rec, ok := s.lookupOwned(ctx, relPath)
 	if !ok {
 		return false
@@ -498,6 +502,11 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 		return // present and ours; if_missing leaves it
 	case owned && exists && rec.ContentSHA256 == sha:
 		return // refresh: nothing changed
+	case owned && exists && !s.ownedBytesIntact(ctx, abs, relOut, rec):
+		// refresh wanted to rewrite, but the bytes on disk are not the bytes we
+		// wrote: an edit that kept size and mtime. It is authored now; never
+		// overwrite it. The record is already dropped.
+		return
 	case !owned && exists:
 		// A file at the target name that did not bind as a sidecar (excluded by
 		// path_excludes, or a shape §8.6.4 refuses). Not ours: never overwrite.
@@ -532,6 +541,27 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	}
 	s.rememberOwned(artifact)
 	s.activeOutcome.addOutput(emitOutputLabel(format, lang))
+}
+
+// ownedBytesIntact verifies, immediately before a rewrite, that an owned file
+// still holds the bytes recorded for it (SPEC §8.6.14). Discovery's stat test
+// cannot see an edit that preserved size and mtime; this read can, and it runs
+// only here — once per rewrite, never per scan. On a mismatch the file becomes
+// authored (record dropped) and false is returned. A read failure is treated the
+// same way: when the bytes cannot be confirmed as ours, they are not rewritten.
+func (s *Service) ownedBytesIntact(ctx context.Context, abs, relOut string, rec ownedArtifact) bool {
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		s.getLogger().Printf("subtitle write-back: cannot verify %s before rewrite: %v; leaving it untouched", relOut, redactPathError(err))
+		return false
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) == rec.ContentSHA256 {
+		return true
+	}
+	s.getLogger().Printf("subtitle write-back: %s was edited since it was written (same size and mtime); it is an authored sidecar from now on and is not rewritten", relOut)
+	s.forgetOwned(ctx, relOut)
+	return false
 }
 
 // emitOutputLabel is the manifest `outputs` tag for an artifact: `<format>:<lang>`,

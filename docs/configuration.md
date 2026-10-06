@@ -657,12 +657,19 @@ recorded in the state database (path, size, mtime, content hash). While it is
 unchanged on disk it is **owned**: sidecar discovery skips it, so writing a VTT
 beside a video never changes the video's identity, never re-ingests the VTT as
 an "authored" transcript, never bypasses the quality gate, and never stops a
-better STT model from re-transcribing the video later. A written file someone
-**edits** stops being owned and becomes an authored sidecar from then on, with
-the usual precedence over STT. Files dir2mcp did not write are **never
+better STT model from re-transcribing the video later. Ownership belongs to the
+record, not to the setting: turning write-back off later does not turn the files
+it wrote into authored transcripts. A written file someone **edits** stops being
+owned and becomes an authored sidecar from then on, with the usual precedence
+over STT. Discovery decides that by size and mtime (a stat, since it runs over
+every file on every scan); before a `refresh` rewrite dir2mcp also checks the
+file's bytes against the recorded hash, so an edit that kept the same size and
+timestamp is never overwritten either. Files dir2mcp did not write are **never
 overwritten**: under `if_missing` an existing sidecar of that format and
 language simply counts as present, and under `refresh` only owned files whose
-render changed are rewritten (so a re-derived transcript reaches disk).
+render changed are rewritten (so a re-derived transcript reaches disk). Files
+written under a separate `dir` are outputs only; discovery never looks there, so
+they neither bind as sidecars nor need excluding.
 
 Each write is atomic. A failed write is a non-fatal per-document outcome,
 recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)
