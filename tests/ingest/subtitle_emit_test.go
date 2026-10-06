@@ -609,3 +609,40 @@ func TestSubtitleEmit_RefreshNeverOverwritesSameStatEdit(t *testing.T) {
 		t.Fatalf("the edited file must no longer be recorded as owned")
 	}
 }
+
+// TestSubtitleEmit_DeletedOwnedFileIsRecreatedAndRowRefreshed pins that an owned
+// file removed from disk is written again on the next scan (under if_missing
+// too: it is missing), and that its stale ownership row does not outlive the
+// deletion — the recreated file gets a fresh row matching the new stat.
+func TestSubtitleEmit_DeletedOwnedFileIsRecreatedAndRowRefreshed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newEmitHarness(t, func(cfg *config.Config) { cfg.MediaSubtitlesEmitFormats = []string{"vtt"} })
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	vttPath := filepath.Join(h.root, "audio", "one.de.vtt")
+	before := emitRows(t, h.store)["audio/one.de.vtt"]
+	if err := os.Remove(vttPath); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond) // a new mtime, at second resolution
+
+	svc2, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc2.Run(ctx); err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	if !fileExists(vttPath) {
+		t.Fatalf("deleted owned file must be written again")
+	}
+	after, ok := emitRows(t, h.store)["audio/one.de.vtt"]
+	if !ok {
+		t.Fatalf("recreated file must be recorded as owned")
+	}
+	info, _ := os.Stat(vttPath)
+	if after.MTimeUnix != info.ModTime().Unix() || after.MTimeUnix == before.MTimeUnix {
+		t.Fatalf("ownership row must describe the recreated file: before=%d after=%d disk=%d", before.MTimeUnix, after.MTimeUnix, info.ModTime().Unix())
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -493,27 +494,9 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	abs := s.emitAbsPath(relOut)
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
-
-	rec, owned := plan.owned[relOut]
-	_, statErr := os.Stat(abs)
-	exists := statErr == nil
-	switch {
-	case owned && exists && s.cfg.MediaSubtitlesEmitPolicy != "refresh":
-		return // present and ours; if_missing leaves it
-	case owned && exists && rec.ContentSHA256 == sha:
-		return // refresh: nothing changed
-	case owned && exists && !s.ownedBytesIntact(ctx, abs, relOut, rec):
-		// refresh wanted to rewrite, but the bytes on disk are not the bytes we
-		// wrote: an edit that kept size and mtime. It is authored now; never
-		// overwrite it. The record is already dropped.
-		return
-	case !owned && exists:
-		// A file at the target name that did not bind as a sidecar (excluded by
-		// path_excludes, or a shape §8.6.4 refuses). Not ours: never overwrite.
-		s.getLogger().Printf("subtitle write-back: %s exists and was not written by dir2mcp; leaving it untouched", relOut)
+	if !s.artifactWriteDue(ctx, plan, relOut, abs, sha) {
 		return
 	}
-
 	if err := writeSubtitleFileAtomic(abs, data); err != nil {
 		s.getLogger().Printf("subtitle write-back: write %s: %v", relOut, redactPathError(err))
 		s.addErrors(1)
@@ -541,6 +524,47 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	}
 	s.rememberOwned(artifact)
 	s.activeOutcome.addOutput(emitOutputLabel(format, lang))
+}
+
+// artifactWriteDue is the overwrite-policy decision for one artifact (SPEC
+// §8.6.14): it reports whether writeArtifact should put the rendered bytes
+// (hash sha) at abs. It never approves writing over a file this pipeline did not
+// write, and it keeps the ownership rows consistent with the disk on the way.
+func (s *Service) artifactWriteDue(ctx context.Context, plan emitPlan, relOut, abs, sha string) bool {
+	rec, owned := plan.owned[relOut]
+	_, statErr := os.Stat(abs)
+	exists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		// Neither present nor absent: a permission or I/O problem. Nothing can be
+		// confirmed about the target, so nothing is written over it.
+		s.getLogger().Printf("subtitle write-back: cannot stat %s: %v; skipping", relOut, redactPathError(statErr))
+		return false
+	}
+	if owned && !exists {
+		// The file we wrote is gone. Its row would otherwise outlive it and, if an
+		// authored file later landed on the same name with the same size and
+		// mtime, wrongly exclude that file from discovery. Drop the row now; the
+		// write records the recreated file afresh.
+		s.forgetOwned(ctx, relOut)
+		return true
+	}
+	switch {
+	case owned && s.cfg.MediaSubtitlesEmitPolicy != "refresh":
+		return false // present and ours; if_missing leaves it
+	case owned && rec.ContentSHA256 == sha:
+		return false // refresh: nothing changed
+	case owned:
+		// refresh wants to rewrite; only if the bytes on disk are still the bytes
+		// we wrote. An edit that kept size and mtime is authored now: never
+		// overwrite it (ownedBytesIntact drops the record).
+		return s.ownedBytesIntact(ctx, abs, relOut, rec)
+	case exists:
+		// A file at the target name that did not bind as a sidecar (excluded by
+		// path_excludes, or a shape §8.6.4 refuses). Not ours: never overwrite.
+		s.getLogger().Printf("subtitle write-back: %s exists and was not written by dir2mcp; leaving it untouched", relOut)
+		return false
+	}
+	return true
 }
 
 // ownedBytesIntact verifies, immediately before a rewrite, that an owned file
