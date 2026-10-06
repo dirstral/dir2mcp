@@ -848,6 +848,13 @@ Notes:
 - A file that **stops** being eligible is retired at once. If it grows past `ingest.max_file_mb` it keeps a visible `skipped` row with the reason, and its chunks leave retrieval. If it becomes gitignored it is tombstoned, exactly as a full rescan would tombstone it. An edit to a `.gitignore` file triggers a reconcile of the tree, because one rule can change the eligibility of many paths at once.
 - **The watcher needs a filesystem.** `source.kind: local` and `source.kind: nfs` are ordinary directory trees, so both use it. A remote corpus (`source.kind: s3`) has no filesystem to watch, so the watcher does not start for it. The index reconciles on a periodic rescan of the remote source instead, and `dir2mcp up` prints a warning at startup. `watch_debounce` and the `watch_overflows` stat apply only to the filesystem watcher; a remote corpus reports neither.
 - Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
+- **What a rescan reads.** A text document is confirmed by its content hash on
+  every scan (an in-place edit that keeps size and timestamp is still caught). A
+  local or NFS **media** file whose size and mtime match the recorded document is
+  skipped without being read (SPEC §7.8's cheap pre-check), and so is an S3 object
+  whose ETag and size match. On a large video archive this is the difference
+  between a rescan that stats files and one that reads terabytes; the first scan
+  still reads each selected rendition once.
 
 ### Gemini embeddings (`gemini-embedding-001`)
 
