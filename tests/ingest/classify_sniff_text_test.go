@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §7.3: classification is "extension + MIME sniff + binary heuristics".
@@ -59,10 +60,10 @@ func TestSniffTextDocType(t *testing.T) {
 // binary skip reprocesses it although its bytes did not change.
 func TestSniffedTextIsIndexedEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "tests", "clip_test.mjs"), "export function clip() { return 1 }\n")
 	writeFile(t, filepath.Join(root, ".gitignore"), "node_modules/\n")
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestSniffedTextIsIndexedEndToEnd(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.STTProvider = "off"
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))

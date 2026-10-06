@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func sampleJob(chunkID uint64) embedqueue.Job {
@@ -41,7 +42,7 @@ func brokerFactories() []brokerFactory {
 		{
 			name: "sqlite",
 			make: func(t *testing.T) embedqueue.Broker {
-				path := filepath.Join(t.TempDir(), "queue.db")
+				path := filepath.Join(testutil.TempDir(t), "queue.db")
 				b, err := embedqueue.NewSQLiteBroker(context.Background(), path, 3)
 				if err != nil {
 					t.Fatalf("NewSQLiteBroker: %v", err)
@@ -220,7 +221,7 @@ func TestBroker_ReclaimDeadLettersAfterMaxAttempts(t *testing.T) {
 // across a reopen (a coordinator restart does not lose the backlog).
 func TestSQLiteBroker_Durable(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "queue.db")
+	path := filepath.Join(testutil.TempDir(t), "queue.db")
 
 	b1, err := embedqueue.NewSQLiteBroker(ctx, path, 5)
 	if err != nil {
@@ -303,7 +304,7 @@ func TestBroker_EnqueueDedupsLiveJob(t *testing.T) {
 // current lease (SPEC §8.7.3).
 func TestSQLiteBroker_LeaseTokensUniqueAcrossInstances(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "queue.db")
+	path := filepath.Join(testutil.TempDir(t), "queue.db")
 	base := time.Unix(1_700_000_000, 0)
 
 	b1, err := embedqueue.NewSQLiteBroker(ctx, path, 5)

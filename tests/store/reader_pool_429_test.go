@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #429 F11: the store served every query through a single-connection pool, so a
@@ -21,7 +22,7 @@ import (
 
 func newTestStore(t *testing.T) *store.SQLiteStore {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.db"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestReadPool_PragmasApplyToEveryConnection(t *testing.T) {
 // alive after the store is closed.
 func TestReadPool_ClosedStoreClosesBothHandles(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.db"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.db"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init: %v", err)
 	}

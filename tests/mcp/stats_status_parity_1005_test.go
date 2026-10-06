@@ -17,6 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #1005: for ONE state dir at ONE moment, `dir2mcp status` and the
@@ -42,7 +43,7 @@ import (
 func seedParityCorpus(t *testing.T, embeddedOK, pending int) string {
 	t.Helper()
 	ctx := context.Background()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	stateDir := filepath.Join(tmp, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -269,7 +270,7 @@ func TestStatsIgnoresFallbackChunkZeros1005(t *testing.T) {
 // response stated two different corpora.
 func TestStatsTextAndStructuredAgree1005(t *testing.T) {
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 

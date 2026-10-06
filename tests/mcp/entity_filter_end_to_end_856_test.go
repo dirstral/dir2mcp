@@ -17,6 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The recognition entity/event filter END TO END (issue #856, dirstral-spec
@@ -104,7 +105,7 @@ func annotationCorpus(t *testing.T, st *store.SQLiteStore) map[string]uint64 {
 func entityFilterServer(t *testing.T) (*httptest.Server, config.Config, map[string]uint64) {
 	t.Helper()
 	ctx := context.Background()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {

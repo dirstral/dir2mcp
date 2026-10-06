@@ -13,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestDoclingExtractor_Extract_UsesConfiguredCommand(t *testing.T) {
@@ -215,7 +216,7 @@ func TestDoclingExtractor_Extract_BareBinaryExpandsToFileOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping POSIX-only command test on Windows")
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	fake := filepath.Join(dir, "docling")
 	// Expanded argv: <fake> --to json --output <outdir> <input>
 	// => $4 is the output dir, $5 is the input file. Write a file into $4 so the

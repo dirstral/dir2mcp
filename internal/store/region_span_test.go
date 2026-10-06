@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // decodeRegion round-trips the extra_json a region span flattens to so a test
@@ -138,7 +139,7 @@ func TestRegionSpanToRow_BBoxPageInvariant(t *testing.T) {
 // canonical INDEX_VERSION_MISMATCH code and retryable=false.
 func TestCheckIndexFormatVersion_MatchAndMismatch(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "meta.sqlite")
+	path := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 
 	// Fresh v1 store opens clean (no false positive).
 	st := NewSQLiteStore(path)

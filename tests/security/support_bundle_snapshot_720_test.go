@@ -17,6 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #720: the default `support-bundle` copied .dir2mcp.yaml.snapshot into the
@@ -46,7 +47,7 @@ const (
 // keyed by name plus the corpus root and state directory it used.
 func buildCredentialBundle(t *testing.T, extraArgs ...string) (entries map[string][]byte, rootDir, stateDir string) {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	rootDir = filepath.Join(tmp, "corpus-secret", "client-alpha")
 	if err := os.MkdirAll(rootDir, 0o700); err != nil {
 		t.Fatalf("mkdir corpus: %v", err)

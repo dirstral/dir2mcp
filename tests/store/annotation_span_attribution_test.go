@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // A recognition annotation's entity ids and `event` ride in the "time" span's
@@ -46,7 +47,7 @@ func annotationChunk(t *testing.T, st *store.SQLiteStore, relPath, repType strin
 
 func newAnnotationStore(t *testing.T) *store.SQLiteStore {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

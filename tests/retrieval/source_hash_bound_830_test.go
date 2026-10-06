@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests cover site 2 of #830: open_file's source-byte hash (hashSourceBytes),
@@ -140,7 +141,7 @@ func newBoundedHashService(t *testing.T, root, stateDir string, fsys corpusfs.Co
 // the refusal names the cap through the existing sentinel (which the MCP layer maps
 // to §14.4 FILE_TOO_LARGE) rather than a retryable INTERNAL_ERROR.
 func TestOpenFileSourceHash_BoundsTheReadOnAnUnsizedSource(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	fsys := &unsizedSourceFS{sizes: map[string]int64{"docs/huge.pdf": sourceHashTestCap * 16}}
 	svc := newBoundedHashService(t, root, filepath.Join(root, ".dir2mcp"), fsys, sourceHashTestCap)
 
@@ -161,7 +162,7 @@ func TestOpenFileSourceHash_BoundsTheReadOnAnUnsizedSource(t *testing.T) {
 // digest must still be ingest's, so the cached OCR text is FOUND. A bound that
 // stopped at the cap, or one that hashed a prefix, would miss the entry.
 func TestOpenFileSourceHash_AtTheCapHashesTheWholeFile(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	content := bytes.Repeat([]byte("x"), int(sourceHashTestCap))
@@ -194,7 +195,7 @@ func TestOpenFileSourceHash_AtTheCapHashesTheWholeFile(t *testing.T) {
 // service with no cap plumbed in reads under the shared default bound, not without
 // one.
 func TestOpenFileSourceHash_UnsetCapStillBoundsTheRead(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	defaultCap := corpusfs.DefaultMaxFileSizeBytes()
 	fsys := &unsizedSourceFS{sizes: map[string]int64{"docs/huge.pdf": defaultCap * 2}}
 

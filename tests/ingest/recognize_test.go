@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // fakeRecognizer is a canned model.Recognizer double (design 0004).
@@ -56,11 +57,11 @@ func recognizeTestResult() model.RecognizeResult {
 
 func TestRecognize_GeneratesRecognitionRepresentation(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "games", "game7.mp4"), "fake-video")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	rec := &fakeRecognizer{result: recognizeTestResult()}
 	svc.SetRecognizer(rec)
 
@@ -117,12 +118,12 @@ func assertRecognitionChunksAndSpans(t *testing.T, st *fakeIngestStore) {
 
 func TestRecognize_NoOpWithoutRecognizerOrForNonVideo(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 
 	// No recognizer bound (recognize.provider=off): video is a no-op.
 	doc := model.Document{DocID: 1, RelPath: "game7.mp4", DocType: "video"}
@@ -147,11 +148,11 @@ func TestRecognize_NoOpWithoutRecognizerOrForNonVideo(t *testing.T) {
 
 func TestRecognize_EmptyOrBlankAnnotationsPersistNothing(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	svc.SetRecognizer(&fakeRecognizer{result: model.RecognizeResult{
 		Name: "r", Version: "1",
 		Annotations: []model.RecognizedAnnotation{{StartMS: 0, EndMS: 1000, Text: "   "}},
@@ -168,11 +169,11 @@ func TestRecognize_EmptyOrBlankAnnotationsPersistNothing(t *testing.T) {
 
 func TestRecognize_BackendErrorPropagates(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	svc.SetRecognizer(&fakeRecognizer{err: errors.New("backend down")})
 
 	doc := model.Document{DocID: 1, RelPath: "game7.mp4", DocType: "video"}
@@ -284,10 +285,10 @@ func TestRecognizeConfig_Validation(t *testing.T) {
 // returns the recording store, so a test can assert the persisted rep/chunks.
 func runRecognitionOnce(t *testing.T, result model.RecognizeResult) *fakeIngestStore {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "v.mp4"), "fake-video")
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	svc.SetRecognizer(&fakeRecognizer{result: result})
 	doc := model.Document{DocID: 1, RelPath: "v.mp4", DocType: "video"}
 	if err := svc.GenerateRecognitionRepresentation(context.Background(), doc); err != nil {

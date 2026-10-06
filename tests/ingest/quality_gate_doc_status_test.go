@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests cover the §8.6.6 DOCUMENT-level contract of the output quality
@@ -30,7 +31,7 @@ import (
 // counters end to end.
 func qgService(t *testing.T, root string, st *store.SQLiteStore) (*ingest.Service, *appstate.IndexingState) {
 	t.Helper()
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off", QualityGatesEnabled: true}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off", QualityGatesEnabled: true}
 	svc := mustNewIngestService(t, cfg, st)
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
 	svc.SetIndexingState(state)
@@ -102,7 +103,7 @@ func assertQuarantinedDoc(t *testing.T, st *store.SQLiteStore, state *appstate.I
 // (withheld hash), and counts as one error / zero indexed.
 func TestQualityGate_DegenerateTranscript_MarksDocError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "loop.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -124,7 +125,7 @@ func TestQualityGate_DegenerateTranscript_MarksDocError(t *testing.T) {
 // OCR_FAILED.
 func TestQualityGate_DegenerateOCR_MarksDocError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "scan.pdf"), "fake-pdf-bytes")
 	st := newRealStore(t)
 
@@ -146,7 +147,7 @@ func TestQualityGate_DegenerateOCR_MarksDocError(t *testing.T) {
 // translation provider failure which does not mark the doc).
 func TestQualityGate_DegenerateTranslation_MarksDocError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -169,7 +170,7 @@ func TestQualityGate_DegenerateTranslation_MarksDocError(t *testing.T) {
 // content_hash stamped, one indexed, zero errors).
 func TestQualityGate_CleanTranscript_IndexedNoError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clean.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -205,7 +206,7 @@ func TestQualityGate_CleanTranscript_IndexedNoError(t *testing.T) {
 func TestQualityGate_QuarantineDoesNotSuppressLaterIndexedCredit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clean.mp3"), "clean-audio")
 	writeFile(t, filepath.Join(root, "loop.mp3"), "loop-audio")
 	st := newRealStore(t)
@@ -274,14 +275,14 @@ func TestQualityGate_TranslationRejected_WithholdsHash_BothModes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			root := t.TempDir()
+			root := testutil.TempDir(t)
 			mustWriteFile(t, filepath.Join(root, "audio", "one.mp3"), []byte("fake-audio-one"))
 			mustWriteFile(t, filepath.Join(root, "audio", "two.mp3"), []byte("fake-audio-two"))
 			st := newRealStore(t)
 
 			cfg := config.Config{
 				RootDir:             root,
-				StateDir:            t.TempDir(),
+				StateDir:            testutil.TempDir(t),
 				STTProvider:         "off",
 				QualityGatesEnabled: true,
 				MediaBatchTwoPhase:  twoPhase,
@@ -330,12 +331,12 @@ func TestQualityGate_TranslationRejected_WithholdsHash_BothModes(t *testing.T) {
 // and indexed — the nil gate is a pure no-op with no document-status side effect.
 func TestQualityGate_Disabled_LeavesDocOK(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "loop.mp3"), "fake-audio")
 	st := newRealStore(t)
 
 	// QualityGatesEnabled defaults to false here.
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}
 	svc := mustNewIngestService(t, cfg, st)
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
 	svc.SetIndexingState(state)

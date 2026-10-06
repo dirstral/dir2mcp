@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §7.2 (0.73.0): the default security.path_excludes lists the server's own
@@ -23,20 +24,20 @@ func TestOwnConfigFilesAreNotIndexedByDefault(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.md"), "The budget meeting moved to Thursday.\n")
 	writeFile(t, filepath.Join(root, ".dir2mcp.yaml"), "providers:\n  local:\n    kind: openai\n    api_key: sk-not-a-real-key\n")
 	writeFile(t, filepath.Join(root, ".env.local"), "MISTRAL_API_KEY=not-a-real-key\n")
 	writeFile(t, filepath.Join(root, "sub", ".dir2mcp.yaml"), "ingest:\n  extractor: off\n")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	defer func() { _ = st.Close() }()
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.STTProvider = "off"
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))

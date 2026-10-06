@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // df builds a DiscoveredFile with the given relative path and size for the pure
@@ -167,7 +168,7 @@ func TestSelectMediaVariants_DirScoped(t *testing.T) {
 // TestDiscoverFilesWithOptions_VariantDedup exercises the full discovery path
 // (walk + dedup) against a real temp directory, including the size tiebreak.
 func TestDiscoverFilesWithOptions_VariantDedup(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	// Three renditions of one logical clip; sizes are irrelevant because
 	// resolution decides, but make the highest-res file the smallest to prove it.
 	mustWriteFile(t, filepath.Join(root, "clip.1080p.mp4"), []byte("hi"))

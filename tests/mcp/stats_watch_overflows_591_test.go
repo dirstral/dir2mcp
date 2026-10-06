@@ -8,6 +8,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestMCPStats_WatchOverflowsSurfacedWhenWatching asserts the optional additive
@@ -51,7 +52,7 @@ func TestMCPStats_WatchOverflowsOmittedWhenNotWatching(t *testing.T) {
 func statsIndexingWithState(t *testing.T, idx *appstate.IndexingState) map[string]interface{} {
 	t.Helper()
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 

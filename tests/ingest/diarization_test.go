@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestChunkSubtitleCues_VoiceTags_StableSpeakerIDs verifies that WebVTT <v>
@@ -117,10 +118,10 @@ func (d *fakeDiarizer) Diarize(_ context.Context, _ []byte, segs []ingest.Speake
 // derivation identity.
 func TestDiarizeModelSwap_InvalidatesAndRederives(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: 1234567890}
 
 	// Scan 1: diarized with pyannote v1.
@@ -154,10 +155,10 @@ func TestDiarizeModelSwap_InvalidatesAndRederives(t *testing.T) {
 // and unchanged content does NOT re-transcribe.
 func TestDiarizeNoSwap_NoChurn(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: 1234567890}
 
 	tr1 := &fakeTranscriber{text: "[00:00] hello"}
@@ -184,7 +185,7 @@ func TestDiarizeNoSwap_NoChurn(t *testing.T) {
 // attribution is not model-derived, SPEC §8.6.8/§8.6.7).
 func TestSidecar_VoiceTags_DiarizedMeta(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "interview.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "interview.vtt"),
 		"WEBVTT\n\n"+
@@ -192,7 +193,7 @@ func TestSidecar_VoiceTags_DiarizedMeta(t *testing.T) {
 			"00:00:02.000 --> 00:00:04.000\n<v Guest>Thanks for having me\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 1, RelPath: "interview.mp3", DocType: "audio"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -264,13 +265,13 @@ func assertSpanSpeakers(t *testing.T, spans []model.Span, want ...string) {
 // NOT marked diarized, so meta_json is unchanged from before diarization existed.
 func TestSidecar_NoVoiceTags_NotDiarized(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "plain.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "plain.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\njust a caption\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 1, RelPath: "plain.mp3", DocType: "audio"}
 	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {

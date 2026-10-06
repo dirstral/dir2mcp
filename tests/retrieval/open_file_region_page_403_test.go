@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestOpenFile_RegionPage_AttributedToRequestedPage pins issue #403 F7: an
@@ -25,7 +26,7 @@ import (
 // spans into that page.
 func TestOpenFile_RegionPage_AttributedToRequestedPage(t *testing.T) {
 	svc := retrieval.NewService(nil, nil, nil, nil)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	svc.SetRootDir(root)
 	svc.SetStateDir(filepath.Join(root, ".dir2mcp"))
 

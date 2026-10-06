@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // canonicalSkipReasons is the closed skip-reason vocabulary the canonical
@@ -90,7 +91,7 @@ func statsServerOverStore(t *testing.T, tmp string, st model.Store) (*httptest.S
 
 func newSkipReasonStore(t *testing.T) (*store.SQLiteStore, string) {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

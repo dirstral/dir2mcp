@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedFailedChunk inserts one chunk for relPath and parks it in
@@ -68,7 +69,7 @@ func pendingChunkIDs(t *testing.T, ctx context.Context, st *store.SQLiteStore) m
 // that is a property of the stored input stays terminal.
 func TestRequeueFailedChunks_RetryableOnly(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -119,7 +120,7 @@ func TestRequeueFailedChunks_RetryableOnly(t *testing.T) {
 // it would strand that whole class permanently, which is the bug #783 is about.
 func TestRequeueFailedChunks_UnclassifiedFailuresAreRecoverable(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -144,7 +145,7 @@ func TestRequeueFailedChunks_UnclassifiedFailuresAreRecoverable(t *testing.T) {
 // it was.
 func TestRequeueFailedChunks_ExplicitCategoryFilter(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -180,7 +181,7 @@ func TestRequeueFailedChunks_ExplicitCategoryFilter(t *testing.T) {
 // corpus.json `ts` is stamped at write time and cannot make that distinction).
 func TestFailureSummary_CarriesFailureAge(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

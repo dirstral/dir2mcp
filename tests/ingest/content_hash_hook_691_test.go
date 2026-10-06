@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #691: retrieval-time cross-file dedup (SPEC §9.2) grouped candidate hits
@@ -81,7 +82,7 @@ func assertStringSliceEqual(t *testing.T, got, want []string, stage string) {
 // representations commit (#402), so the first report is empty and the real group
 // key follows only after the commit.
 func TestProcessDocument_ContentHashHook_PublishesOnlyAfterRepsCommit(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	content := "alpha content for the dedup group"
 	file := writeDedupCorpusFile(t, root, "a.txt", content)
 
@@ -103,7 +104,7 @@ func TestProcessDocument_ContentHashHook_PublishesOnlyAfterRepsCommit(t *testing
 // direction: a document whose representations did not commit keeps no group key,
 // so retrieval passes it through instead of suppressing it.
 func TestProcessDocument_ContentHashHook_NoPublishWhenRepsFail(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	file := writeDedupCorpusFile(t, root, "a.txt", "alpha content for the dedup group")
 
 	st := &fakeIncrementalStore{reflectByPath: true, insertChunkErr: errors.New("disk full")}
@@ -123,7 +124,7 @@ func TestProcessDocument_ContentHashHook_NoPublishWhenRepsFail(t *testing.T) {
 // incremental path: a rescan that regenerates nothing still restates the hash
 // the row holds, so a consumer that lost its state converges on the truth.
 func TestProcessDocument_ContentHashHook_UnchangedDocumentRestatesItsHash(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	content := "alpha content for the dedup group"
 	file := writeDedupCorpusFile(t, root, "a.txt", content)
 	hash := ingest.ComputeContentHash([]byte(content))
@@ -147,7 +148,7 @@ func TestProcessDocument_ContentHashHook_UnchangedDocumentRestatesItsHash(t *tes
 // collapse to one hit. One of them is edited, and both must be returned on the
 // next query, with no restart of either service.
 func TestLiveIngest_CrossFileDedupFollowsAnEditedDuplicate(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	content := "alpha content for the dedup group"
 	original := writeDedupCorpusFile(t, root, "a.txt", content)
 	copyFile := writeDedupCorpusFile(t, root, "copy/a.txt", content)
@@ -186,7 +187,7 @@ func TestLiveIngest_CrossFileDedupFollowsAnEditedDuplicate(t *testing.T) {
 // suppressing a distinct document against content the corpus no longer indexes.
 func TestScan_OversizeFileForgetsItsGroupKey(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	oversize := bytes.Repeat([]byte("x"), 2*1024*1024) // 2 MiB, over the 1 MiB cap
 	if err := os.WriteFile(filepath.Join(root, "big.txt"), oversize, 0o600); err != nil {
 		t.Fatalf("write oversize file: %v", err)
@@ -206,7 +207,7 @@ func TestScan_OversizeFileForgetsItsGroupKey(t *testing.T) {
 
 	assertLivePaths(t, ret, []string{"ghost.txt"}, "before the scan")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

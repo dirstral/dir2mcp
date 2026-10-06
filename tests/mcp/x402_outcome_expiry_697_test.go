@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // v2PaymentSignature697 builds a minimal x402 v2 PAYMENT-SIGNATURE value. The
@@ -92,7 +93,7 @@ func TestX402OutcomeExpirySurvivesRestart697(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.FacilitatorURL = facServer.URL
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(t.Context()); err != nil {
 		t.Fatalf("Init store: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestX402RestoredOutcomeStillRefusesReplay697(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.FacilitatorURL = facServer.URL
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(t.Context()); err != nil {
 		t.Fatalf("Init store: %v", err)
 	}

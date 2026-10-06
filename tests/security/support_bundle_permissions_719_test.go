@@ -13,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/statefs"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #719: `support-bundle --output <path>` documents an owner-only 0600 archive,
@@ -49,7 +50,7 @@ func TestSupportBundleOverwritingAPermissiveDestinationTightensIt(t *testing.T) 
 
 	for _, seedMode := range []os.FileMode{0o644, 0o666} {
 		t.Run(seedMode.String(), func(t *testing.T) {
-			tmp := t.TempDir()
+			tmp := testutil.TempDir(t)
 			stateDir := filepath.Join(tmp, ".dir2mcp")
 			dest := filepath.Join(tmp, "bundle.tar.gz")
 
@@ -78,7 +79,7 @@ func TestSupportBundleOverwritingAPermissiveDestinationTightensIt(t *testing.T) 
 // the issue asks to keep, under the same permissive umask.
 func TestSupportBundleCreatesAnOwnerOnlyDestination(t *testing.T) {
 	withPermissiveUmask(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	dest := filepath.Join(tmp, "fresh.tar.gz")
 
 	runSupportBundleTo(t, filepath.Join(tmp, ".dir2mcp"), dest)
@@ -93,7 +94,7 @@ func TestSupportBundleCreatesAnOwnerOnlyDestination(t *testing.T) {
 // archives would be its own disclosure.
 func TestSupportBundleLeavesNoStrayTemporaries(t *testing.T) {
 	withPermissiveUmask(t)
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	dest := filepath.Join(tmp, "bundle.tar.gz")
 
 	runSupportBundleTo(t, filepath.Join(tmp, ".dir2mcp"), dest)
@@ -122,7 +123,7 @@ func TestSupportBundleFailureDoesNotDestroyAnExistingBundle(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory write permission")
 	}
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	outDir := filepath.Join(tmp, "out")
 	if err := os.Mkdir(outDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)

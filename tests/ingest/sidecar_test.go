@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // mapStore is a minimal Store + RepresentationStore that records documents by
@@ -96,13 +97,13 @@ func newSidecarService(t *testing.T, root, stateDir string, st model.Store) *ing
 
 func TestSidecar_VTT_IngestsTranscriptWithoutSTT(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "media", "lecture.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "media", "lecture.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nIntro\n\n00:00:02.000 --> 00:00:05.000\nChapter one\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 1, RelPath: "media/lecture.mp3", DocType: "audio"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -126,13 +127,13 @@ func TestSidecar_VTT_IngestsTranscriptWithoutSTT(t *testing.T) {
 
 func TestSidecar_SRT_IngestsTranscriptWithoutSTT(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video")
 	writeFile(t, filepath.Join(root, "clip.srt"),
 		"1\n00:00:00,000 --> 00:00:01,500\nHello\n\n2\n00:00:01,500 --> 00:00:03,000\nGoodbye\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 2, RelPath: "clip.mp4", DocType: "video"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -152,13 +153,13 @@ func TestSidecar_SRT_IngestsTranscriptWithoutSTT(t *testing.T) {
 
 func TestSidecar_PerLanguage_DistinctTranscripts(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n")
 	writeFile(t, filepath.Join(root, "talk.fr.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nbonjour\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 3, RelPath: "talk.mp3", DocType: "audio"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -187,17 +188,17 @@ func TestSidecar_PerLanguage_DistinctTranscripts(t *testing.T) {
 // (selectable by language), not collapse into one.
 func TestSidecar_PerLanguage_RealStorePersistsBoth(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n")
 	writeFile(t, filepath.Join(root, "talk.fr.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nbonjour\n")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "talk.mp3", DocType: "audio"}); err != nil {
 		t.Fatalf("upsert document: %v", err)
@@ -224,13 +225,13 @@ func TestSidecar_PerLanguage_RealStorePersistsBoth(t *testing.T) {
 // the bare extension must not be mistaken for a language tag.
 func TestSidecar_Undifferentiated_HasNoLanguage(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "media", "lecture.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "media", "lecture.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nIntro\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 1, RelPath: "media/lecture.mp3", DocType: "audio"}
 	if _, err := svc.IngestSidecarTranscripts(context.Background(), doc); err != nil {
@@ -249,13 +250,13 @@ func TestSidecar_Undifferentiated_HasNoLanguage(t *testing.T) {
 
 func TestSidecar_ForceReindex_RunsSTTInsteadOfSidecar(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "song.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nignored sidecar\n")
 
 	st := &fakeIngestStore{}
 	stt := &fakeTranscriber{text: "[00:00] from stt"}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	svc.SetTranscriber(stt)
 
 	f := ingest.DiscoveredFile{RelPath: "song.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -280,14 +281,14 @@ func TestSidecar_ForceReindex_RunsSTTInsteadOfSidecar(t *testing.T) {
 
 func TestSidecar_FreshSidecarReprocessesUnchangedMedia(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mediaPath := filepath.Join(root, "rec.mp3")
 	sidecarPath := filepath.Join(root, "rec.vtt")
 	writeFile(t, mediaPath, "fake-audio")
 	writeFile(t, sidecarPath, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nv1\n")
 
 	st := newMapStore()
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	// First scan: media is new, sidecar is ingested.
 	if err := svc.Run(context.Background()); err != nil {
@@ -322,7 +323,7 @@ func TestSidecar_FreshSidecarReprocessesUnchangedMedia(t *testing.T) {
 // NOT be treated as that media's sidecars (and so must not suppress STT).
 func TestSidecar_FilenameMatching_RejectsExtraDottedSuffixes(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clip.mp3"), "fake-audio")
 	// Valid sidecars (must bind):
 	writeFile(t, filepath.Join(root, "clip.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nundiff\n")
@@ -332,7 +333,7 @@ func TestSidecar_FilenameMatching_RejectsExtraDottedSuffixes(t *testing.T) {
 	writeFile(t, filepath.Join(root, "clip.notes.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nnotes\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 1, RelPath: "clip.mp3", DocType: "audio"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -362,13 +363,13 @@ func TestSidecar_FilenameMatching_RejectsExtraDottedSuffixes(t *testing.T) {
 // so STT runs instead of being suppressed by an excluded subtitle file.
 func TestSidecar_PathExcludes_NotUsedAsSidecar(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "song.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nexcluded sidecar\n")
 
 	st := &fakeIngestStore{}
 	stt := &fakeTranscriber{text: "[00:00] from stt"}
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), PathExcludes: []string{"**/*.vtt"}}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), PathExcludes: []string{"**/*.vtt"}}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetTranscriber(stt)
 
@@ -394,18 +395,18 @@ func TestSidecar_PathExcludes_NotUsedAsSidecar(t *testing.T) {
 // STT rep — never a stale sidecar transcript alongside it.
 func TestSidecar_ForceReindex_RetiresStaleSidecarReps(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nold sidecar\n")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
 	// First, ingest the sidecar as the transcript (no STT).
-	sidecarSvc := newSidecarService(t, root, t.TempDir(), st)
+	sidecarSvc := newSidecarService(t, root, testutil.TempDir(t), st)
 	if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "talk.mp3", DocType: "audio"}); err != nil {
 		t.Fatalf("upsert document: %v", err)
 	}
@@ -425,7 +426,7 @@ func TestSidecar_ForceReindex_RetiresStaleSidecarReps(t *testing.T) {
 	}
 
 	// Now force a reindex: STT must run and the stale sidecar rep must be retired.
-	sttSvc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	sttSvc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	stt := &fakeTranscriber{text: "[00:00] fresh stt"}
 	sttSvc.SetTranscriber(stt)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -457,7 +458,7 @@ func TestSidecar_ForceReindex_RetiresStaleSidecarReps(t *testing.T) {
 // still binds, so real sidecars are unaffected.
 func TestSidecar_LanguageTokenValidation_RejectsFragmentAndCrossMediaTokens(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clip.mp3"), "fake-audio")
 	// A sibling video makes the cross-media "clip.mp4.vtt" realistic (yt-dlp/livevtt
 	// default output) — it must not be pulled onto clip.mp3.
@@ -470,7 +471,7 @@ func TestSidecar_LanguageTokenValidation_RejectsFragmentAndCrossMediaTokens(t *t
 	writeFile(t, filepath.Join(root, "clip.en.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nenglish\n")
 
 	st := &fakeIngestStore{}
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	doc := model.Document{DocID: 1, RelPath: "clip.mp3", DocType: "audio"}
 	ingested, err := svc.IngestSidecarTranscripts(context.Background(), doc)
@@ -499,7 +500,7 @@ func TestSidecar_LanguageTokenValidation_RejectsFragmentAndCrossMediaTokens(t *t
 // still run rather than being silently suppressed by a bogus subtitle file.
 func TestSidecar_BogusTokenSidecars_DoNotSuppressSTT(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "song.mp4"), "fake-video")
 	writeFile(t, filepath.Join(root, "song.HD.vtt"), "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhd fragment\n")
@@ -507,7 +508,7 @@ func TestSidecar_BogusTokenSidecars_DoNotSuppressSTT(t *testing.T) {
 
 	st := &fakeIngestStore{}
 	stt := &fakeTranscriber{text: "[00:00] from stt"}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	svc.SetTranscriber(stt)
 
 	f := ingest.DiscoveredFile{RelPath: "song.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}

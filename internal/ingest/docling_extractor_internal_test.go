@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestLimitedBuffer_OverCapNeverErrors is the core regression guard for issue
@@ -83,7 +85,7 @@ func TestRunFileOutput_TimesOutOnHungCommand(t *testing.T) {
 	// limitedBuffer drain) and then hangs far longer than the timeout. The
 	// command-template splitter is whitespace-delimited, so the body lives in a
 	// script file rather than an inline `sh -c` argument.
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	fake := filepath.Join(dir, "docling")
 	// exec replaces the shell with sleep so killing the child closes the stderr
 	// pipe immediately (no orphaned process keeps it open).

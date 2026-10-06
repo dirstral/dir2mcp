@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedDocWithPendingChunk creates a document at relPath with the given status and
@@ -51,7 +52,7 @@ func seedDocWithPendingChunk(ctx context.Context, t *testing.T, st *store.SQLite
 // skipped, not indexed, so the audit signal survives.
 func TestDocumentStatus_SecretExcludedRoundTrips(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -96,7 +97,7 @@ func TestDocumentStatus_SecretExcludedRoundTrips(t *testing.T) {
 // or tombstoned, while chunks of an 'ok' document remain visible.
 func TestNextPending_SkipsErroredAndDeletedParents(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

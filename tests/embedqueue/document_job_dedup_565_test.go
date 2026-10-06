@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestBroker_DocumentJobDedupsPerRepresentation pins the document-ownership rule
@@ -23,7 +24,7 @@ import (
 // document job still enqueues.
 func TestBroker_DocumentJobDedupsPerRepresentation(t *testing.T) {
 	ctx := context.Background()
-	sqlBroker, err := embedqueue.NewSQLiteBroker(ctx, filepath.Join(t.TempDir(), "queue.sqlite"), 3)
+	sqlBroker, err := embedqueue.NewSQLiteBroker(ctx, filepath.Join(testutil.TempDir(t), "queue.sqlite"), 3)
 	if err != nil {
 		t.Fatalf("NewSQLiteBroker: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestBroker_DocumentJobDedupsPerRepresentation(t *testing.T) {
 // is written through the broker's own database handle, as corruption would be.
 func TestWorker_CorruptDocumentJobRowIsNamedAsCorrupt(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "queue.sqlite"))
+	db, err := sql.Open("sqlite", filepath.Join(testutil.TempDir(t), "queue.sqlite"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -118,7 +119,7 @@ VALUES ('c', 'local', 5, 'text', '', 'text', '', '', 0, 0, 0, ?, 7, 'not-json', 
 // agree, or the memory broker defers document processing across ticks.
 func TestBroker_IncomingJobChoosesTheDedupKey(t *testing.T) {
 	ctx := context.Background()
-	sqlBroker, err := embedqueue.NewSQLiteBroker(ctx, filepath.Join(t.TempDir(), "queue.sqlite"), 3)
+	sqlBroker, err := embedqueue.NewSQLiteBroker(ctx, filepath.Join(testutil.TempDir(t), "queue.sqlite"), 3)
 	if err != nil {
 		t.Fatalf("NewSQLiteBroker: %v", err)
 	}

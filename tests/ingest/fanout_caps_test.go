@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // syncBuffer is a goroutine-safe io.Writer used to capture Service log output
@@ -41,7 +42,7 @@ func (b *syncBuffer) String() string {
 // crashed, not silently dropped) and a "truncated" diagnostic is emitted.
 func TestMediaChunkCap_PDFTruncatedAndWarned(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	const pages = 20
 	pdf := makeTestPDF(t, pages)
 	if err := os.WriteFile(filepath.Join(root, "big.pdf"), pdf, 0o644); err != nil {
@@ -49,7 +50,7 @@ func TestMediaChunkCap_PDFTruncatedAndWarned(t *testing.T) {
 	}
 	cfg := loadMultimodalConfig(t, root, "augment")
 	cfg.STTProvider = "off"
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -90,13 +91,13 @@ func TestMediaChunkCap_PDFTruncatedAndWarned(t *testing.T) {
 // fanning out into unbounded windows.
 func TestMediaChunkCap_AudioWindowsTruncated(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "long.mp3"), []byte("MEDIADATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := loadMultimodalConfig(t, root, "augment")
 	cfg.STTProvider = "off"
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -139,11 +140,11 @@ func TestMediaChunkCap_AudioWindowsTruncated(t *testing.T) {
 func runArchiveIngestCapped(t *testing.T, archiveName string, archiveData []byte, maxMembers int, maxTotalBytes int64) (*store.SQLiteStore, string) {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, archiveName), archiveData, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
 	}
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
