@@ -252,11 +252,15 @@ jobs:
           # lookup of host.docker.internal can outlast the smoke on the runner
           # (a first run on main failed on this line with the warning printed
           # two seconds later), so wait for it instead of reading once.
+          # Write the log to a file before the grep: with pipefail, grep -q
+          # exits at the first match, docker logs gets SIGPIPE, and the
+          # pipeline fails although the warning is there.
           for i in $(seq 1 30); do
-            if docker logs d2m 2>&1 | grep -q "not reachable"; then break; fi
+            docker logs d2m > d2m.log 2>&1
+            if grep -q "not reachable" d2m.log; then break; fi
             sleep 1
           done
-          docker logs d2m 2>&1 | grep -q "not reachable" || { echo "expected the unreachable-provider warning"; docker logs d2m 2>&1; exit 1; }
+          grep -q "not reachable" d2m.log || { echo "expected the unreachable-provider warning"; cat d2m.log; exit 1; }
           docker rm -f d2m >/dev/null
 
   windows:

@@ -227,7 +227,7 @@ vary by deployment. The commonly used variables are:
 | `MISTRAL_API_KEY` | Conditional | Required for embeddings, Mistral-based extraction/STT, and generation; not required for docling-only read-only extraction flows |
 | `DIR2MCP_SKIP_EMBED_PROBE` | No | When set to any non-empty value, skips the startup embedding-credential probe (a one-shot embed that validates the key/model before serving). Provider resolution and adapter-build checks still run; only the network probe is skipped, so an invalid credential resurfaces at first real embed instead of at startup. Intended for air-gapped bring-up and hermetic CI |
 | `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
-| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output - {input}`); when set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
+| `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output {output} {input}`). dir2mcp replaces `{input}` with the document path and `{output}` with a new temporary directory for each call, then reads the output file from that directory (JSON with the default template). Do not use `--output -`: docling writes a file named `-` and dir2mcp reads no output. When set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
 | `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
 | `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `900`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
@@ -253,7 +253,7 @@ For Homebrew and other installed workflows, you can persist this in `.dir2mcp.ya
 ```yaml
 ingest_extractor: auto
 ingest_on_unsupported: lenient   # lenient (default) | strict
-docling_command: docling --to json --output - {input}
+docling_command: docling --to json --output {output} {input}
 ```
 
 ### Storing credentials in the OS keychain
