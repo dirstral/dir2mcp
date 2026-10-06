@@ -6021,11 +6021,28 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
-	if c.IngestDoclingTimeoutSec <= 0 {
-		return fmt.Errorf("ingest.docling.timeout_sec must be greater than 0: %d", c.IngestDoclingTimeoutSec)
+	if err := c.validateDoclingTimeout(); err != nil {
+		return err
 	}
 	if err := c.validateRetrievalNumericBounds(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// MaxDoclingTimeoutSec is the largest ingest.docling.timeout_sec that fits in
+// a time.Duration. A larger value overflows to a negative duration, and every
+// docling call then expires at once.
+const MaxDoclingTimeoutSec = int64(math.MaxInt64 / int64(time.Second))
+
+// validateDoclingTimeout checks ingest.docling.timeout_sec (#1105). The value
+// must be greater than 0 and must fit in a time.Duration.
+func (c *Config) validateDoclingTimeout() error {
+	if c.IngestDoclingTimeoutSec <= 0 {
+		return fmt.Errorf("ingest.docling.timeout_sec must be greater than 0: %d", c.IngestDoclingTimeoutSec)
+	}
+	if int64(c.IngestDoclingTimeoutSec) > MaxDoclingTimeoutSec {
+		return fmt.Errorf("ingest.docling.timeout_sec must not be greater than %d: %d", MaxDoclingTimeoutSec, c.IngestDoclingTimeoutSec)
 	}
 	return nil
 }

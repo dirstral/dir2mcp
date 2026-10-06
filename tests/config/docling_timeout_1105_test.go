@@ -2,6 +2,7 @@ package tests
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -92,6 +93,33 @@ func TestDoclingTimeout_ZeroOrNegativeIsRejected(t *testing.T) {
 	cfg.IngestDoclingTimeoutSec = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate must reject IngestDoclingTimeoutSec=0")
+	}
+}
+
+// TestDoclingTimeout_OverflowIsRejected checks the upper bound: a value that
+// does not fit in a time.Duration would overflow to a negative limit, so every
+// docling call would expire at once.
+func TestDoclingTimeout_OverflowIsRejected(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("the overflow value does not fit in a 32-bit int")
+	}
+	cfg := config.Default()
+	cfg.IngestDoclingTimeoutSec = int(config.MaxDoclingTimeoutSec)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the largest value that fits must validate: %v", err)
+	}
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	over := strconv.FormatInt(config.MaxDoclingTimeoutSec+1, 10)
+	writeFile(t, path, "root_dir: ./repo\ningest:\n  docling:\n    timeout_sec: "+over+"\n")
+
+	_, err := config.LoadFile(path)
+	if err == nil {
+		t.Fatalf("timeout_sec=%s must be rejected", over)
+	}
+	if !strings.Contains(err.Error(), "ingest.docling.timeout_sec must not be greater than") {
+		t.Fatalf("error must name the key and the bound, got: %v", err)
 	}
 }
 
