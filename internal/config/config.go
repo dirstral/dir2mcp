@@ -132,6 +132,13 @@ const (
 	RAGKFallback = 15
 )
 
+// DefaultDoclingTimeoutSec is the shipped time limit, in seconds, for one
+// docling CLI call on one document (SPEC 7.4.B, ingest.docling.timeout_sec,
+// issue #1105). It is the fixed 15-minute limit from before the key existed.
+// docling on CPU took about 13 minutes for one 2.6 MB PDF with many tables, so
+// a slow host can need a higher value.
+const DefaultDoclingTimeoutSec = 900
+
 // DefaultTranscriptChunkSec and DefaultTranscriptChunkGapSec are the shipped
 // transcript chunk window (SPEC 8.6.1, media.transcript_chunk_sec /
 // media.transcript_chunk_gap_sec). 40 s is about a conversational turn or a
@@ -305,6 +312,12 @@ type Config struct {
 	// ingest.extractor=docling-serve; under extractor=auto an empty value
 	// simply means the HTTP transport is not used (spec 0.10.0 §7.4.B).
 	IngestDoclingServeURL string
+	// IngestDoclingTimeoutSec is the time limit, in seconds, for one docling
+	// CLI call on one document (config `ingest.docling.timeout_sec`, env
+	// DIR2MCP_DOCLING_TIMEOUT_SEC, SPEC 7.4.B). It must be greater than 0. When
+	// the limit expires the document gets a per-document error that names the
+	// document and the limit. The docling-serve transport does not use it.
+	IngestDoclingTimeoutSec int
 	// IngestPandocCommand optionally configures a local pandoc CLI command
 	// (its first field is the binary) used for the capability-activated pandoc
 	// document extractor (#393). Empty resolves `pandoc` from PATH.
@@ -1420,6 +1433,7 @@ type fileConfig struct {
 	DoclingCommand  *string
 
 	IngestDoclingServeURL              *string
+	IngestDoclingTimeoutSec            *int
 	IngestPandocCommand                *string
 	ElevenLabsBaseURL                  *string
 	ElevenLabsTTSVoiceID               *string
@@ -1646,6 +1660,7 @@ type persistedConfig struct {
 	IngestGitignore                    bool          `yaml:"ingest_gitignore"`
 	IngestFollowSymlinks               bool          `yaml:"ingest_follow_symlinks"`
 	IngestMaxFileMB                    int           `yaml:"ingest_max_file_mb"`
+	IngestDoclingTimeoutSec            int           `yaml:"ingest_docling_timeout_sec"`
 	IngestExcludeDirs                  []string      `yaml:"ingest_exclude_dirs"`
 	IngestPDFMode                      string        `yaml:"ingest_pdf_mode"`
 	IngestImagesMode                   string        `yaml:"ingest_images_mode"`
@@ -1933,6 +1948,8 @@ func Default() Config {
 		IngestLateChunking:    false,
 		IngestWatch:           false,
 		IngestWatchDebounce:   500 * time.Millisecond,
+		// One docling CLI call on one document (SPEC 7.4.B, #1105).
+		IngestDoclingTimeoutSec: DefaultDoclingTimeoutSec,
 		// "auto", not "mistral" (SPEC §8.2, §8.1.3): transcription is an optional
 		// capability selected by precedence among eligible profiles, and it stays
 		// off when none is eligible. The explicit "mistral" default made a
@@ -2109,6 +2126,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestGitignore:                    cfg.IngestGitignore,
 		IngestFollowSymlinks:               cfg.IngestFollowSymlinks,
 		IngestMaxFileMB:                    cfg.IngestMaxFileMB,
+		IngestDoclingTimeoutSec:            cfg.IngestDoclingTimeoutSec,
 		IngestExcludeDirs:                  append([]string(nil), cfg.IngestExcludeDirs...),
 		IngestPDFMode:                      cfg.IngestPDFMode,
 		IngestImagesMode:                   cfg.IngestImagesMode,
@@ -2796,6 +2814,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.IngestDoclingServeURL != nil {
 		cfg.IngestDoclingServeURL = *fc.IngestDoclingServeURL
+	}
+	if fc.IngestDoclingTimeoutSec != nil {
+		cfg.IngestDoclingTimeoutSec = *fc.IngestDoclingTimeoutSec
 	}
 	if fc.IngestPandocCommand != nil {
 		cfg.IngestPandocCommand = *fc.IngestPandocCommand
@@ -3684,6 +3705,8 @@ var configKeyAliases = map[string]string{
 	"ingest_follow_symlinks":                  "ingest.follow_symlinks",
 	"follow_symlinks":                         "ingest.follow_symlinks",
 	"ingest_max_file_mb":                      "ingest.max_file_mb",
+	"ingest_docling_timeout_sec":              "ingest.docling.timeout_sec",
+	"docling.timeout_sec":                     "ingest.docling.timeout_sec",
 	"max_file_mb":                             "ingest.max_file_mb",
 	"ingest_scan_cache":                       "ingest.scan_cache",
 	"scan_cache":                              "ingest.scan_cache",
@@ -3972,6 +3995,7 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"chunking.max_tokens":                func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
 	"chunking.overlap_tokens":            func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
 	"ingest.max_file_mb":                 func(c *fileConfig) **int { return &c.IngestMaxFileMB },
+	"ingest.docling.timeout_sec":         func(c *fileConfig) **int { return &c.IngestDoclingTimeoutSec },
 	"rerank.candidate_pool":              func(c *fileConfig) **int { return &c.RerankCandidatePool },
 	"media.audio_window_sec":             func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
 	"media.translate.whisper_window_sec": func(c *fileConfig) **int { return &c.MediaTranslateWhisperWindowSec },
@@ -4489,6 +4513,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("docling_serve_url", cfg.DoclingServeURL)
+	writeInt("ingest_docling_timeout_sec", cfg.IngestDoclingTimeoutSec)
 	writeScalar("pandoc_command", cfg.PandocCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
@@ -4886,7 +4911,27 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH_DEBOUNCE", env); ok && strings.TrimSpace(raw) != "" {
 		applyDurationEnvField(cfg, raw, "DIR2MCP_INGEST_WATCH_DEBOUNCE", &cfg.IngestWatchDebounce)
 	}
+	applyDoclingTimeoutEnv(cfg, env)
 	applyRetrievalAdaptiveKEnv(cfg, env)
+}
+
+// applyDoclingTimeoutEnv applies DIR2MCP_DOCLING_TIMEOUT_SEC onto
+// cfg.IngestDoclingTimeoutSec when the variable is set and not blank (#1105).
+// A value that is not an integer is not applied and gives a warning, so an
+// operator sees that the override did not take effect. An integer of 0 or less
+// is applied, and Validate then rejects it.
+func applyDoclingTimeoutEnv(cfg *Config, env map[string]string) {
+	raw, ok := envLookup("DIR2MCP_DOCLING_TIMEOUT_SEC", env)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return
+	}
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := strconv.Atoi(trimmed)
+	if err != nil {
+		cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid integer for DIR2MCP_DOCLING_TIMEOUT_SEC: %q (ignored)", trimmed))
+		return
+	}
+	cfg.IngestDoclingTimeoutSec = parsed
 }
 
 // applyBoolEnvField sets *field from env[key] when the variable is set, non-empty,
@@ -5976,8 +6021,28 @@ func (c *Config) validateNumericBounds() error {
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
 	}
+	if err := c.validateDoclingTimeout(); err != nil {
+		return err
+	}
 	if err := c.validateRetrievalNumericBounds(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// MaxDoclingTimeoutSec is the largest ingest.docling.timeout_sec that fits in
+// a time.Duration. A larger value overflows to a negative duration, and every
+// docling call then expires at once.
+const MaxDoclingTimeoutSec = int64(math.MaxInt64 / int64(time.Second))
+
+// validateDoclingTimeout checks ingest.docling.timeout_sec (#1105). The value
+// must be greater than 0 and must fit in a time.Duration.
+func (c *Config) validateDoclingTimeout() error {
+	if c.IngestDoclingTimeoutSec <= 0 {
+		return fmt.Errorf("ingest.docling.timeout_sec must be greater than 0: %d", c.IngestDoclingTimeoutSec)
+	}
+	if int64(c.IngestDoclingTimeoutSec) > MaxDoclingTimeoutSec {
+		return fmt.Errorf("ingest.docling.timeout_sec must not be greater than %d: %d", MaxDoclingTimeoutSec, c.IngestDoclingTimeoutSec)
 	}
 	return nil
 }

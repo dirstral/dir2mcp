@@ -1346,7 +1346,7 @@ func DocumentExtractorFromConfigContext(ctx context.Context, cfg config.Config) 
 	switch decision.Name {
 	case "docling":
 		tpl := strings.TrimSpace(cfg.DoclingCommand)
-		return NewDoclingExtractor(tpl)
+		return NewDoclingExtractorWithTimeout(tpl, time.Duration(cfg.IngestDoclingTimeoutSec)*time.Second)
 	case "docling-serve":
 		return NewDoclingServeExtractor(cfg.IngestDoclingServeURL)
 	case "pandoc":
@@ -4974,6 +4974,12 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		res, err := s.readOrComputeStructured(ctx, doc, content, se)
 		if err == nil && len(res.Blocks) > 0 {
 			return s.persistStructuredRepresentation(ctx, doc, res)
+		}
+		// A docling timeout used the whole per-document limit. The flat path
+		// below runs the same docling command again, which doubles the time and
+		// times out again, so record the timeout now (#1105).
+		if isDoclingTimeout(err) {
+			return err
 		}
 	}
 
