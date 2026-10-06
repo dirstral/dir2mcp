@@ -204,6 +204,9 @@ def list_all(call, args, validate):
             break
         files.extend(rows)
     listing["files"] = files
+    # More PDFs than the page cap: a later extracted PDF may be missing, so
+    # open_file_verdict says the result is inconclusive.
+    listing["truncated"] = len(files) < total
     return {**first, "structuredContent": listing}
 
 
@@ -223,17 +226,23 @@ def open_file_verdict(list_result, open_page, max_probe=12):
     * otherwise probe up to max_probe extracted PDFs and PASS on the first
       page that is_texty accepts. A single image-only cover page must not
       fail the gate, so one good page is enough.
+    * a listing that list_all cut at its page cap stays FAIL when no page
+      passes (never SKIPPED, which is only for a corpus with no PDF), and
+      the detail says that later PDFs were not checked.
     """
     if list_result.get("isError"):
         return "FAIL", "list_files tool error"
-    rows = (list_result.get("structuredContent") or {}).get("files") or []
-    rows = [f for f in rows if not f.get("deleted")]
+    listing = list_result.get("structuredContent") or {}
+    cut = "; listing truncated, so later PDFs were not checked" if listing.get("truncated") else ""
+    rows = [f for f in (listing.get("files") or []) if not f.get("deleted")]
     if not rows:
+        if cut:
+            return "FAIL", "no live PDF in the listed pages" + cut
         return "SKIPPED", "the corpus has no PDF to open"
     extracted = [f["rel_path"] for f in rows if f.get("status") == "ok"]
     if not extracted:
         statuses = sorted({str(f.get("status")) for f in rows})
-        return "FAIL", f"{len(rows)} pdfs, none extracted (status {', '.join(statuses)})"
+        return "FAIL", f"{len(rows)} pdfs, none extracted (status {', '.join(statuses)}){cut}"
     last = ""
     for rp in extracted[:max_probe]:
         txt = open_page(rp)
@@ -243,7 +252,7 @@ def open_file_verdict(list_result, open_page, max_probe=12):
         if is_texty(txt):
             return "PASS", f"{rp[:30]}… {len(txt.strip())}c"
         last = f"{len(txt.strip())}c " + ("PDF syntax, not extracted text" if is_pdf_source(txt) else "not text-like")
-    return "FAIL", f"none of {min(len(extracted), max_probe)} extracted pdfs ({last})"
+    return "FAIL", f"none of {min(len(extracted), max_probe)} extracted pdfs ({last}){cut}"
 
 
 def summary_line(fails, skips):

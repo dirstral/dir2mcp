@@ -301,6 +301,22 @@ class ListAllTest(unittest.TestCase):
         call, _ = self._pager([_row("a.pdf")])
         self.assertIsNone(list_all(call, {}, lambda r: False))
 
+    def test_complete_listing_is_not_truncated(self):
+        """A listing read to the end is not marked truncated."""
+        call, _ = self._pager([_row(f"{i}.pdf") for i in range(700)])
+        self.assertFalse(list_all(call, {}, lambda r: True)["structuredContent"]["truncated"])
+
+    def test_capped_listing_fails_as_inconclusive(self):
+        """Past the page cap, a listing with no extracted PDF is FAIL and
+        says that later PDFs were not checked; it is never SKIPPED."""
+        rows = [_row(f"a/{i:05d}.pdf", status="skipped") for i in range(10_000)]
+        call, _ = self._pager(rows, total=10_001)
+        lf = list_all(call, {}, lambda r: True)
+        self.assertTrue(lf["structuredContent"]["truncated"])
+        status, detail = open_file_verdict(lf, lambda rp: GROUNDED_ANSWER)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("listing truncated", detail)
+
     def test_page_count_is_bounded(self):
         """A wrong total cannot make the loop run without end."""
         call, calls = self._pager([_row(f"{i}.pdf") for i in range(600)], total=10**9)
