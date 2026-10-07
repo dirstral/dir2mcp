@@ -16,6 +16,10 @@ package retrieval
 // every cached baseline, so a change here MUST bump nullProbeSetVersion.
 const nullProbeSetVersion = "v1"
 
+// NullProbeSetVersion is nullProbeSetVersion for `dir2mcp doctor`, which
+// must not present a baseline cached under another probe set as current.
+const NullProbeSetVersion = nullProbeSetVersion
+
 var nullProbes = []string{
 	"What time is it right now?",
 	"How do I boil an egg?",

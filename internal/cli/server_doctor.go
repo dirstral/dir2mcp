@@ -901,7 +901,22 @@ func evidenceThresholdCheck(cfg config.Config) doctorCheck {
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
 			"cached null baseline unreadable, the daemon recomputes it: %v", err)}
 	}
-	value, source := retrieval.EvidenceCosineThreshold(retrieval.EvidenceCosineFloor, baseline, auto, pinned)
+	// A baseline cached under another probe set or another text embedding
+	// model is stale: the daemon recomputes it on its next ask, and until
+	// then the fixed floor applies, so it must not be shown as the threshold.
+	stale := ""
+	if baseline != nil {
+		if baseline.ProbeSet != retrieval.NullProbeSetVersion {
+			stale = fmt.Sprintf("probe set %q, shipped %q", baseline.ProbeSet, retrieval.NullProbeSetVersion)
+		} else if want := resolvedTextEmbedModel(cfg); want != "" && baseline.EmbedModel != want {
+			stale = fmt.Sprintf("model %q, configured %q", baseline.EmbedModel, want)
+		}
+	}
+	current := baseline
+	if stale != "" {
+		current = nil
+	}
+	value, source := retrieval.EvidenceCosineThreshold(retrieval.EvidenceCosineFloor, current, auto, pinned)
 	var b strings.Builder
 	fmt.Fprintf(&b, "cosine threshold %.3f", value)
 	switch source {
@@ -912,14 +927,29 @@ func evidenceThresholdCheck(cfg config.Config) doctorCheck {
 	default:
 		b.WriteString(" (fixed floor)")
 	}
-	if baseline != nil {
+	switch {
+	case stale != "":
+		fmt.Fprintf(&b, "; cached null baseline is stale (%s), the daemon recomputes it on its next ask", stale)
+	case baseline != nil:
 		fmt.Fprintf(&b, "; null baseline over %d probes p50=%.3f p90=%.3f max=%.3f (%s, %d chunks)",
 			baseline.Probes, baseline.P50, baseline.P90, baseline.Max, baseline.EmbedModel, baseline.Chunks)
-	} else {
+	default:
 		b.WriteString("; null baseline not computed yet: the daemon computes it when indexing stops or on the first ask")
 	}
 	fmt.Fprintf(&b, "; rerank %.2f", retrieval.EvidenceRerankFloor)
 	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: b.String()}
+}
+
+// resolvedTextEmbedModel is the text embedding model the configuration
+// resolves, or "" when no embed provider resolves (the provider check above
+// reports that on its own row).
+func resolvedTextEmbedModel(cfg config.Config) string {
+	prof, err := cfg.Providers().Resolve(provider.CapEmbed)
+	if err != nil {
+		return ""
+	}
+	text, _ := provider.EffectiveEmbedModels(prof)
+	return strings.TrimSpace(text)
 }
 
 // egressCheck reports, per content-carrying capability (embed, chat, ocr,
