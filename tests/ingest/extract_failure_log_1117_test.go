@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 )
@@ -144,8 +145,11 @@ func TestExtractFailureLog_DoclingCommandFailureLogsOneLine(t *testing.T) {
 			t.Fatalf("log line %q must contain %q", line, want)
 		}
 	}
-	if strings.Contains(line, "second stderr line") {
-		t.Fatalf("log line must stop at the first line break: %q", line)
+	if got := linesContaining(lines, "second stderr line"); len(got) != 0 {
+		t.Fatalf("the log must stop at the first stderr line break, got %q", got)
+	}
+	if got := linesContaining(lines, "extraction failed"); len(got) != 1 {
+		t.Fatalf("extraction-failure lines = %q, want exactly one", got)
 	}
 	assertNoDocText(t, lines)
 }
@@ -309,11 +313,20 @@ func TestExtractFailureLog_WatchLogsOneLine(t *testing.T) {
 	cfg.IngestWatchDebounce = 20 * time.Millisecond
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetDocumentExtractor(failingExtractor{msg: "upstream status 503"})
+	state := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc.SetIndexingState(state)
 	sink := captureLogger(svc)
 	if err := svc.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	startWatcher(t, ctx, svc)
+	baseErrors := state.Snapshot().Errors
+
+	// Run the watcher in its own goroutine, so the test can wait for Watch to
+	// return. Watch returns only after its worker has finished the current
+	// document, so every log line of that document is written by then.
+	watchDone := make(chan error, 1)
+	go func() { watchDone <- svc.Watch(ctx) }()
+	time.Sleep(100 * time.Millisecond)
 
 	const rel = "late/arrival.pdf"
 	if err := os.MkdirAll(filepath.Join(root, "late"), 0o755); err != nil {
@@ -321,13 +334,25 @@ func TestExtractFailureLog_WatchLogsOneLine(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(root, rel), "%PDF-1.4 "+docTextMarker)
 
+	// The watcher counts the error before it decides whether to log the
+	// failure. Wait for the count, then stop the watcher and wait for Watch to
+	// return, so the watcher has finished with the document.
 	deadline := time.Now().Add(5 * time.Second)
-	for len(linesContaining(logLines(sink), rel)) == 0 && time.Now().Before(deadline) {
+	for state.Snapshot().Errors == baseErrors {
+		if time.Now().After(deadline) {
+			t.Fatal("the watcher did not record the failed document")
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// Let the watcher finish its own error handling for the document.
-	time.Sleep(200 * time.Millisecond)
 	cancel()
+	select {
+	case err := <-watchDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Watch: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Watch did not return after cancel")
+	}
 
 	lines := logLines(sink)
 	got := linesContaining(lines, rel)
