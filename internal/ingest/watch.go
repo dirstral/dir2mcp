@@ -593,7 +593,11 @@ func (w *fsWatchLoop) process(ctx context.Context, job watchJob) {
 	// momentarily absent from the index (issue #409 item 4).
 	if err := w.svc.processDocument(ctx, f, w.secrets, false, nil); err != nil && ctx.Err() == nil {
 		w.svc.addErrors(1)
-		w.svc.getLogger().Printf("watch: index %s: %v", rel, err)
+		// An extraction failure already has its own log line (#1117). Log every
+		// other failure here, so one failed document gives one line.
+		if !extractFailureLogged(err) {
+			w.svc.getLogger().Printf("watch: index %s: %v", rel, err)
+		}
 	}
 }
 

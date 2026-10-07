@@ -4959,7 +4959,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	// active engine (auto with no docling/OCR, or the pandoc pin).
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
 	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		return s.generatePandocMarkdownRepresentation(ctx, doc, content)
+		return s.logExtractFailure(ctx, doc, "pandoc", s.generatePandocMarkdownRepresentation(ctx, doc, content))
 	}
 
 	if s.extractor == nil {
@@ -4979,13 +4979,14 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		// below runs the same docling command again, which doubles the time and
 		// times out again, so record the timeout now (#1105).
 		if isDoclingTimeout(err) {
-			return err
+			return s.logExtractFailure(ctx, doc, "docling", err)
 		}
 	}
 
 	ocrText, err := s.readOrComputeOCR(ctx, doc, content)
 	if err != nil {
-		return err
+		engine, _ := s.extractorProviderModel()
+		return s.logExtractFailure(ctx, doc, engine, err)
 	}
 
 	ocrText = strings.TrimSpace(ocrText)
