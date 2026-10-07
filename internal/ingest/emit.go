@@ -103,22 +103,46 @@ func (s *Service) loadOwnedArtifacts(ctx context.Context) {
 		rows = nil
 	}
 	// A row applies only under the output root it was written under (SPEC
-	// §8.6.14): after `dir` changes, rows from the previous root neither exclude
-	// nor describe any file, so a stale row can never mis-own an in-corpus file
-	// that shares its corpus-relative path.
+	// §8.6.14). Sidecar discovery runs over the corpus, so it sees only the rows
+	// written beside the media (root ""): a row written under a separate `dir`
+	// never excludes, and is never dropped by, an in-corpus file that shares its
+	// corpus-relative path. Write-back sees the rows of the current root. Rows
+	// of an earlier non-empty root describe no file at all.
 	root := s.emitOutputRoot()
-	idx := make(map[string]ownedArtifact, len(rows))
+	inCorpus := make(map[string]ownedArtifact)
+	outRoot := make(map[string]ownedArtifact)
 	for _, r := range rows {
-		if r.OutputRoot != root {
-			continue
-		}
-		idx[r.RelPath] = ownedArtifact{DocID: r.DocID, Format: r.Format, Lang: r.Lang,
+		rec := ownedArtifact{DocID: r.DocID, Format: r.Format, Lang: r.Lang,
 			SizeBytes: r.SizeBytes, MTimeUnix: r.MTimeUnix, ContentSHA256: r.ContentSHA256}
+		switch {
+		case r.OutputRoot == "":
+			inCorpus[r.RelPath] = rec
+		case r.OutputRoot == root:
+			outRoot[r.RelPath] = rec
+		}
 	}
 	s.ownedMu.Lock()
-	s.ownedArtifacts = idx
+	s.ownedArtifacts = inCorpus
+	s.outRootOwned = outRoot
 	s.ownedLoaded = true
 	s.ownedMu.Unlock()
+}
+
+// ownedIndexLocked returns the ownership index for an output root: the
+// in-corpus index (rows written beside the media, plus marker adoptions) for
+// root "", else the index of the current emit.dir. The caller holds ownedMu
+// for writing.
+func (s *Service) ownedIndexLocked(root string) map[string]ownedArtifact {
+	if root == "" {
+		if s.ownedArtifacts == nil {
+			s.ownedArtifacts = make(map[string]ownedArtifact)
+		}
+		return s.ownedArtifacts
+	}
+	if s.outRootOwned == nil {
+		s.outRootOwned = make(map[string]ownedArtifact)
+	}
+	return s.outRootOwned
 }
 
 // ensureOwnedLoaded loads the ownership index on first use so a standalone
@@ -132,34 +156,43 @@ func (s *Service) ensureOwnedLoaded(ctx context.Context) {
 	}
 }
 
-// lookupOwned returns the ownership record for relPath, if any. The map is
-// read under the lock: the scan loop and the filesystem watcher may consult it
-// while a write-back adds to it.
-func (s *Service) lookupOwned(ctx context.Context, relPath string) (ownedArtifact, bool) {
+// lookupOwned returns the ownership record for relPath under an output root
+// ("" = in the corpus), if any. The map is read under the lock: the scan loop
+// and the filesystem watcher may consult it while a write-back adds to it.
+func (s *Service) lookupOwned(ctx context.Context, root, relPath string) (ownedArtifact, bool) {
 	s.ensureOwnedLoaded(ctx)
 	s.ownedMu.RLock()
 	defer s.ownedMu.RUnlock()
-	rec, ok := s.ownedArtifacts[relPath]
+	idx := s.ownedArtifacts
+	if root != "" {
+		idx = s.outRootOwned
+	}
+	rec, ok := idx[relPath]
 	return rec, ok
 }
 
-// rememberOwned records a freshly written artifact in the in-memory index.
+// rememberOwned records a freshly written artifact in the index of the root it
+// was written under.
 func (s *Service) rememberOwned(a store.EmittedArtifact) {
 	s.ownedMu.Lock()
 	defer s.ownedMu.Unlock()
-	if s.ownedArtifacts == nil {
-		s.ownedArtifacts = make(map[string]ownedArtifact)
-	}
-	s.ownedArtifacts[a.RelPath] = ownedArtifact{DocID: a.DocID, Format: a.Format, Lang: a.Lang,
+	s.ownedIndexLocked(a.OutputRoot)[a.RelPath] = ownedArtifact{DocID: a.DocID, Format: a.Format, Lang: a.Lang,
 		SizeBytes: a.SizeBytes, MTimeUnix: a.MTimeUnix, ContentSHA256: a.ContentSHA256}
 }
 
-// forgetOwned drops an artifact from the index and the store: the file changed
-// on disk, so it is authored now.
-func (s *Service) forgetOwned(ctx context.Context, relPath string) {
+// forgetOwned drops an artifact from the index of its output root and from the
+// store: the file changed on disk, so it is authored now. A marker adoption that
+// was never persisted (DocID 0) has no row, so the store is not touched for it:
+// a row at that rel_path, if any, belongs to another root.
+func (s *Service) forgetOwned(ctx context.Context, root, relPath string) {
 	s.ownedMu.Lock()
-	delete(s.ownedArtifacts, relPath)
+	idx := s.ownedIndexLocked(root)
+	rec, had := idx[relPath]
+	delete(idx, relPath)
 	s.ownedMu.Unlock()
+	if !had || rec.DocID == 0 {
+		return
+	}
 	if as, ok := s.store.(emittedArtifactStore); ok {
 		if err := as.DeleteEmittedArtifact(ctx, relPath); err != nil {
 			s.getLogger().Printf("subtitle write-back: drop ownership of %s: %v", relPath, err)
@@ -177,7 +210,7 @@ func (s *Service) forgetOwned(ctx context.Context, relPath string) {
 // has been edited: it stops being owned here and now, and the caller treats it
 // as an authored sidecar.
 func (s *Service) isOwnedSidecar(ctx context.Context, relPath string, st sidecarStat) bool {
-	rec, ok := s.lookupOwned(ctx, relPath)
+	rec, ok := s.lookupOwned(ctx, "", relPath)
 	if !ok {
 		// No ownership row. The file may still be dir2mcp's own output whose row
 		// was lost with the state database: an intact provenance marker proves it.
@@ -187,7 +220,7 @@ func (s *Service) isOwnedSidecar(ctx context.Context, relPath string, st sidecar
 		return true
 	}
 	s.getLogger().Printf("subtitle write-back: %s changed on disk since it was written; it is an authored sidecar from now on", relPath)
-	s.forgetOwned(ctx, relPath)
+	s.forgetOwned(ctx, "", relPath)
 	return false
 }
 
@@ -219,11 +252,9 @@ func (s *Service) adoptMarkedSidecar(ctx context.Context, relPath string, st sid
 	}
 	sum := sha256.Sum256(data)
 	s.ownedMu.Lock()
-	if s.ownedArtifacts == nil {
-		s.ownedArtifacts = make(map[string]ownedArtifact)
-	}
 	// DocID 0 marks an adoption not yet persisted; writeArtifact records it.
-	s.ownedArtifacts[relPath] = ownedArtifact{SizeBytes: st.SizeBytes, MTimeUnix: st.MTimeUnix,
+	// Adoption is a discovery fact, so it goes into the in-corpus index.
+	s.ownedIndexLocked("")[relPath] = ownedArtifact{SizeBytes: st.SizeBytes, MTimeUnix: st.MTimeUnix,
 		ContentSHA256: hex.EncodeToString(sum[:])}
 	s.ownedMu.Unlock()
 	return true
@@ -303,7 +334,6 @@ func (s *Service) emitSubtitles(ctx context.Context, doc model.Document) {
 		stem:      s.emitStem(doc.RelPath),
 		langs:     s.emitLanguages(reps),
 		bound:     s.boundSidecars(ctx, doc.RelPath),
-		owned:     s.ownedForDoc(ctx, doc.DocID),
 		primary:   s.primaryTranscriptLanguage(reps),
 		secondary: s.emitSecondaryLanguage(reps),
 	}
@@ -327,8 +357,6 @@ type emitPlan struct {
 	// bound is the set of UNOWNED sidecars already bound to the document, keyed
 	// by boundKey(ext, lang); "ttml" is additionally present when any TTML binds.
 	bound map[string]struct{}
-	// owned are this document's recorded artifacts keyed by rel_path.
-	owned map[string]ownedArtifact
 	// primary/secondary are the TTML languages: the source transcript and the
 	// first configured translation target the document has (empty = none).
 	primary, secondary string
@@ -481,21 +509,18 @@ func boundKey(ext, lang string) string {
 	return strings.ToLower(ext) + "|" + strings.ToLower(strings.TrimSpace(lang))
 }
 
-// ownedForDoc returns a copy of the document's recorded artifacts keyed by
-// rel_path, taken under the lock.
-func (s *Service) ownedForDoc(ctx context.Context, docID int64) map[string]ownedArtifact {
-	s.ensureOwnedLoaded(ctx)
-	s.ownedMu.RLock()
-	defer s.ownedMu.RUnlock()
-	out := map[string]ownedArtifact{}
-	for relPath, rec := range s.ownedArtifacts {
-		// DocID 0 is a marker adoption not yet tied to a document; it is keyed by
-		// rel_path, so including it only matters for this document's own paths.
-		if rec.DocID == docID || rec.DocID == 0 {
-			out[relPath] = rec
-		}
+// ownedForDoc returns the ownership record of one artifact path of a document
+// under the current output root: a row recorded for this document, or a marker
+// adoption (DocID 0) not yet tied to a document. It is one map lookup per
+// artifact, so the cost of a document does not grow with the corpus. Marker
+// adoptions are in the in-corpus index, so they apply only when write-back
+// writes beside the media.
+func (s *Service) ownedForDoc(ctx context.Context, docID int64, relOut string) (ownedArtifact, bool) {
+	rec, ok := s.lookupOwned(ctx, s.emitOutputRoot(), relOut)
+	if !ok || (rec.DocID != docID && rec.DocID != 0) {
+		return ownedArtifact{}, false
 	}
-	return out
+	return rec, true
 }
 
 // emitRelPath is the corpus-relative path of an artifact: the media's directory,
@@ -541,6 +566,10 @@ func (s *Service) emitTimed(ctx context.Context, ts subexport.Store, as emittedA
 	if _, present := plan.bound[boundKey(ext, lang)]; present {
 		return
 	}
+	relOut := emitRelPath(plan.doc, plan.stem, lang, ext)
+	if s.ownedArtifactKept(ctx, as, plan, relOut, format, lang) {
+		return
+	}
 	rendered, err := r.RenderTimed(ctx, ts, plan.doc.RelPath, lang, format)
 	if err != nil {
 		if !errors.Is(err, subexport.ErrNoCues) {
@@ -553,7 +582,6 @@ func (s *Service) emitTimed(ctx context.Context, ts subexport.Store, as emittedA
 		// output if the state database is ever lost. SRT has no comment syntax.
 		rendered = subtitle.StampVTT(rendered)
 	}
-	relOut := emitRelPath(plan.doc, plan.stem, lang, ext)
 	s.writeArtifact(ctx, as, plan, relOut, format, lang, []byte(rendered))
 }
 
@@ -563,6 +591,10 @@ func (s *Service) emitTTML(ctx context.Context, ts subexport.Store, as emittedAr
 	if _, present := plan.bound["ttml"]; present {
 		return
 	}
+	relOut := emitRelPath(plan.doc, plan.stem, "", ".ttml")
+	if s.ownedArtifactKept(ctx, as, plan, relOut, "ttml", "") {
+		return
+	}
 	rendered, _, err := r.RenderTTML(ctx, ts, plan.doc.RelPath, plan.primary, plan.secondary)
 	if err != nil {
 		if !errors.Is(err, subexport.ErrNoCues) {
@@ -570,8 +602,24 @@ func (s *Service) emitTTML(ctx context.Context, ts subexport.Store, as emittedAr
 		}
 		return
 	}
-	relOut := emitRelPath(plan.doc, plan.stem, "", ".ttml")
 	s.writeArtifact(ctx, as, plan, relOut, "ttml", "", []byte(subtitle.StampTTML(rendered)))
+}
+
+// ownedArtifactKept reports, before any render, that the `if_missing` policy
+// keeps an artifact as it is: the file exists and this pipeline owns it. The
+// render would only be discarded, so it is skipped. A marker adoption is still
+// persisted on the way. Under `refresh`, or when the file is gone or not owned,
+// it returns false and writeArtifact decides after the render.
+func (s *Service) ownedArtifactKept(ctx context.Context, as emittedArtifactStore, plan emitPlan, relOut, format, lang string) bool {
+	if s.cfg.MediaSubtitlesEmitPolicy == "refresh" {
+		return false
+	}
+	s.persistAdoption(ctx, as, plan, relOut, format, lang)
+	if _, owned := s.ownedForDoc(ctx, plan.doc.DocID, relOut); !owned {
+		return false
+	}
+	_, err := os.Stat(s.emitAbsPath(relOut))
+	return err == nil
 }
 
 // writeArtifact applies the overwrite policy and, when a write is due, writes
@@ -616,9 +664,9 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 
 // persistAdoption records, for this document, an artifact discovery adopted by
 // its provenance marker (DocID 0), so later scans find a row instead of reading
-// the file again. The in-memory plan is updated to match.
+// the file again. The in-memory index is updated to match.
 func (s *Service) persistAdoption(ctx context.Context, as emittedArtifactStore, plan emitPlan, relOut, format, lang string) {
-	rec, ok := plan.owned[relOut]
+	rec, ok := s.ownedForDoc(ctx, plan.doc.DocID, relOut)
 	if !ok || rec.DocID != 0 {
 		return
 	}
@@ -632,8 +680,6 @@ func (s *Service) persistAdoption(ctx context.Context, as emittedArtifactStore, 
 		return
 	}
 	s.rememberOwned(artifact)
-	rec.DocID = plan.doc.DocID
-	plan.owned[relOut] = rec
 }
 
 // artifactWriteDue is the overwrite-policy decision for one artifact (SPEC
@@ -641,7 +687,7 @@ func (s *Service) persistAdoption(ctx context.Context, as emittedArtifactStore, 
 // (hash sha) at abs. It never approves writing over a file this pipeline did not
 // write, and it keeps the ownership rows consistent with the disk on the way.
 func (s *Service) artifactWriteDue(ctx context.Context, plan emitPlan, relOut, abs, sha string) bool {
-	rec, owned := plan.owned[relOut]
+	rec, owned := s.ownedForDoc(ctx, plan.doc.DocID, relOut)
 	_, statErr := os.Stat(abs)
 	exists := statErr == nil
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
@@ -655,7 +701,7 @@ func (s *Service) artifactWriteDue(ctx context.Context, plan emitPlan, relOut, a
 		// authored file later landed on the same name with the same size and
 		// mtime, wrongly exclude that file from discovery. Drop the row now; the
 		// write records the recreated file afresh.
-		s.forgetOwned(ctx, relOut)
+		s.forgetOwned(ctx, s.emitOutputRoot(), relOut)
 		return true
 	}
 	switch {
@@ -694,7 +740,7 @@ func (s *Service) ownedBytesIntact(ctx context.Context, abs, relOut string, rec 
 		return true
 	}
 	s.getLogger().Printf("subtitle write-back: %s was edited since it was written (same size and mtime); it is an authored sidecar from now on and is not rewritten", relOut)
-	s.forgetOwned(ctx, relOut)
+	s.forgetOwned(ctx, s.emitOutputRoot(), relOut)
 	return false
 }
 

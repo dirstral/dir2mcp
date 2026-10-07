@@ -476,8 +476,18 @@ func TestSubtitleEmit_GroupedRenditionsWriteOneSetOnTheGroupStem(t *testing.T) {
 		}
 		t.Fatalf("expected Show.de.vtt and Show.en.vtt on the group stem, dir=%v", names)
 	}
+	// Compare the exact names in the listing, not a stat: on a case-insensitive
+	// filesystem (macOS, Windows) a stat of show.de.vtt finds Show.de.vtt.
+	entries, err := os.ReadDir(h.root)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	listed := map[string]bool{}
+	for _, e := range entries {
+		listed[e.Name()] = true
+	}
 	for _, bad := range []string{"Show_320k.de.vtt", "Show_128k.de.vtt", "show.de.vtt"} {
-		if fileExists(filepath.Join(h.root, bad)) {
+		if listed[bad] {
 			t.Fatalf("unexpected %s", bad)
 		}
 	}
@@ -697,6 +707,54 @@ func TestSubtitleEmit_RowsAreScopedToTheirOutputRoot(t *testing.T) {
 	}
 	if !sawSidecar {
 		t.Fatalf("the authored file must bind as a sidecar; a stale row from another root claimed it")
+	}
+}
+
+// TestSubtitleEmit_InCorpusSidecarDoesNotTouchOutputRootRow pins the other
+// direction of the root scope: while `dir` is set, sidecar discovery runs over
+// the corpus and must not read the rows of the output root. An authored file
+// in the corpus at the same rel_path as an output-root row must neither be
+// claimed as owned nor drop that row.
+func TestSubtitleEmit_InCorpusSidecarDoesNotTouchOutputRootRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	outRoot := testutil.TempDir(t)
+	h := newEmitHarness(t, func(cfg *config.Config) {
+		cfg.MediaSubtitlesEmitDir = outRoot
+		cfg.MediaSubtitlesEmitFormats = []string{"vtt"}
+	})
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	before, ok := emitRows(t, h.store)["audio/one.de.vtt"]
+	if !ok || before.OutputRoot != filepath.Clean(outRoot) {
+		t.Fatalf("expected an output-root row for audio/one.de.vtt, got %+v (ok=%v)", before, ok)
+	}
+
+	authored := "WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhuman\n"
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.de.vtt"), []byte(authored))
+	svc2, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc2.Run(ctx); err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	after, ok := emitRows(t, h.store)["audio/one.de.vtt"]
+	if !ok {
+		t.Fatalf("an in-corpus file dropped the output-root row that shares its rel_path")
+	}
+	if after.OutputRoot != before.OutputRoot || after.ContentSHA256 != before.ContentSHA256 {
+		t.Fatalf("output-root row changed: before %+v, after %+v", before, after)
+	}
+	reps, _ := h.store.TranscriptRepresentations(ctx, "audio/one.mp3")
+	sawSidecar := false
+	for _, rep := range reps {
+		if subexport.RepIsSidecar(rep.MetaJSON) {
+			sawSidecar = true
+		}
+	}
+	if !sawSidecar {
+		t.Fatalf("the authored in-corpus file must bind as a sidecar; an output-root row claimed it")
 	}
 }
 

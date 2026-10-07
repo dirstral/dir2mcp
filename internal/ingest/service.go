@@ -403,10 +403,14 @@ type Service struct {
 	sidecarMu    sync.RWMutex
 
 	// Subtitle write-back state (SPEC §8.6.14, emit.go). ownedArtifacts is the
-	// in-memory projection of the df-003 §5.6 ownership rows, loaded once per
-	// scan (ownedLoaded) so sidecar discovery can exclude files this pipeline
-	// wrote. emitRenderer is the shared subtitle renderer, built once.
+	// in-memory projection of the df-003 §5.6 ownership rows written beside the
+	// media (output root ""), plus marker adoptions, loaded once per scan
+	// (ownedLoaded) so sidecar discovery can exclude files this pipeline wrote.
+	// outRootOwned holds the rows of the current non-empty media.subtitles.emit.dir;
+	// only write-back reads it, because discovery never looks under that root.
+	// emitRenderer is the shared subtitle renderer, built once.
 	ownedArtifacts map[string]ownedArtifact
+	outRootOwned   map[string]ownedArtifact
 	ownedLoaded    bool
 	ownedMu        sync.RWMutex
 	// unownedChecked remembers, per process, the subtitle files found to carry no
