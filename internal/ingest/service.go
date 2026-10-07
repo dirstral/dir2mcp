@@ -1488,7 +1488,7 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 // media.subtitles.{drop_urls,expect_script,drop_phrases,scrub_phrases,collapse_repeats}
 // (issues #545, #765; SPEC §8.6.3). The same options clean STT transcript chunks, translated
 // transcript chunks and sidecar-cue chunks before embedding, and they are the
-// SAME subtitle.CleanOptions shape the export path builds (cli.newCuePipeline),
+// SAME subtitle.CleanOptions shape the export path builds (subexport.NewPipeline),
 // so a hallucinated URL, a wholly-spam chunk or a repetition run is neither
 // exported nor indexed, keeping the index and the sidecar in agreement rather
 // than leaving cues that are invisible in the sidecar but citable from the index.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §7.8 change-detection identity: for a local/NFS corpus the cheap
@@ -17,8 +18,8 @@ import (
 
 func newStatFastPathHarness(t *testing.T) (string, *store.SQLiteStore, config.Config) {
 	t.Helper()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)

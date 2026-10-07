@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Subtitle write-back (SPEC §8.6.14).
@@ -31,8 +32,8 @@ type emitHarness struct {
 
 func newEmitHarness(t *testing.T, mutate func(cfg *config.Config)) *emitHarness {
 	t.Helper()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -385,7 +386,7 @@ func TestSubtitleEmit_TwoPhaseWritesSameFilesAndRecordsOutputs(t *testing.T) {
 		t.Fatalf("single Run: %v", err)
 	}
 
-	manifestPath := filepath.Join(t.TempDir(), "run.jsonl")
+	manifestPath := filepath.Join(testutil.TempDir(t), "run.jsonl")
 	two := newEmitHarness(t, func(cfg *config.Config) {
 		cfg.MediaBatchTwoPhase = true
 		cfg.MediaBatchManifest = manifestPath
@@ -516,7 +517,7 @@ func TestSubtitleEmit_DisabledWritesNothing(t *testing.T) {
 func TestSubtitleEmit_OutputDirMirrorsCorpusTree(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	outRoot := t.TempDir()
+	outRoot := testutil.TempDir(t)
 	h := newEmitHarness(t, func(cfg *config.Config) {
 		cfg.MediaSubtitlesEmitDir = outRoot
 		cfg.MediaSubtitlesEmitFormats = []string{"srt"}
@@ -659,7 +660,7 @@ func TestSubtitleEmit_DeletedOwnedFileIsRecreatedAndRowRefreshed(t *testing.T) {
 func TestSubtitleEmit_RowsAreScopedToTheirOutputRoot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	outRoot := t.TempDir()
+	outRoot := testutil.TempDir(t)
 	h := newEmitHarness(t, func(cfg *config.Config) {
 		cfg.MediaSubtitlesEmitDir = outRoot
 		cfg.MediaSubtitlesEmitFormats = []string{"vtt"}
@@ -721,7 +722,7 @@ func TestSubtitleEmit_LostStateDatabaseDoesNotFreezeTheArchive(t *testing.T) {
 	}
 
 	// The state database is lost: a fresh store over the same corpus.
-	fresh := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	fresh := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := fresh.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -772,7 +773,7 @@ func TestSubtitleEmit_EditedMarkedFileIsAuthoredAfterStateLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fresh := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	fresh := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := fresh.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
