@@ -646,9 +646,10 @@ writes:
 
 With `media.variants.group: true` the stem is the **group** stem
 (`episode_1080p.mp4` → `episode.ru.vtt`), so one set of files serves every
-rendition. The bytes are **identical to `dir2mcp export`** for the same document,
+rendition. The cues are **identical to `dir2mcp export`** for the same document,
 language and format: one renderer, one cue pipeline (`filter_words`, the
-`media.subtitles.*` cleaning, `segmentation`). **SMIL is never written** by
+`media.subtitles.*` cleaning, `segmentation`). A written VTT or TTML also
+carries a one-line provenance comment that export does not (see below). **SMIL is never written** by
 write-back: an archive's packaging manifests belong to whatever produced the
 media, and stay an on-demand `export --format ttml --out` concern.
 
@@ -672,6 +673,17 @@ written under a separate `dir` are outputs only; discovery never looks there, so
 they neither bind as sidecars nor need excluding. That root must lie outside the
 corpus, and each ownership record remembers the root it was written under, so
 changing `dir` later never lets an old record claim an in-corpus file.
+
+**Ownership survives losing the state folder.** The ownership records live in
+the state database, which can be deleted, reset for a fresh index, or lost with
+a disk. So every written VTT and TTML also proves itself: right after the header
+it carries a comment such as `NOTE dir2mcp-emitted v1 sha256=…`, holding the hash
+of the rest of the file. When a scan finds a subtitle file with no record, it
+checks that comment: an intact one means dir2mcp's own unedited output, which is
+treated as owned and re-recorded; a mismatch means someone edited it, so it is
+authored. Players ignore the comment. SRT has no comment syntax, so an SRT that
+outlives its record reads as authored; still back up the state folder before
+resetting it.
 
 Each write is atomic. A failed write is a non-fatal per-document outcome,
 recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)

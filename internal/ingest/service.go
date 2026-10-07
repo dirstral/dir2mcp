@@ -406,9 +406,13 @@ type Service struct {
 	// in-memory projection of the df-003 §5.6 ownership rows, loaded once per
 	// scan (ownedLoaded) so sidecar discovery can exclude files this pipeline
 	// wrote. emitRenderer is the shared subtitle renderer, built once.
-	ownedArtifacts   map[string]ownedArtifact
-	ownedLoaded      bool
-	ownedMu          sync.RWMutex
+	ownedArtifacts map[string]ownedArtifact
+	ownedLoaded    bool
+	ownedMu        sync.RWMutex
+	// unownedChecked remembers, per process, the subtitle files found to carry no
+	// intact provenance marker at a given stat, so a sidecar with no ownership
+	// row is read for a marker once rather than on every lookup (emit.go).
+	unownedChecked   map[string]sidecarStat
 	emitRenderer     *subexport.Renderer
 	emitRendererOnce sync.Once
 	emitWarnOnce     sync.Once

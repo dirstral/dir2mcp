@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subexport"
+	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
 // Subtitle write-back (SPEC §8.6.14).
@@ -166,6 +167,8 @@ func assertVTTMatchesExport(t *testing.T, h *emitHarness, r subexport.Renderer, 
 	if err != nil {
 		t.Fatalf("RenderTimed %s: %v", lang, err)
 	}
+	// The written file is the export render plus its provenance marker (§8.6.14).
+	want = subtitle.StampVTT(want)
 	if got != want {
 		t.Fatalf("%s.%s.vtt differs from export output:\n--- file ---\n%s\n--- export ---\n%s", stem, lang, got, want)
 	}
@@ -181,6 +184,7 @@ func assertBilingualTTMLMatchesExport(t *testing.T, h *emitHarness, r subexport.
 	if err != nil {
 		t.Fatalf("RenderTTML: %v", err)
 	}
+	want = subtitle.StampTTML(want)
 	if got != want {
 		t.Fatalf("%s.ttml differs from export output", stem)
 	}
@@ -346,6 +350,7 @@ func TestSubtitleEmit_RefreshRewritesOwnedOnRederivation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			want = subtitle.StampVTT(want)
 			switch policy {
 			case "if_missing":
 				if after != before {
@@ -691,5 +696,103 @@ func TestSubtitleEmit_RowsAreScopedToTheirOutputRoot(t *testing.T) {
 	}
 	if !sawSidecar {
 		t.Fatalf("the authored file must bind as a sidecar; a stale row from another root claimed it")
+	}
+}
+
+// TestSubtitleEmit_LostStateDatabaseDoesNotFreezeTheArchive pins the recovery
+// half of SPEC §8.6.14: with the state database gone (a fresh store over the
+// same corpus), the VTT/TTML files dir2mcp wrote prove themselves by their
+// provenance marker, so they are adopted as owned output rather than ingested
+// as authored transcripts. STT runs again, the transcript stays STT-sourced, the
+// files are left as they are, and the adoption is persisted as a row.
+func TestSubtitleEmit_LostStateDatabaseDoesNotFreezeTheArchive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newEmitHarness(t, nil)
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	vttPath := filepath.Join(h.root, "audio", "one.de.vtt")
+	written := readFile(t, vttPath)
+	if !subtitle.ReadProvenance([]byte(written)).Intact {
+		t.Fatalf("written VTT must carry an intact provenance marker:\n%s", written)
+	}
+
+	// The state database is lost: a fresh store over the same corpus.
+	fresh := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := fresh.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	h.store = fresh
+	// Only the database is replaced; the transcript cache in the same state folder
+	// may serve the STT result, so what matters is where the transcript comes from.
+	svc2, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc2.Run(ctx); err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	reps, _ := fresh.TranscriptRepresentations(ctx, "audio/one.mp3")
+	if len(reps) == 0 {
+		t.Fatalf("the document must have its STT transcript after a state loss")
+	}
+	for _, rep := range reps {
+		if subexport.RepIsSidecar(rep.MetaJSON) {
+			t.Fatalf("a marked file was ingested as an authored transcript: %s", rep.MetaJSON)
+		}
+	}
+	doc, _ := fresh.GetDocumentByPath(ctx, "audio/one.mp3")
+	if doc.SidecarFingerprint != "" {
+		t.Fatalf("adopted files must not enter the sidecar fingerprint, got %q", doc.SidecarFingerprint)
+	}
+	if readFile(t, vttPath) != written {
+		t.Fatalf("an adopted file must be left as it is under if_missing")
+	}
+	if _, ok := emitRows(t, fresh)["audio/one.de.vtt"]; !ok {
+		t.Fatalf("the adoption must be persisted as an ownership row")
+	}
+}
+
+// TestSubtitleEmit_EditedMarkedFileIsAuthoredAfterStateLoss pins that the
+// marker cannot launder an edit: a marked file whose body was changed fails the
+// hash and binds as an authored sidecar, exactly as without a marker.
+func TestSubtitleEmit_EditedMarkedFileIsAuthoredAfterStateLoss(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newEmitHarness(t, func(cfg *config.Config) { cfg.MediaSubtitlesEmitFormats = []string{"vtt"} })
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	vttPath := filepath.Join(h.root, "audio", "one.de.vtt")
+	edited := readFile(t, vttPath) + "\n00:00:08.000 --> 00:00:09.000\nfixed by an editor\n"
+	if err := os.WriteFile(vttPath, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := fresh.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	h.store = fresh
+	svc2, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc2.Run(ctx); err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	reps, _ := fresh.TranscriptRepresentations(ctx, "audio/one.mp3")
+	saw := false
+	for _, rep := range reps {
+		if subexport.RepIsSidecar(rep.MetaJSON) && strings.EqualFold(subexport.RepLanguage(rep.MetaJSON), "de") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("an edited marked file must bind as the authored de transcript")
+	}
+	if readFile(t, vttPath) != edited {
+		t.Fatalf("an edited file must never be overwritten")
 	}
 }

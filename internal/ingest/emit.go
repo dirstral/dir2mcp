@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -18,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subexport"
+	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
 // Subtitle write-back (SPEC §8.6.14).
@@ -177,7 +179,9 @@ func (s *Service) forgetOwned(ctx context.Context, relPath string) {
 func (s *Service) isOwnedSidecar(ctx context.Context, relPath string, st sidecarStat) bool {
 	rec, ok := s.lookupOwned(ctx, relPath)
 	if !ok {
-		return false
+		// No ownership row. The file may still be dir2mcp's own output whose row
+		// was lost with the state database: an intact provenance marker proves it.
+		return s.adoptMarkedSidecar(ctx, relPath, st)
 	}
 	if rec.MTimeUnix == st.MTimeUnix && rec.SizeBytes == st.SizeBytes {
 		return true
@@ -185,6 +189,64 @@ func (s *Service) isOwnedSidecar(ctx context.Context, relPath string, st sidecar
 	s.getLogger().Printf("subtitle write-back: %s changed on disk since it was written; it is an authored sidecar from now on", relPath)
 	s.forgetOwned(ctx, relPath)
 	return false
+}
+
+// adoptMarkedSidecar is the recovery half of the ownership rule (SPEC §8.6.14).
+// A subtitle file with no ownership row is read for a provenance marker; when
+// the marker's hash matches the body, the file is dir2mcp output nobody has
+// changed, so it is treated as owned (in memory now; writeArtifact persists the
+// row for the document it belongs to). This is what keeps a lost, reset or
+// rebuilt state database from turning every written file into an "authored"
+// transcript that would never be re-derived. An unmarked file (authored, or
+// legacy output of another tool) costs one small head read per process per
+// stat; a marked but edited file fails the hash and stays authored.
+func (s *Service) adoptMarkedSidecar(ctx context.Context, relPath string, st sidecarStat) bool {
+	s.ownedMu.RLock()
+	prev, checked := s.unownedChecked[relPath]
+	s.ownedMu.RUnlock()
+	if checked && prev == st {
+		return false
+	}
+	data, ok := s.readMarkedSidecar(ctx, relPath)
+	if !ok || !subtitle.ReadProvenance(data).Intact {
+		s.ownedMu.Lock()
+		if s.unownedChecked == nil {
+			s.unownedChecked = make(map[string]sidecarStat)
+		}
+		s.unownedChecked[relPath] = st
+		s.ownedMu.Unlock()
+		return false
+	}
+	sum := sha256.Sum256(data)
+	s.ownedMu.Lock()
+	if s.ownedArtifacts == nil {
+		s.ownedArtifacts = make(map[string]ownedArtifact)
+	}
+	// DocID 0 marks an adoption not yet persisted; writeArtifact records it.
+	s.ownedArtifacts[relPath] = ownedArtifact{SizeBytes: st.SizeBytes, MTimeUnix: st.MTimeUnix,
+		ContentSHA256: hex.EncodeToString(sum[:])}
+	s.ownedMu.Unlock()
+	return true
+}
+
+// readMarkedSidecar returns the whole file only when its head carries the
+// marker tag; an unmarked file is never read past ProvenanceHeadBytes.
+func (s *Service) readMarkedSidecar(ctx context.Context, relPath string) ([]byte, bool) {
+	rc, err := s.corpusFS().Open(ctx, relPath)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = rc.Close() }()
+	head := make([]byte, subtitle.ProvenanceHeadBytes)
+	n, _ := io.ReadFull(rc, head)
+	if !subtitle.MayCarryProvenance(head[:n]) {
+		return nil, false
+	}
+	rest, err := io.ReadAll(io.LimitReader(rc, s.sourceReadCapBytes()))
+	if err != nil {
+		return nil, false
+	}
+	return append(head[:n], rest...), true
 }
 
 // subtitleRenderer builds the shared renderer once per service. A compile
@@ -427,7 +489,9 @@ func (s *Service) ownedForDoc(ctx context.Context, docID int64) map[string]owned
 	defer s.ownedMu.RUnlock()
 	out := map[string]ownedArtifact{}
 	for relPath, rec := range s.ownedArtifacts {
-		if rec.DocID == docID {
+		// DocID 0 is a marker adoption not yet tied to a document; it is keyed by
+		// rel_path, so including it only matters for this document's own paths.
+		if rec.DocID == docID || rec.DocID == 0 {
 			out[relPath] = rec
 		}
 	}
@@ -484,6 +548,11 @@ func (s *Service) emitTimed(ctx context.Context, ts subexport.Store, as emittedA
 		}
 		return
 	}
+	if format == "vtt" {
+		// The provenance marker (SPEC §8.6.14) lets this file prove it is dir2mcp
+		// output if the state database is ever lost. SRT has no comment syntax.
+		rendered = subtitle.StampVTT(rendered)
+	}
 	relOut := emitRelPath(plan.doc, plan.stem, lang, ext)
 	s.writeArtifact(ctx, as, plan, relOut, format, lang, []byte(rendered))
 }
@@ -502,7 +571,7 @@ func (s *Service) emitTTML(ctx context.Context, ts subexport.Store, as emittedAr
 		return
 	}
 	relOut := emitRelPath(plan.doc, plan.stem, "", ".ttml")
-	s.writeArtifact(ctx, as, plan, relOut, "ttml", "", []byte(rendered))
+	s.writeArtifact(ctx, as, plan, relOut, "ttml", "", []byte(subtitle.StampTTML(rendered)))
 }
 
 // writeArtifact applies the overwrite policy and, when a write is due, writes
@@ -512,6 +581,7 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	abs := s.emitAbsPath(relOut)
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
+	s.persistAdoption(ctx, as, plan, relOut, format, lang)
 	if !s.artifactWriteDue(ctx, plan, relOut, abs, sha) {
 		return
 	}
@@ -542,6 +612,28 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	}
 	s.rememberOwned(artifact)
 	s.activeOutcome.addOutput(emitOutputLabel(format, lang))
+}
+
+// persistAdoption records, for this document, an artifact discovery adopted by
+// its provenance marker (DocID 0), so later scans find a row instead of reading
+// the file again. The in-memory plan is updated to match.
+func (s *Service) persistAdoption(ctx context.Context, as emittedArtifactStore, plan emitPlan, relOut, format, lang string) {
+	rec, ok := plan.owned[relOut]
+	if !ok || rec.DocID != 0 {
+		return
+	}
+	artifact := store.EmittedArtifact{
+		RelPath: relOut, DocID: plan.doc.DocID, OutputRoot: s.emitOutputRoot(), Format: format, Lang: lang,
+		SizeBytes: rec.SizeBytes, MTimeUnix: rec.MTimeUnix, ContentSHA256: rec.ContentSHA256,
+		EmittedUnix: time.Now().Unix(),
+	}
+	if err := as.UpsertEmittedArtifact(ctx, artifact); err != nil {
+		s.getLogger().Printf("subtitle write-back: record adopted %s: %v", relOut, err)
+		return
+	}
+	s.rememberOwned(artifact)
+	rec.DocID = plan.doc.DocID
+	plan.owned[relOut] = rec
 }
 
 // artifactWriteDue is the overwrite-policy decision for one artifact (SPEC
