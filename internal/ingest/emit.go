@@ -633,7 +633,18 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	if !s.artifactWriteDue(ctx, plan, relOut, abs, sha) {
 		return
 	}
+	// A refresh rewrite replaces an owned file. Keep the old bytes aside until
+	// the new file is recorded, so a failed write or record puts the old file
+	// back and its row still describes the disk.
+	backup, err := backupSubtitleFile(abs)
+	if err != nil {
+		s.getLogger().Printf("subtitle write-back: keep a copy of %s before the rewrite: %v", relOut, redactPathError(err))
+		s.addErrors(1)
+		s.markActiveErrored(manifestErrSubtitleWriteFailed, manifestErrSubtitleWriteFailed+": subtitle write-back failed for "+relOut)
+		return
+	}
 	if err := writeSubtitleFileAtomic(abs, data); err != nil {
+		restoreSubtitleFile(abs, backup)
 		s.getLogger().Printf("subtitle write-back: write %s: %v", relOut, redactPathError(err))
 		s.addErrors(1)
 		s.markActiveErrored(manifestErrSubtitleWriteFailed, manifestErrSubtitleWriteFailed+": subtitle write-back failed for "+relOut)
@@ -641,7 +652,8 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		s.getLogger().Printf("subtitle write-back: stat written %s: %v", relOut, err)
+		restoreSubtitleFile(abs, backup)
+		s.getLogger().Printf("subtitle write-back: stat written %s: %v", relOut, redactPathError(err))
 		return
 	}
 	artifact := store.EmittedArtifact{
@@ -651,15 +663,48 @@ func (s *Service) writeArtifact(ctx context.Context, as emittedArtifactStore, pl
 	}
 	if err := as.UpsertEmittedArtifact(ctx, artifact); err != nil {
 		// The file is on disk but unrecorded: the next scan would read it as an
-		// authored sidecar. Remove it so the run stays consistent and retries.
-		_ = os.Remove(abs)
-		s.getLogger().Printf("subtitle write-back: record %s: %v (file removed; will retry next run)", relOut, err)
+		// authored sidecar. Put back what was there before (the old owned file,
+		// or nothing) so the run stays consistent and retries.
+		restoreSubtitleFile(abs, backup)
+		s.getLogger().Printf("subtitle write-back: record %s: %v (previous state restored; will retry next run)", relOut, err)
 		s.addErrors(1)
 		s.markActiveErrored(manifestErrSubtitleWriteFailed, manifestErrSubtitleWriteFailed+": could not record subtitle artifact for "+relOut)
 		return
 	}
+	if backup != "" {
+		_ = os.Remove(backup)
+	}
 	s.rememberOwned(artifact)
 	s.activeOutcome.addOutput(emitOutputLabel(format, lang))
+}
+
+// backupSubtitleFile moves an existing file at path to a hidden sibling and
+// returns the sibling's path, or "" when there is no file to keep. The rename
+// keeps the bytes and the mtime, so a restore makes the old ownership row true
+// again.
+func backupSubtitleFile(path string) (string, error) {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	backup := filepath.Join(filepath.Dir(path), ".dir2mcp-subtitle-backup-"+filepath.Base(path))
+	if err := os.Rename(path, backup); err != nil {
+		return "", err
+	}
+	return backup, nil
+}
+
+// restoreSubtitleFile undoes a failed write: it moves the backup back over path,
+// or removes path when there was no file before. Errors are ignored: the next
+// scan sees whatever is on disk and decides again.
+func restoreSubtitleFile(path, backup string) {
+	if backup == "" {
+		_ = os.Remove(path)
+		return
+	}
+	_ = os.Rename(backup, path)
 }
 
 // persistAdoption records, for this document, an artifact discovery adopted by

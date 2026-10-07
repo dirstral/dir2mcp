@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -623,6 +624,83 @@ func TestSubtitleEmit_RefreshNeverOverwritesSameStatEdit(t *testing.T) {
 	}
 	if _, owned := emitRows(t, h.store)["audio/one.de.vtt"]; owned {
 		t.Fatalf("the edited file must no longer be recorded as owned")
+	}
+}
+
+// TestSubtitleEmit_RefreshKeepsTheOldFileWhenTheRecordFails pins the rollback of
+// a refresh rewrite: when the new file cannot be recorded, the old owned file is
+// put back, unchanged, so its row still describes the disk and no backup is
+// left behind.
+func TestSubtitleEmit_RefreshKeepsTheOldFileWhenTheRecordFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newEmitHarness(t, func(cfg *config.Config) {
+		cfg.MediaSubtitlesEmitPolicy = "refresh"
+		cfg.MediaSubtitlesEmitFormats = []string{"vtt"}
+	})
+	mustWriteFile(t, filepath.Join(h.root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	svc, _ := h.service(t, emitFakeTranscript, "whisper-large-v3")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	vttPath := filepath.Join(h.root, "audio", "one.de.vtt")
+	original := readFile(t, vttPath)
+	rowBefore, ok := emitRows(t, h.store)["audio/one.de.vtt"]
+	if !ok {
+		t.Fatalf("expected an ownership row after the first run")
+	}
+
+	blockEmittedArtifactWrites(t, filepath.Join(h.stateDir, "meta.sqlite"))
+
+	svc2, _ := h.service(t, "[00:00] a completely new transcript\n[00:03] from a better model", "whisper-large-v4")
+	if err := svc2.Reindex(ctx); err != nil {
+		t.Fatalf("Reindex: %v", err)
+	}
+	if got := readFile(t, vttPath); got != original {
+		t.Fatalf("a failed record must put the old owned file back, got:\n%s", got)
+	}
+	rowAfter, ok := emitRows(t, h.store)["audio/one.de.vtt"]
+	if !ok || rowAfter.ContentSHA256 != rowBefore.ContentSHA256 {
+		t.Fatalf("the old row must stay and describe the restored file: before %+v, after %+v (ok=%v)", rowBefore, rowAfter, ok)
+	}
+	info, err := os.Stat(vttPath)
+	if err != nil || info.Size() != rowAfter.SizeBytes || info.ModTime().Unix() != rowAfter.MTimeUnix {
+		t.Fatalf("the restored file must match its row by size and mtime: %v", err)
+	}
+	assertNoSubtitleScratchFiles(t, filepath.Join(h.root, "audio"))
+}
+
+// blockEmittedArtifactWrites makes every later write of an ownership row fail,
+// with a sqlite trigger on the state database at dbPath.
+func blockEmittedArtifactWrites(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, stmt := range []string{
+		`CREATE TRIGGER block_emit_insert BEFORE INSERT ON emitted_artifacts BEGIN SELECT RAISE(ABORT, 'blocked by test'); END`,
+		`CREATE TRIGGER block_emit_update BEFORE UPDATE ON emitted_artifacts BEGIN SELECT RAISE(ABORT, 'blocked by test'); END`,
+	} {
+		if _, err := db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("create trigger: %v", err)
+		}
+	}
+}
+
+// assertNoSubtitleScratchFiles fails when dir holds a write-back backup or
+// temporary file.
+func assertNoSubtitleScratchFiles(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".dir2mcp-subtitle-") {
+			t.Fatalf("a backup or temp file was left behind: %s", e.Name())
+		}
 	}
 }
 

@@ -2,8 +2,11 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
@@ -126,5 +129,56 @@ func TestEmittedArtifacts_RejectsInvalidRows(t *testing.T) {
 	}
 	if err := st.UpsertEmittedArtifact(ctx, store.EmittedArtifact{RelPath: "x.vtt", DocID: b}); err == nil {
 		t.Fatalf("empty format must be rejected")
+	}
+}
+
+// TestEmittedArtifacts_OutputRootColumnIsMigrated pins the additive migration
+// for emitted_artifacts.output_root: a state database whose table predates the
+// column gets it at Init, with the ” default, and a row can then record its
+// output root.
+func TestEmittedArtifacts_OutputRootColumnIsMigrated(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE emitted_artifacts (
+  rel_path TEXT PRIMARY KEY,
+  doc_id INTEGER NOT NULL,
+  format TEXT NOT NULL,
+  lang TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  mtime_unix INTEGER NOT NULL DEFAULT 0,
+  content_sha256 TEXT NOT NULL DEFAULT '',
+  emitted_unix INTEGER NOT NULL DEFAULT 0
+)`); err != nil {
+		t.Fatalf("create old table: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	st := store.NewSQLiteStore(dbPath)
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init over a table without output_root: %v", err)
+	}
+	if err := st.UpsertDocument(ctx, model.Document{RelPath: "media/a.mp3", DocType: "audio", SourceType: "local", Status: "ok"}); err != nil {
+		t.Fatalf("UpsertDocument: %v", err)
+	}
+	doc, err := st.GetDocumentByPath(ctx, "media/a.mp3")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath: %v", err)
+	}
+	if err := st.UpsertEmittedArtifact(ctx, store.EmittedArtifact{RelPath: "media/a.de.vtt", DocID: doc.DocID, OutputRoot: "/out", Format: "vtt", Lang: "de"}); err != nil {
+		t.Fatalf("UpsertEmittedArtifact: %v", err)
+	}
+	rows, err := st.AllEmittedArtifacts(ctx)
+	if err != nil {
+		t.Fatalf("AllEmittedArtifacts: %v", err)
+	}
+	if len(rows) != 1 || rows[0].OutputRoot != "/out" {
+		t.Fatalf("expected one row with output_root /out, got %+v", rows)
 	}
 }

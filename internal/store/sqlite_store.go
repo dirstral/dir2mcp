@@ -794,6 +794,12 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// result it had already paid for. Existing rows default to 0, which
 		// reads back as a zero time and keeps the old TTL fallback.
 		`ALTER TABLE mcp_payment_outcomes ADD COLUMN expires_unix INTEGER NOT NULL DEFAULT 0`,
+		// output_root scopes a subtitle write-back ownership row to the root it
+		// was written under (SPEC §8.6.14, df-003 §5.6). The column came after
+		// the table, so a state database made by a build with the table but
+		// without the column gets it here; its rows were all written beside the
+		// media, which is the '' default.
+		`ALTER TABLE emitted_artifacts ADD COLUMN output_root TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
