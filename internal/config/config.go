@@ -134,10 +134,12 @@ const (
 
 // DefaultDoclingTimeoutSec is the shipped time limit, in seconds, for one
 // docling CLI call on one document (SPEC 7.4.B, ingest.docling.timeout_sec,
-// issue #1105). It is the fixed 15-minute limit from before the key existed.
-// docling on CPU took about 13 minutes for one 2.6 MB PDF with many tables, so
-// a slow host can need a higher value.
-const DefaultDoclingTimeoutSec = 900
+// issue #1105). The default is one hour. The first default was 900 (15
+// minutes), and the release gate of 2026-10-06 failed with it: one 2.6 MB PDF
+// of about 195 pages needed about 1200 s with docling on CPU on a loaded
+// 16-core host (about 13 minutes on the same host when idle). With 3600 the
+// gate passed. A real hang still stops at the limit.
+const DefaultDoclingTimeoutSec = 3600
 
 // DefaultTranscriptChunkSec and DefaultTranscriptChunkGapSec are the shipped
 // transcript chunk window (SPEC 8.6.1, media.transcript_chunk_sec /
