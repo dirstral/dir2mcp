@@ -17,6 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Whole-payload conformance for dir2mcp_stats (issue #850).
@@ -137,7 +138,7 @@ func assertCanonicalStats(t *testing.T, structured map[string]interface{}) {
 func TestStats_PayloadValidatesAgainstCanonicalSchema(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	srv := newServer(t, cfg)
 	defer srv.Close()
 
@@ -150,7 +151,7 @@ func TestStats_PayloadValidatesAgainstCanonicalSchema(t *testing.T) {
 // subtrees.
 func statsStoreWithGaps(t *testing.T) (model.Store, string) {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

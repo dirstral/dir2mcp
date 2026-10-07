@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #879: `ingest.max_file_mb` used to run BEFORE §8.6.5 variant grouping,
@@ -227,7 +228,7 @@ func runScan879(t *testing.T, root string, capMB int, group bool) scan879 {
 	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	ctx := context.Background()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -308,7 +309,7 @@ func assertNoRow879(t *testing.T, st *store.SQLiteStore, relPath string) {
 // renditions grouping discarded. On main the same corpus wrote three size_cap
 // rows and reported nothing.
 func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeRenditions879(t, root)
 
 	scan := runScan879(t, root, 1, true)
@@ -361,7 +362,7 @@ func TestVariantCap879_ScanIndexesTheRenditionItReports(t *testing.T) {
 // for the state the operator reached by raising the cap: the 1080p rendition is
 // the document, and no rendition leaves a stray row.
 func TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeRenditions879(t, root)
 
 	scan := runScan879(t, root, 100, true)
@@ -385,7 +386,7 @@ func TestVariantCap879_ScanKeepsTheBestRenditionWhenAllFit(t *testing.T) {
 // with `media.variants.group: false` every rendition is judged on its own and
 // the three over-cap renditions keep their size_cap rows, exactly as before.
 func TestVariantCap879_ScanWithGroupingOffIsUnchanged(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeRenditions879(t, root)
 
 	scan := runScan879(t, root, 1, false)
@@ -414,7 +415,7 @@ func TestVariantCap879_ScanWithGroupingOffIsUnchanged(t *testing.T) {
 // policy would have chosen, no rows for its siblings, and a line that says the
 // whole media is out rather than one line per rendition.
 func TestVariantCap879_ScanSkipsTheWholeGroupWhenNothingFits(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	for rel, size := range renditionSizes879 {
 		if rel == "ep1_360p.mp4" {
 			continue // leave nothing under the cap
@@ -447,7 +448,7 @@ func TestVariantCap879_ScanSkipsTheWholeGroupWhenNothingFits(t *testing.T) {
 // corpus no longer tracks, so the first scan on the new code must retire them
 // instead of leaving them in the coverage aggregate forever.
 func TestVariantCap879_UpgradeTombstonesTheStrayRows(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeRenditions879(t, root)
 	ctx := context.Background()
 
@@ -461,7 +462,7 @@ func TestVariantCap879_UpgradeTombstonesTheStrayRows(t *testing.T) {
 	// The same store, rescanned with grouping on.
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.STTProvider = "off"
 	cfg.IngestMaxFileMB = 1
 	cfg.MediaVariantsGroup = true

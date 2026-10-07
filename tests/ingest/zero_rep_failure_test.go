@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestProcessDocument_TranscriptProviderFailure_PersistsErrorStatus is the
@@ -21,11 +22,11 @@ import (
 // still does NOT hard-fail (the batch continues).
 func TestProcessDocument_TranscriptProviderFailure_PersistsErrorStatus(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 
-	svc := sttService(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "en",
+	svc := sttService(t, root, testutil.TempDir(t), st, "whisper", "whisper-large-v3", "en",
 		&fakeTranscriber{err: errors.New("provider down")})
 
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}

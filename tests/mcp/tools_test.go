@@ -22,6 +22,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestMCPToolsList_RegistersDayOneToolsWithSchemas verifies that tools/list
@@ -252,7 +253,7 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 }
 
 func TestMCPToolsCallTranscribe_CreatesAudioDocWhenNotYetIndexed(t *testing.T) {
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	stateDir := filepath.Join(rootDir, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -527,7 +528,7 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 func withMistralUpstream(t *testing.T, base config.Config, profile, upstreamURL string) config.Config {
 	t.Helper()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
-	p := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	p := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	body := "providers:\n  " + profile + ":\n    base_url: " + upstreamURL + "\n"
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatalf("write provider cfg: %v", err)
@@ -545,7 +546,7 @@ func withMistralUpstream(t *testing.T, base config.Config, profile, upstreamURL 
 
 func setupMCPToolStore(t *testing.T, relPath, docType string, content []byte) (config.Config, *store.SQLiteStore, string) {
 	t.Helper()
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	stateDir := filepath.Join(rootDir, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -1624,7 +1625,7 @@ func TestMCPToolsCallListFiles_TotalReflectsHiddenFilter(t *testing.T) {
 	// Materialise the stubbed docs on disk so the listFilesFiltered
 	// resolvability gate (added for issue #176) treats them as real entries
 	// rather than dropping them as stale.
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	cfg.RootDir = rootDir
 	if err := os.MkdirAll(filepath.Join(rootDir, ".claude"), 0o755); err != nil {
 		t.Fatalf("mkdir .claude: %v", err)
@@ -1689,7 +1690,7 @@ func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
 	// See TestMCPToolsCallListFiles_TotalReflectsHiddenFilter for why these
 	// docs need to exist on disk under cfg.RootDir (issue #176 round-trip
 	// guarantee).
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	cfg.RootDir = rootDir
 	if err := os.MkdirAll(filepath.Join(rootDir, ".claude"), 0o755); err != nil {
 		t.Fatalf("mkdir .claude: %v", err)
@@ -1753,7 +1754,7 @@ func TestMCPToolsCallListFiles_IncludeHiddenTrue(t *testing.T) {
 // longer corresponds to a real file. Without filtering, list_files would
 // surface that path and any agent driving open_file off it would 404.
 func TestMCPToolsCallListFiles_RoundTripsAdversarialNames(t *testing.T) {
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	stateDir := filepath.Join(rootDir, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
@@ -1904,7 +1905,7 @@ func TestMCPToolsCallListFiles_SymlinkedRootStillLists(t *testing.T) {
 	// realRoot holds the actual corpus; linkRoot is a symlink pointing at it and
 	// is what the daemon is configured with. The store still records rel_paths
 	// relative to the root (same shape either way).
-	base := t.TempDir()
+	base := testutil.TempDir(t)
 	realRoot := filepath.Join(base, "real-corpus")
 	if err := os.MkdirAll(realRoot, 0o755); err != nil {
 		t.Fatalf("mkdir real root: %v", err)
@@ -1980,7 +1981,7 @@ func TestMCPToolsCallListFiles_FailsOpenOnInconclusiveResolution(t *testing.T) {
 		t.Skip("running as root bypasses directory permission checks")
 	}
 
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	stateDir := filepath.Join(rootDir, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

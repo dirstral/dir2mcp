@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestChunkTaskByID_RoundTrip pins that ChunkTaskByID (added for distributed
@@ -16,7 +17,7 @@ import (
 // relayed bytes.
 func TestChunkTaskByID_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -41,7 +42,7 @@ func TestChunkTaskByID_RoundTrip(t *testing.T) {
 // as model.ErrNotFound (a worker treats it as a safe skip).
 func TestChunkTaskByID_MissingIsNotFound(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -59,7 +60,7 @@ func TestChunkTaskByID_MissingIsNotFound(t *testing.T) {
 // ErrNotFound, so a leased job cannot resurrect a deleted chunk.
 func TestChunkTaskByID_TombstonedIsNotFound(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

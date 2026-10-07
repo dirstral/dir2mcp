@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests cover item 4 of #830: raw-text generation gated on a HARD-CODED
@@ -38,7 +39,7 @@ func newCappedRepGen(t *testing.T, st model.RepresentationStore, capBytes int64)
 // is not detected as binary) and returns its path.
 func writeSizedTextFile(t *testing.T, size int64) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "sized.txt")
+	path := filepath.Join(testutil.TempDir(t), "sized.txt")
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatalf("create %s: %v", path, err)

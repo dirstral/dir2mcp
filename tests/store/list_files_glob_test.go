@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // globCase pairs a glob with the paths list_files must return for it (drawn from
@@ -44,7 +45,7 @@ var globTestCases = []globCase{
 // different file set than the identical file_glob on search/ask.
 func TestListFiles_GlobCanonicalSemantics(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestListFiles_GlobMatchesFileGlob(t *testing.T) {
 // matched total while returning only the requested page.
 func TestListFiles_GlobPagination(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

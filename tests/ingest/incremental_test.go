@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 type fakeIncrementalStore struct {
@@ -107,7 +108,7 @@ func (f *fakeIncrementalStore) WithTx(ctx context.Context, fn func(tx model.Repr
 }
 
 func TestProcessDocument_IncrementalSkipsUnchangedRepresentation(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	absPath := filepath.Join(root, "a.txt")
 	if err := os.WriteFile(absPath, []byte("same-content"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -140,7 +141,7 @@ func TestProcessDocument_IncrementalSkipsUnchangedRepresentation(t *testing.T) {
 }
 
 func TestProcessDocument_ForceReindexRegeneratesRepresentation(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	absPath := filepath.Join(root, "main.go")
 	content := "package main\n\nfunc main(){}\n"
 	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {

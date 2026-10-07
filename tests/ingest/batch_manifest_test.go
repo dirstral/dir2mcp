@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // readManifest parses a JSONL run manifest (SPEC §8.6.11) into one map per line.
@@ -38,11 +39,11 @@ func readManifest(t *testing.T, path string) []map[string]any {
 // second run, and truncate-and-rewrite each run.
 func TestServiceRun_BatchManifest(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("alpha text"))
 	mustWriteFile(t, filepath.Join(root, "sub", "b.txt"), []byte("beta text"))
 
-	stateDir := filepath.Join(t.TempDir(), "state")
+	stateDir := filepath.Join(testutil.TempDir(t), "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
@@ -110,10 +111,10 @@ func TestServiceRun_BatchManifest(t *testing.T) {
 // unconfigured (default), no manifest file is written.
 func TestServiceRun_BatchManifestDisabledWritesNothing(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("alpha text"))
 
-	stateDir := filepath.Join(t.TempDir(), "state")
+	stateDir := filepath.Join(testutil.TempDir(t), "state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}

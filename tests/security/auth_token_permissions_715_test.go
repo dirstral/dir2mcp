@@ -20,6 +20,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/cli"
 	"github.com/dirstral/dir2mcp/internal/statefs"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #715: auto auth REUSED an existing <state-dir>/secret.token without looking
@@ -108,7 +109,7 @@ func runUpInDir(t *testing.T, dir string) upResult {
 // older build (0755) and whose token carries mode.
 func seedCorpusWithToken(t *testing.T, mode os.FileMode) (root, tokenPath string) {
 	t.Helper()
-	root = t.TempDir()
+	root = testutil.TempDir(t)
 	state := filepath.Join(root, ".dir2mcp")
 	if err := os.MkdirAll(state, 0o755); err != nil {
 		t.Fatalf("seed state dir: %v", err)
@@ -198,7 +199,7 @@ func TestAutoAuthDoesNotWidenAMoreRestrictiveToken(t *testing.T) {
 // that made this defect class invisible.
 func TestAutoAuthCreatesAFreshTokenOwnerOnly(t *testing.T) {
 	withPermissiveUmask(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	res := runUpInDir(t, root)
 	if res.code != 0 {
@@ -218,11 +219,11 @@ func TestAutoAuthCreatesAFreshTokenOwnerOnly(t *testing.T) {
 // used a 0644 token living outside the state directory.
 func TestAutoAuthRefusesASymlinkedToken(t *testing.T) {
 	withPermissiveUmask(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, ".dir2mcp"), 0o755); err != nil {
 		t.Fatalf("seed state dir: %v", err)
 	}
-	outside := filepath.Join(t.TempDir(), "elsewhere.token")
+	outside := filepath.Join(testutil.TempDir(t), "elsewhere.token")
 	if err := os.WriteFile(outside, []byte("token-someone-else-can-read\n"), 0o644); err != nil {
 		t.Fatalf("seed outside token: %v", err)
 	}
@@ -253,11 +254,11 @@ func TestAutoAuthRefusesASymlinkedToken(t *testing.T) {
 // through the link, truncating a file outside the state directory.
 func TestAutoAuthDoesNotWriteThroughASymlink(t *testing.T) {
 	withPermissiveUmask(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, ".dir2mcp"), 0o755); err != nil {
 		t.Fatalf("seed state dir: %v", err)
 	}
-	victim := filepath.Join(t.TempDir(), "victim.conf")
+	victim := filepath.Join(testutil.TempDir(t), "victim.conf")
 	const victimContent = "   \n" // non-empty file, empty token
 	if err := os.WriteFile(victim, []byte(victimContent), 0o644); err != nil {
 		t.Fatalf("seed victim: %v", err)
@@ -284,7 +285,7 @@ func TestAutoAuthDoesNotWriteThroughASymlink(t *testing.T) {
 // reports what it found.
 func TestHardenSecretReportsThePriorMode(t *testing.T) {
 	withPermissiveUmask(t)
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 
 	for _, tc := range []struct {
 		name  string
@@ -329,7 +330,7 @@ func TestHardenSecretReportsThePriorMode(t *testing.T) {
 // missing path is a report, not an error.
 func TestHardenSecretOnAMissingPath(t *testing.T) {
 	withPermissiveUmask(t)
-	prior, exists, err := statefs.HardenSecret(filepath.Join(t.TempDir(), "secret.token"))
+	prior, exists, err := statefs.HardenSecret(filepath.Join(testutil.TempDir(t), "secret.token"))
 	if err != nil {
 		t.Fatalf("HardenSecret on a missing path: %v", err)
 	}
@@ -345,7 +346,7 @@ func TestHardenSecretOnAMissingPath(t *testing.T) {
 // read it; a directory and a symlink are not credentials either.
 func TestHardenSecretRefusesNonRegularPaths(t *testing.T) {
 	withPermissiveUmask(t)
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 
 	fifo := filepath.Join(dir, "fifo.token")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/mistral"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // models.ocr must name the engine that ACTUALLY extracts (issue #851).
@@ -24,7 +25,7 @@ import (
 func statsOCRField(t *testing.T, opts ...mcp.ServerOption) string {
 	t.Helper()
 	cfg := defaultConfig()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	srv := newServer(t, cfg, opts...)
 	defer srv.Close()
 
@@ -105,7 +106,7 @@ func TestStatsModelsOCR_PayloadStaysCanonicalWithALocalEngine(t *testing.T) {
 		t.Run("engine="+engine, func(t *testing.T) {
 			t.Parallel()
 			cfg := defaultConfig()
-			cfg.StateDir = t.TempDir()
+			cfg.StateDir = testutil.TempDir(t)
 			srv := newServer(t, cfg, mcp.WithExtractionProvenance(mcp.ExtractionProvenance{Engine: engine}))
 			defer srv.Close()
 

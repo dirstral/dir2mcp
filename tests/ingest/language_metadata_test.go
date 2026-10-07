@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestLanguageMetadata_SidecarRecordsDeclaredSourceAndChunkLanguage pins the
@@ -18,17 +19,17 @@ import (
 // chunk rows so the per-language retrieval filter can predicate on it.
 func TestLanguageMetadata_SidecarRecordsDeclaredSourceAndChunkLanguage(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.pt.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nola mundo\n")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "talk.mp3", DocType: "audio"}); err != nil {
 		t.Fatalf("upsert document: %v", err)
@@ -79,17 +80,17 @@ func TestLanguageMetadata_SidecarRecordsDeclaredSourceAndChunkLanguage(t *testin
 // empty language — which never matches a specific §9.5 filter.
 func TestLanguageMetadata_UndifferentiatedSidecarIsUnknown(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "lecture.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "lecture.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nIntro\n")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	svc := newSidecarService(t, root, t.TempDir(), st)
+	svc := newSidecarService(t, root, testutil.TempDir(t), st)
 
 	if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "lecture.mp3", DocType: "audio"}); err != nil {
 		t.Fatalf("upsert document: %v", err)

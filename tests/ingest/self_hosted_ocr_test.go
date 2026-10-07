@@ -13,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // loadYAMLConfig writes yaml to a temp .dir2mcp.yaml and loads it, so the
@@ -20,7 +21,7 @@ import (
 // parsed — config.Config{} literals never populate it.
 func loadYAMLConfig(t *testing.T, yaml string) config.Config {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	p := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

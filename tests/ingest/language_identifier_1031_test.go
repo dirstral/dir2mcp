@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/quality"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §8.2.3 (dirstral-spec 0.72.0), dir2mcp #1031. A decoder's own language
@@ -163,13 +164,13 @@ func TestCandidateRoutes_AFailedCandidateDoesNotPoisonLaterWindows(t *testing.T)
 
 func loadIdentityCfg(t *testing.T, yaml string) config.Config {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	path := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	writeFile(t, path, yaml)
 	cfg, err := config.LoadFile(path)
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	return cfg
 }
 

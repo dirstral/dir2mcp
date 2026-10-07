@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // sttSizeLog records, per request, the audio duration the ingest pipeline sized
@@ -67,7 +68,7 @@ func (s *sizedSTT) ForAudioDuration(audioMS int) model.Transcriber {
 func newSizedSTTHarness(t *testing.T, totalMS int, payload []byte) (*ingest.Service, *sttSizeLog) {
 	t.Helper()
 	logRec := &sttSizeLog{}
-	svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
+	svc := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, &fakeIngestStore{})
 	svc.SetTranscriber(&sizedSTT{log: logRec})
 	svc.SetLogger(log.New(&syncBuffer{}, "", 0))
 	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) {

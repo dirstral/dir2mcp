@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #765: media.subtitles.drop_urls and collapse_repeats used to run only on
@@ -221,7 +222,7 @@ func longCue(text string) string {
 // reaches a stored chunk, while the real cues do.
 func TestSidecarIngest_DropsHallucinatedURLCue(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "media", "lecture.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "media", "lecture.vtt"),
 		"WEBVTT\n\n"+
@@ -232,7 +233,7 @@ func TestSidecarIngest_DropsHallucinatedURLCue(t *testing.T) {
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{
 		RootDir:                root,
-		StateDir:               t.TempDir(),
+		StateDir:               testutil.TempDir(t),
 		MediaSubtitlesDropURLs: true,
 	}, st)
 
@@ -256,7 +257,7 @@ func TestSidecarIngest_DropsHallucinatedURLCue(t *testing.T) {
 // (SPEC §8.6.3: the index and the export apply the same rule).
 func TestSidecarIngest_DropsWrongScriptCue(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "media", "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "media", "talk.vtt"),
 		"WEBVTT\n\n"+
@@ -272,7 +273,7 @@ func TestSidecarIngest_DropsWrongScriptCue(t *testing.T) {
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{
 		RootDir:                    root,
-		StateDir:                   t.TempDir(),
+		StateDir:                   testutil.TempDir(t),
 		MediaSubtitlesExpectScript: "cyrillic",
 	}, st)
 
@@ -302,7 +303,7 @@ func TestSidecarIngest_DropsWrongScriptCue(t *testing.T) {
 // collapse_repeats-1 chunks of an identical run are stored.
 func TestSidecarIngest_CollapsesRepeatedCues(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	repeated := longCue("Продолжение следует")
 	writeFile(t, filepath.Join(root, "media", "clip.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "media", "clip.vtt"),
@@ -315,7 +316,7 @@ func TestSidecarIngest_CollapsesRepeatedCues(t *testing.T) {
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{
 		RootDir:                       root,
-		StateDir:                      t.TempDir(),
+		StateDir:                      testutil.TempDir(t),
 		MediaSubtitlesCollapseRepeats: 3,
 	}, st)
 
@@ -335,9 +336,9 @@ func TestSidecarIngest_CollapsesRepeatedCues(t *testing.T) {
 func TestNewService_RefusesInvalidCueCleaning(t *testing.T) {
 	t.Parallel()
 	for name, cfg := range map[string]config.Config{
-		"unknown expect_script":    {StateDir: t.TempDir(), MediaSubtitlesExpectScript: "klingon"},
-		"bad drop_phrases regexp":  {StateDir: t.TempDir(), MediaSubtitlesDropPhrases: []string{"a(b"}},
-		"bad scrub_phrases regexp": {StateDir: t.TempDir(), MediaSubtitlesScrubPhrases: []string{"a(b"}},
+		"unknown expect_script":    {StateDir: testutil.TempDir(t), MediaSubtitlesExpectScript: "klingon"},
+		"bad drop_phrases regexp":  {StateDir: testutil.TempDir(t), MediaSubtitlesDropPhrases: []string{"a(b"}},
+		"bad scrub_phrases regexp": {StateDir: testutil.TempDir(t), MediaSubtitlesScrubPhrases: []string{"a(b"}},
 	} {
 		_, err := ingest.NewService(cfg, &fakeIngestStore{})
 		if err == nil {
@@ -348,7 +349,7 @@ func TestNewService_RefusesInvalidCueCleaning(t *testing.T) {
 			t.Errorf("%s: the error must name the key: %v", name, err)
 		}
 	}
-	if _, err := ingest.NewService(config.Config{StateDir: t.TempDir(), MediaSubtitlesExpectScript: "cyrillic"}, &fakeIngestStore{}); err != nil {
+	if _, err := ingest.NewService(config.Config{StateDir: testutil.TempDir(t), MediaSubtitlesExpectScript: "cyrillic"}, &fakeIngestStore{}); err != nil {
 		t.Fatalf("a valid rule must still build: %v", err)
 	}
 }

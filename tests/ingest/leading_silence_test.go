@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestShiftTranscriptSpans_ShiftsAndClamps verifies the pure span shift used by
@@ -88,7 +89,7 @@ func TestGenerateTranscript_LeadingSilenceTrimEnabled(t *testing.T) {
 	st := &fakeIngestStore{}
 	root, content := mediaDocRoot(t)
 	svc := mustNewIngestService(t, config.Config{
-		StateDir:                t.TempDir(),
+		StateDir:                testutil.TempDir(t),
 		RootDir:                 root,
 		MediaTrimLeadingSilence: true,
 	}, st)
@@ -124,7 +125,7 @@ func TestGenerateTranscript_LeadingSilenceTrim_ShiftsTranslatedSpans(t *testing.
 	st := &fakeIngestStore{}
 	root, content := mediaDocRoot(t)
 	svc := mustNewIngestService(t, config.Config{
-		StateDir:                t.TempDir(),
+		StateDir:                testutil.TempDir(t),
 		RootDir:                 root,
 		MediaTrimLeadingSilence: true,
 	}, st)
@@ -164,7 +165,7 @@ func TestGenerateTranscript_LeadingSilenceTrimDisabled(t *testing.T) {
 	st := &fakeIngestStore{}
 	root, content := mediaDocRoot(t)
 	svc := mustNewIngestService(t, config.Config{
-		StateDir: t.TempDir(),
+		StateDir: testutil.TempDir(t),
 		RootDir:  root,
 		// MediaTrimLeadingSilence defaults to false.
 	}, st)
@@ -206,7 +207,7 @@ func TestGenerateTranscript_LeadingSilenceDetectorError(t *testing.T) {
 			st := &fakeIngestStore{}
 			root, content := mediaDocRoot(t)
 			svc := mustNewIngestService(t, config.Config{
-				StateDir:                t.TempDir(),
+				StateDir:                testutil.TempDir(t),
 				RootDir:                 root,
 				MediaTrimLeadingSilence: true,
 			}, st)
@@ -227,7 +228,7 @@ func TestGenerateTranscript_LeadingSilenceDetectorError(t *testing.T) {
 // file content used as the transcribe input.
 func mediaDocRoot(t *testing.T) (string, []byte) {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	content := []byte("fake-audio-bytes")
 	mediaPath := filepath.Join(root, "audio", "lecture.mp3")
 	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o755); err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 type fakeRetrievalEmbedder struct {
@@ -439,7 +440,7 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 }
 
 func TestOpenFile_LineSpan(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	filePath := filepath.Join(root, "docs", "a.md")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -460,7 +461,7 @@ func TestOpenFile_LineSpan(t *testing.T) {
 }
 
 func TestOpenFile_PathExcluded(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	filePath := filepath.Join(root, "private", "secret.txt")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -479,7 +480,7 @@ func TestOpenFile_PathExcluded(t *testing.T) {
 }
 
 func TestOpenFile_ContentSecretBlocked(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	filePath := filepath.Join(root, "docs", "token.txt")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -497,7 +498,7 @@ func TestOpenFile_ContentSecretBlocked(t *testing.T) {
 }
 
 func TestOpenFile_PathTraversalBlocked(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	_, err := svc.OpenFile(context.Background(), "../outside.txt", model.Span{}, 200)
@@ -507,7 +508,7 @@ func TestOpenFile_PathTraversalBlocked(t *testing.T) {
 }
 
 func TestOpenFile_PageSpan(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	filePath := filepath.Join(root, "docs", "ocr.txt")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -528,7 +529,7 @@ func TestOpenFile_PageSpan(t *testing.T) {
 }
 
 func TestOpenFile_TimeSpan(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	filePath := filepath.Join(root, "audio", "transcript.txt")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -568,7 +569,7 @@ func TestMatchExcludePattern_Concurrent(t *testing.T) {
 }
 
 func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	// Keep the path inside root but do not create file contents; metadata should drive output.
 	path := filepath.Join(root, "docs", "ocr.txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -592,7 +593,7 @@ func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
 }
 
 func TestOpenFile_TimeSpan_FromMetadata(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "audio", "transcript.txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)

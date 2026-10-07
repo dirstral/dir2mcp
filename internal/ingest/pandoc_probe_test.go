@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // writePandocStub writes an executable script named exactly `name` into a fresh
@@ -19,7 +20,7 @@ func writePandocStub(t *testing.T, name, body string) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script stub needs a POSIX sh; Windows cannot run it")
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatalf("write stub: %v", err)
@@ -44,7 +45,7 @@ func TestResolvePandocBinary_FallsBackToPath(t *testing.T) {
 	}
 	// Prepend a temp dir containing a `pandoc` to PATH so resolution is
 	// deterministic regardless of whether the host has a real pandoc.
-	stubDir := t.TempDir()
+	stubDir := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(stubDir, "pandoc"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write stub: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestResolvePandocBinary_FallsBackToPath(t *testing.T) {
 }
 
 func TestPandocFunctionalCheck_MemoizedOnce(t *testing.T) {
-	countFile := filepath.Join(t.TempDir(), "count")
+	countFile := filepath.Join(testutil.TempDir(t), "count")
 	// Each invocation appends a byte to countFile; a memoized probe runs it once.
 	stub := writePandocStub(t, "pandoc", "printf x >> "+countFile+"\nexit 0")
 	for i := 0; i < 3; i++ {

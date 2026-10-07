@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestRuneSpans_RoundTripThroughNextPendingAndChunkTaskByID pins SPEC §5.3
@@ -122,7 +123,7 @@ func TestRepresentationText_RoundTripAndMissing(t *testing.T) {
 // unknown, and the companion table exists. Nothing is re-embedded.
 func TestRuneSpans_LegacyDatabaseMigratesInPlace(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "meta.sqlite")
+	path := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 
 	// A pre-feature schema: the chunks table without rune_start/rune_end and no
 	// representation_texts table, with one pending chunk already in it.

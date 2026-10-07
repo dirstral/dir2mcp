@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The WIRE half of issue #861, on the production SDK transport.
@@ -91,7 +92,7 @@ func recognitionCorpus861(t *testing.T, st *store.SQLiteStore, sources []string)
 func recognitionServer861(t *testing.T, sources []string) (*runningServer, config.Config) {
 	t.Helper()
 	ctx := context.Background()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {

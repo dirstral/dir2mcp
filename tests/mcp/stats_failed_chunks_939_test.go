@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §15.6 (spec 0.60.0) `indexing.failed_chunks`, from dir2mcp #932/#939.
@@ -67,7 +68,7 @@ func (r *failedChunksRetriever) Stats(context.Context) (model.Stats, error) {
 func statsIndexingWith(t *testing.T, retriever model.Retriever) map[string]interface{} {
 	t.Helper()
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 
@@ -206,7 +207,7 @@ func TestIntactCorpusStatesZeroRatherThanOmitting_939(t *testing.T) {
 // fallback path: no retriever stats, so nothing counted the chunks.
 func TestOmittedWhenNotDerivable_939(t *testing.T) {
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())

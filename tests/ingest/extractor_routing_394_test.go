@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // processWithFlatExtractor writes name into a fresh root, ingests it through a
@@ -20,10 +21,10 @@ import (
 // empty mode exercises the lenient default.
 func processWithFlatExtractor(t *testing.T, name, onUnsupported string) (model.Document, *ingest.Service) {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, name), "irrelevant bytes")
 	st := newRealStore(t)
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), IngestOnUnsupported: onUnsupported}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), IngestOnUnsupported: onUnsupported}, st)
 	// A flat extractor that would happily return text if asked — proving the doc
 	// is routed away by the capability-aware selection, not by the extractor
 	// failing.
@@ -87,10 +88,10 @@ func TestUnsupportedDocument_LenientSkipsHonestly(t *testing.T) {
 // SetOnDocumentSkip hook) carrying the unsupported_format reason, so a `--json`
 // consumer learns the document was left uncovered — not only the durable status.
 func TestUnsupportedDocument_LenientFiresFileSkip(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.odt"), "irrelevant bytes")
 	st := newRealStore(t)
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st) // lenient default
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st) // lenient default
 	svc.SetDocumentExtractor(&fakeExtractor{text: "should never be extracted"})
 
 	var gotPath, gotReason string

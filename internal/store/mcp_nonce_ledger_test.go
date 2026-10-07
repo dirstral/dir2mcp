@@ -5,11 +5,13 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func newNonceTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("Init store: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // localEventSettleWindow is how long a test waits after it changes a local file
@@ -55,7 +56,7 @@ func TestWatch_S3SourceIgnoresLocalFileEvents(t *testing.T) {
 
 	// The local directory the daemon runs from. It collides with the corpus on
 	// docs/a.md, which is the whole hazard: the two paths name different things.
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}

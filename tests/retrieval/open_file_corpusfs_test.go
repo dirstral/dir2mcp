@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // fakeCorpusFS is an in-memory corpusfs.CorpusFS whose objects live only in a
@@ -59,7 +60,7 @@ func (f *fakeCorpusFS) Localize(context.Context, string) (string, func(), error)
 func TestOpenFile_CorpusFS_TextReturnsContent(t *testing.T) {
 	// RootDir points at an empty temp dir: there is deliberately NO local file,
 	// so a regression to the local-FS read path would fail with not-found.
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	body := "# Remote Doc\n\nServed from the object store, not the local disk."
@@ -86,7 +87,7 @@ func TestOpenFile_CorpusFS_TextReturnsContent(t *testing.T) {
 // OCR/transcript read path that was silently broken on S3 (#432): os.Stat of the
 // non-existent local path failed before the (present) cache could be consulted.
 func TestOpenFile_CorpusFS_PDFReturnsOCRMarkdown(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4\r%\xe2\xe3\xcf\xd3\r\n1 0 obj<</Type/Catalog>>endobj\n%%EOF")
@@ -125,7 +126,7 @@ func TestOpenFile_CorpusFS_PDFReturnsOCRMarkdown(t *testing.T) {
 // preserves the retryable ErrOCRNotReady contract rather than leaking a
 // backend read error.
 func TestOpenFile_CorpusFS_PDFNoCacheReturnsOCRNotReady(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 no-cache")

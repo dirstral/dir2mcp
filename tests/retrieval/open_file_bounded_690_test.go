@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #690: open_file publishes a bounded answer (max_chars, clamped to
@@ -173,7 +174,7 @@ func allocatedBytes(fn func()) uint64 {
 // cost about 150 MiB. The streaming path reads one read budget: 200004 bytes at
 // the 50000-rune cap.
 func TestOpenFile_LocalSourceGrewAfterIndexing_ReadStaysBounded(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	relPath := "notes/grown.txt"
 	abs := filepath.Join(root, filepath.FromSlash(relPath))
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -223,7 +224,7 @@ func TestOpenFile_LocalSourceGrewAfterIndexing_ReadStaysBounded(t *testing.T) {
 // remote text object is not downloaded in full for a bounded answer. The capped
 // reader fails the request once the read runs past 1 MiB.
 func TestOpenFile_CorpusFSLargeObject_StopsAfterTheWindow(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	const objectBytes = 16 << 20
 	body := repeatToSize("remote object line with enough text to be interesting\n", objectBytes)
 	fs := &cappedCorpusFS{objects: map[string][]byte{"docs/big.md": []byte(body)}, cap: 1 << 20}
@@ -251,7 +252,7 @@ func TestOpenFile_CorpusFSLargeObject_StopsAfterTheWindow(t *testing.T) {
 // past the lines before it and keep none of them, and it must stop once the
 // requested range is complete instead of buffering the rest of the document.
 func TestOpenFile_LateLineRange_DoesNotBufferTheTail(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	var b strings.Builder
 	for i := 1; i <= 9002; i++ {
 		fmt.Fprintf(&b, "line %d: the quick brown fox jumps over the lazy dog\n", i)
@@ -283,7 +284,7 @@ func TestOpenFile_LateLineRange_DoesNotBufferTheTail(t *testing.T) {
 // budget that reused the max_chars number would return a short answer, and a
 // budget that cut a rune would return a replacement character.
 func TestOpenFile_MultibyteRunes_AnswerIsWholeRunes(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	relPath := "docs/multibyte.txt"
 	abs := filepath.Join(root, filepath.FromSlash(relPath))
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -336,7 +337,7 @@ func writeSecretDoc(t *testing.T, root, relPath, body string) *retrieval.Service
 // reads past the answer. A secret that starts inside the window, or just after
 // it, must refuse the request even though the answer itself looks harmless.
 func TestOpenFile_SecretJustPastTheWindow_StillRefuses(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	relPath := "docs/margin.txt"
 	// 20000 runes of answer, then the secret a few bytes later.
 	body := strings.Repeat("a", 20050) + "\nAKIAIOSFODNN7EXAMPLE\n" + strings.Repeat("b", 1<<20)
@@ -353,7 +354,7 @@ func TestOpenFile_SecretJustPastTheWindow_StillRefuses(t *testing.T) {
 // it. It also keeps the tool from serving a document that ingest withholds,
 // because ingest decides on the head of the file.
 func TestOpenFile_SecretBeforeTheWindow_AlwaysRefuses(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	relPath := "docs/early-secret.txt"
 	var b strings.Builder
 	b.WriteString("AKIAIOSFODNN7EXAMPLE\n")
@@ -375,7 +376,7 @@ func TestOpenFile_SecretBeforeTheWindow_AlwaysRefuses(t *testing.T) {
 // it returns were all scanned, and ingest itself decides on a 64 KiB sample, so
 // this document was indexed and searchable already.
 func TestOpenFile_SecretFarPastTheWindow_IsNotRead(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	relPath := "docs/late-secret.txt"
 	head := repeatToSize("harmless prose that says nothing at all\n", 8<<20)
 	svc := writeSecretDoc(t, root, relPath, head+"\nAKIAIOSFODNN7EXAMPLE\n")
@@ -404,7 +405,7 @@ func TestOpenFile_SecretFarPastTheWindow_IsNotRead(t *testing.T) {
 // streaming scanner carries between chunks. A secret that straddles two reads
 // must still match.
 func TestOpenFile_SecretAcrossAChunkBoundary_StillRefuses(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	relPath := "docs/boundary.txt"
 	const secret = "AKIAIOSFODNN7EXAMPLE"
 	// Place the secret so that it spans several plausible chunk edges. Every
@@ -421,7 +422,7 @@ func TestOpenFile_SecretAcrossAChunkBoundary_StillRefuses(t *testing.T) {
 // TestOpenFile_ContextCancelled_StopsTheRead verifies that a cancelled request
 // interrupts a long read instead of running it to the end of the source.
 func TestOpenFile_ContextCancelled_StopsTheRead(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

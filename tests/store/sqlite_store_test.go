@@ -14,11 +14,12 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -81,7 +82,7 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 
 func TestSQLiteStore_MarkEmbeddingStatus_LabelOverflow(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -111,7 +112,7 @@ func TestSQLiteStore_MarkEmbeddingStatus_LabelOverflow(t *testing.T) {
 
 func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -138,7 +139,7 @@ func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
 
 func TestSQLiteStore_UpsertChunkTask_RequiresNonZeroLabel(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -169,7 +170,7 @@ func TestSQLiteStore_UpsertChunkTask_RequiresNonZeroLabel(t *testing.T) {
 
 func TestSQLiteStore_UpsertChunkTask_LabelMetadataMismatch(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -196,7 +197,7 @@ func TestSQLiteStore_UpsertChunkTask_LabelMetadataMismatch(t *testing.T) {
 
 func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -226,7 +227,7 @@ func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
 }
 
 func TestSQLiteStore_ClearDocumentContentHashes(t *testing.T) {
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	ctx := context.Background()
 	if err := st.Init(ctx); err != nil {
@@ -270,7 +271,7 @@ func TestSQLiteStore_ClearDocumentContentHashes(t *testing.T) {
 // clean no-op so a committed rebuild's hashes are not overwritten.
 func TestSQLiteStore_ContentHashBackupRestore(t *testing.T) {
 	const relPath = "docs/a.md"
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	ctx := context.Background()
 	mustNoErr(t, "Init", st.Init(ctx))
@@ -346,7 +347,7 @@ func TestSQLiteStore_EnsureDB_ConcurrentInitClose(t *testing.T) {
 	// other panics.  with the mutex held during initialization there is no
 	// race, but run under -race to be sure.
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	// don't defer Close here; we call it explicitly below
 
@@ -415,7 +416,7 @@ func verifyChunkIndexes(ctx context.Context, st *store.SQLiteStore) error {
 }
 func TestSQLiteStore_WithTx_Rollback(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 
@@ -452,7 +453,7 @@ func TestSQLiteStore_WithTx_Rollback(t *testing.T) {
 }
 func TestSQLiteStoreInitBootstrapsSchemaAndSettings(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -485,7 +486,7 @@ func TestSQLiteStoreInitBootstrapsSchemaAndSettings(t *testing.T) {
 
 func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -561,7 +562,7 @@ func assertCRUDListFilters(t *testing.T, ctx context.Context, st *store.SQLiteSt
 
 func TestSQLiteStoreRejectsAbsoluteAndTraversalRelPaths(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -569,7 +570,7 @@ func TestSQLiteStoreRejectsAbsoluteAndTraversalRelPaths(t *testing.T) {
 		_ = st.Close()
 	})
 
-	absolutePath := filepath.Join(t.TempDir(), "escape.txt")
+	absolutePath := filepath.Join(testutil.TempDir(t), "escape.txt")
 	invalidPaths := []string{
 		absolutePath,
 		"../escape.txt",
@@ -605,7 +606,7 @@ func TestSQLiteStoreRejectsAbsoluteAndTraversalRelPaths(t *testing.T) {
 
 func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -715,7 +716,7 @@ func assertRepCascadeDelete(t *testing.T, ctx context.Context, st *store.SQLiteS
 
 func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -809,7 +810,7 @@ func assertCorpusStatsPopulated(t *testing.T, stats model.CorpusStats) {
 
 func TestSQLiteStore_CorpusStats_Empty(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -834,7 +835,7 @@ func TestSQLiteStoreConcurrentReadWriteWithWAL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), raceScaled(5*time.Second))
 	defer cancel()
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -895,7 +896,7 @@ func TestSQLiteStoreConcurrentReadWriteWithWAL(t *testing.T) {
 
 func TestSQLiteStore_MCPSessionPersistenceRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -932,7 +933,7 @@ func TestSQLiteStore_MCPSessionPersistenceRoundTrip(t *testing.T) {
 
 func TestSQLiteStore_MCPPaymentOutcomePersistenceRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}

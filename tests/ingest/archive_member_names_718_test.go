@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // buildZipOrdered writes members in the given order, allowing duplicate or
@@ -215,7 +216,7 @@ func TestArchiveMember_TraversalShapesRefused_Tar(t *testing.T) {
 // error counter.
 func TestCorpusFile_LeadingDotsInSubdirIndexed(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	files := []string{
 		"ok.txt",
 		"sub/...notes.md",
@@ -233,7 +234,7 @@ func TestCorpusFile_LeadingDotsInSubdirIndexed(t *testing.T) {
 		}
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -270,13 +271,13 @@ func TestArchiveMember_RefusalIsObservable(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	data := buildZipOrdered(t, []string{"../../etc/passwd", "safe.txt"}, "content")
 	if err := os.WriteFile(filepath.Join(root, "test.zip"), data, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

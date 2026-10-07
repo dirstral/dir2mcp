@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #712: list_files reported every persisted `secret_excluded` document as
@@ -37,7 +38,7 @@ import (
 // audit (#676).
 
 func TestListFilesReportsASecretExcludedDocumentAsSkipped(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -75,7 +76,7 @@ func TestListFilesReportsASecretExcludedDocumentAsSkipped(t *testing.T) {
 // the states its schema advertises. The set grew by one in SPEC 0.48.0, which
 // added `pending` for a document that is known and not yet retrievable (#676).
 func TestListFilesStatusesStayInsideThePublishedEnum(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
