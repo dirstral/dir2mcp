@@ -433,6 +433,7 @@ ingest:
 - Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=7200`. The env value wins over the file.
 - A value of `0` or less stops startup with a config error. An env value that is not an integer is ignored, and startup shows a warning.
 - When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 1h0m0s (limit set by ingest.docling.timeout_sec)`.
+- At the same moment, the daemon log gets one line for the timeout, for example `docling: timed out on reports/annual.pdf after 1h0m0s (ingest.docling.timeout_sec=3600); the document is recorded as failed`. Other extraction failures (docling, docling-serve, Mistral OCR, pandoc) also get one log line each, with the engine, the document path and a short reason. The line never carries document text.
 - Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of about 195 pages took about 13 minutes with docling on CPU on an idle 16-core host, and about 20 minutes on the same host under load. The first default of 900 seconds failed that document. On a slower or busier host, set a higher limit.
 - The limit applies to the docling CLI only. `docling-serve` uses its own request limit.
 
