@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
@@ -421,7 +422,7 @@ func TestX402ToolsCall_CachedOutcomePersistsAcrossRestart(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.FacilitatorURL = facServer.URL
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("Init store failed: %v", err)
 	}

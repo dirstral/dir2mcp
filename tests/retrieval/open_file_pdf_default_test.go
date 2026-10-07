@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // writePDFAndOCRCache writes a fake PDF at relPath under root and seeds the
@@ -43,7 +44,7 @@ func writePDFAndOCRCache(t *testing.T, root, stateDir, relPath, ocrMarkdown stri
 }
 
 func TestOpenFile_PDFNoSpan_ReturnsOCRMarkdown(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	ocrText := "# Financial Investigation Agency Amendment Act\n\nARRANGEMENT OF SECTIONS\n\n1. Short title."
 	writePDFAndOCRCache(t, root, stateDir, "docs/act.pdf", ocrText)
@@ -65,7 +66,7 @@ func TestOpenFile_PDFNoSpan_ReturnsOCRMarkdown(t *testing.T) {
 }
 
 func TestOpenFile_PDFNoSpan_TruncatesByMaxChars(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	ocrText := strings.Repeat("x", 5000)
 	writePDFAndOCRCache(t, root, stateDir, "docs/long.pdf", ocrText)
@@ -93,7 +94,7 @@ func TestOpenFile_PDFNoSpan_TruncatesByMaxChars(t *testing.T) {
 }
 
 func TestOpenFile_PDFNoCache_ReturnsErrOCRNotReady(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	// Intentionally pass empty ocrMarkdown so the cache file is not created.
 	writePDFAndOCRCache(t, root, stateDir, "docs/missing.pdf", "")
@@ -115,7 +116,7 @@ func TestOpenFile_PDFNoCache_ReturnsErrOCRNotReady(t *testing.T) {
 // DOC_TYPE_UNSUPPORTED)". Before #1100 this test asserted the opposite: the
 // page slicer read the raw .pdf file and split it on form feeds.
 func TestOpenFile_PDFWithPage_NoMetadata_ReturnsErrDocTypeUnsupported(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	filePath := filepath.Join(root, "docs", "paged.pdf")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -139,7 +140,7 @@ func TestOpenFile_PDFWithPage_NoMetadata_ReturnsErrDocTypeUnsupported(t *testing
 }
 
 func TestOpenFile_MarkdownDefault_UnchangedBehavior(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	filePath := filepath.Join(root, "docs", "readme.md")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -170,7 +171,7 @@ func TestOpenFile_MarkdownDefault_UnchangedBehavior(t *testing.T) {
 // INTERNAL_ERROR. This mirrors how openFileFromResolvedPath rejects directory
 // targets and prevents the OCR-cache fallback from leaking EISDIR.
 func TestOpenFile_PDFExtensionOnDirectory_ReturnsErrDocTypeUnsupported(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	// A directory whose name happens to end in .pdf — this would otherwise
 	// satisfy isBinaryDocType and route through openFileFromOCRCache.

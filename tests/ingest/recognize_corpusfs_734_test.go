@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // localizingRemoteFS is a stub object-store CorpusFS shaped like S3FS for the
@@ -37,7 +38,7 @@ type localizingRemoteFS struct {
 
 func newLocalizingRemoteFS(t *testing.T) *localizingRemoteFS {
 	t.Helper()
-	return &localizingRemoteFS{bodies: map[string][]byte{}, cacheDir: t.TempDir()}
+	return &localizingRemoteFS{bodies: map[string][]byte{}, cacheDir: testutil.TempDir(t)}
 }
 
 func (f *localizingRemoteFS) add(relPath, body string) {
@@ -139,12 +140,12 @@ func TestRecognize_RemoteCorpusFS_FeedsLocalizedPath(t *testing.T) {
 	t.Parallel()
 	// RootDir exists but is empty: for an object store it is not where the bytes
 	// live, so any RootDir-joined path is a dangling reference.
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	fsys := newLocalizingRemoteFS(t)
 	fsys.add("games/game7.mp4", "remote-video-bytes")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	svc.SetCorpusFS(fsys)
 	rec := &readingRecognizer{result: recognizeTestResult()}
 	svc.SetRecognizer(rec)
@@ -190,7 +191,7 @@ func TestRecognize_RemoteCorpusFS_CleanupOnBackendError(t *testing.T) {
 	fsys.add("games/game7.mp4", "remote-video-bytes")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: t.TempDir(), StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t)}, st)
 	svc.SetCorpusFS(fsys)
 	svc.SetRecognizer(&readingRecognizer{err: errors.New("backend down")})
 
@@ -222,7 +223,7 @@ func TestRecognize_LocalizeFailureIsRecognizeFailure(t *testing.T) {
 	fsys.localizeErr = errors.New("download failed")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: t.TempDir(), StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t)}, st)
 	svc.SetCorpusFS(fsys)
 	rec := &readingRecognizer{result: recognizeTestResult()}
 	svc.SetRecognizer(rec)
@@ -266,7 +267,7 @@ func (f *relativePathFS) Localize(context.Context, string) (string, func(), erro
 
 func TestRecognize_LocalizedPathIsAbsolute(t *testing.T) {
 	t.Parallel()
-	media := filepath.Join(t.TempDir(), "game7.mp4")
+	media := filepath.Join(testutil.TempDir(t), "game7.mp4")
 	writeFile(t, media, "fake-video")
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -286,7 +287,7 @@ func TestRecognize_LocalizedPathIsAbsolute(t *testing.T) {
 	}
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: t.TempDir(), StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t)}, st)
 	svc.SetCorpusFS(&relativePathFS{relPath: rel})
 	rec := &readingRecognizer{result: recognizeTestResult()}
 	svc.SetRecognizer(rec)
@@ -308,12 +309,12 @@ func TestRecognize_LocalizedPathIsAbsolute(t *testing.T) {
 // in the corpus root.
 func TestRecognize_LocalCorpusStillGetsInRootPath(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	inRoot := filepath.Join(root, "games", "game7.mp4")
 	writeFile(t, inRoot, "fake-video")
 
 	st := &fakeIngestStore{}
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 	rec := &readingRecognizer{result: recognizeTestResult()}
 	svc.SetRecognizer(rec)
 

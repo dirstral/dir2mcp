@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #732: ListEmbeddedChunkMetadata applied both of its selective predicates (the
@@ -153,7 +154,7 @@ func TestEmbeddedChunkPage_ReadsThroughReadPool(t *testing.T) {
 // one, which runs on every Init. Dropping it stands in for such a database.
 func TestEmbeddedChunkPage_SeekIndexIsCreatedOnAnExistingDatabase(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	dbPath := filepath.Join(testutil.TempDir(t), "legacy.db")
 
 	old := store.NewSQLiteStore(dbPath)
 	if err := old.Init(ctx); err != nil {

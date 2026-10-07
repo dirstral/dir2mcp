@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #676: `list_files` reported a `pending` document as `status: "ok"`.
@@ -30,7 +31,7 @@ import (
 // TestListFilesReportsAPendingDocumentAsPending is the contract. A document
 // that is not retrievable yet must not be advertised as indexed.
 func TestListFilesReportsAPendingDocumentAsPending(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -62,7 +63,7 @@ func TestListFilesReportsAPendingDocumentAsPending(t *testing.T) {
 // it. A future store state that reuses the default arm would pass the test
 // above and fail this one.
 func TestListFilesNeverReportsUnfinishedWorkAsOK(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

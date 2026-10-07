@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestChunkModalityPresence_AfterIngest validates the SQL backing the
@@ -16,7 +17,7 @@ import (
 // opposite.
 func TestChunkModalityPresence_AfterIngest(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "pic.png"), []byte("PNGDATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +26,7 @@ func TestChunkModalityPresence_AfterIngest(t *testing.T) {
 	}
 	cfg := loadMultimodalConfig(t, root, "replace")
 	cfg.STTProvider = "off"
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

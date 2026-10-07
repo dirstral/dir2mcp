@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // perTrackTranscriber returns a transcript keyed by the exact bytes it is handed,
@@ -95,14 +96,14 @@ func ingestPerTrack(t *testing.T, svc *ingest.Service, st *store.SQLiteStore, na
 // and cost (SPEC §8.6.12).
 func TestPerTrack_FirstOnlyTrackZeroBareKey(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "audio-file-bytes"
 	writeFile(t, filepath.Join(root, "talk.mp3"), body)
 	st := newRealStore(t)
 
 	tr := &perTrackTranscriber{byInput: map[string]string{body: "[00:00] first track"}}
 	// nil tracks ⇒ default first.
-	svc := newPerTrackService(t, root, t.TempDir(), st, nil, tr)
+	svc := newPerTrackService(t, root, testutil.TempDir(t), st, nil, tr)
 	extractorCalls := 0
 	svc.ExtractAudioTrackIndexFunc = func(_ context.Context, _ string, audioIndex int) ([]byte, error) {
 		extractorCalls++
@@ -127,7 +128,7 @@ func TestPerTrack_FirstOnlyTrackZeroBareKey(t *testing.T) {
 // (SPEC §8.6.12).
 func TestPerTrack_AllTracksDistinctKeys(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "audio-file-bytes"
 	writeFile(t, filepath.Join(root, "multi.m4a"), body)
 	st := newRealStore(t)
@@ -137,7 +138,7 @@ func TestPerTrack_AllTracksDistinctKeys(t *testing.T) {
 		trackAudioBytes(1): "[00:00] dubbed russian",
 		trackAudioBytes(2): "[00:00] score and effects",
 	}}
-	svc := newPerTrackService(t, root, t.TempDir(), st, []string{"all"}, tr)
+	svc := newPerTrackService(t, root, testutil.TempDir(t), st, []string{"all"}, tr)
 
 	types := ingestPerTrack(t, svc, st, "multi.m4a", body)
 	for _, want := range []string{"transcript", "transcript@t1", "transcript@t2"} {
@@ -170,7 +171,7 @@ func TestPerTrack_AllTracksDistinctKeys(t *testing.T) {
 // transcribes exactly tracks 0 and 2 (skipping track 1), in container order.
 func TestPerTrack_ExplicitListSelectsSubset(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "audio-file-bytes"
 	writeFile(t, filepath.Join(root, "sel.m4a"), body)
 	st := newRealStore(t)
@@ -180,7 +181,7 @@ func TestPerTrack_ExplicitListSelectsSubset(t *testing.T) {
 		trackAudioBytes(2): "[00:00] score and effects",
 	}}
 	// Written out of order to prove the set is processed in stream order, not list order.
-	svc := newPerTrackService(t, root, t.TempDir(), st, []string{"2", "0"}, tr)
+	svc := newPerTrackService(t, root, testutil.TempDir(t), st, []string{"2", "0"}, tr)
 
 	types := ingestPerTrack(t, svc, st, "sel.m4a", body)
 	if !types["transcript"] || !types["transcript@t2"] {
@@ -196,7 +197,7 @@ func TestPerTrack_ExplicitListSelectsSubset(t *testing.T) {
 // track's representation is dropped and the DOCUMENT stays ready (SPEC §8.6.12).
 func TestPerTrack_OneTrackFailsOthersSucceed(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "audio-file-bytes"
 	writeFile(t, filepath.Join(root, "partial.m4a"), body)
 	st := newRealStore(t)
@@ -205,7 +206,7 @@ func TestPerTrack_OneTrackFailsOthersSucceed(t *testing.T) {
 		byInput: map[string]string{body: "[00:00] the original survives"},
 		failFor: map[string]error{trackAudioBytes(1): errors.New("provider 503")},
 	}
-	svc := newPerTrackService(t, root, t.TempDir(), st, []string{"0", "1"}, tr)
+	svc := newPerTrackService(t, root, testutil.TempDir(t), st, []string{"0", "1"}, tr)
 
 	types := ingestPerTrack(t, svc, st, "partial.m4a", body)
 	if !types["transcript"] {
@@ -228,7 +229,7 @@ func TestPerTrack_OneTrackFailsOthersSucceed(t *testing.T) {
 // the zero-successful-tracks case of §8.6.7).
 func TestPerTrack_AllTracksFailDocumentError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "audio-file-bytes"
 	writeFile(t, filepath.Join(root, "dead.m4a"), body)
 	st := newRealStore(t)
@@ -239,7 +240,7 @@ func TestPerTrack_AllTracksFailDocumentError(t *testing.T) {
 			trackAudioBytes(1): errors.New("provider 503 track 1"),
 		},
 	}
-	svc := newPerTrackService(t, root, t.TempDir(), st, []string{"0", "1"}, tr)
+	svc := newPerTrackService(t, root, testutil.TempDir(t), st, []string{"0", "1"}, tr)
 
 	_ = ingestPerTrack(t, svc, st, "dead.m4a", body)
 	doc, err := st.GetDocumentByPath(context.Background(), "dead.m4a")
@@ -257,14 +258,14 @@ func TestPerTrack_AllTracksFailDocumentError(t *testing.T) {
 // §8.6.12: an out-of-range index is a per-file, track-scoped skip).
 func TestPerTrack_ExplicitOutOfRangeProducesNothing(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "audio-file-bytes"
 	writeFile(t, filepath.Join(root, "toohigh.m4a"), body)
 	st := newRealStore(t)
 
 	// Track 0 would transcribe if wrongly selected; assert it is NOT.
 	tr := &perTrackTranscriber{byInput: map[string]string{body: "[00:00] track zero must not appear"}}
-	svc := newPerTrackService(t, root, t.TempDir(), st, []string{"5"}, tr) // probe has only 3 tracks
+	svc := newPerTrackService(t, root, testutil.TempDir(t), st, []string{"5"}, tr) // probe has only 3 tracks
 
 	types := ingestPerTrack(t, svc, st, "toohigh.m4a", body)
 	if types["transcript"] || types["transcript@t5"] {

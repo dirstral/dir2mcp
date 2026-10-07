@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // captureDefaultLog runs fn with the default logger writing to a buffer and
@@ -51,7 +52,7 @@ func TestSectionLevelWarning_NamesTheRealOutcome(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := hierarchicalConfig(t.TempDir())
+			cfg := hierarchicalConfig(testutil.TempDir(t))
 			cfg.RetrievalHierarchicalLevels = tc.levels
 			got := captureDefaultLog(t, func() {
 				mustNewIngestService(t, cfg, &summaryStore{})

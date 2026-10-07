@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #781, counting half. PR #792 made a not-followed symlink visible in the log.
@@ -31,11 +32,11 @@ import (
 func symlinkCorpus(t *testing.T, followSymlinks bool) (*store.SQLiteStore, *ingest.Service, bool) {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	// The link targets live OUTSIDE the corpus, which is the shape the issue
 	// describes: a curated tree of links into a media library.
-	external := t.TempDir()
+	external := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(external, "clip.txt"), []byte("real content"), 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
 	}
@@ -55,7 +56,7 @@ func symlinkCorpus(t *testing.T, followSymlinks bool) (*store.SQLiteStore, *inge
 		return nil, nil, false
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

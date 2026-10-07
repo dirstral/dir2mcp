@@ -18,6 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // windowRecordingTranscriber is a fake STT provider for issue #954: it records the
@@ -117,7 +118,7 @@ func newWindowSTTHarness(t *testing.T, tr *windowRecordingTranscriber, totalMS i
 		store:    &fakeIngestStore{},
 		tr:       tr,
 		logs:     &syncBuffer{},
-		stateDir: t.TempDir(),
+		stateDir: testutil.TempDir(t),
 	}
 	h.svc = mustNewIngestService(t, config.Config{StateDir: h.stateDir}, h.store)
 	h.svc.SetTranscriber(tr)
@@ -472,7 +473,7 @@ func TestWindowedSTT_RealSegmentExtraction(t *testing.T) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		t.Skip("ffprobe not installed: the real duration probe cannot be exercised")
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	src := filepath.Join(dir, "tone.wav")
 	cmd := exec.CommandContext(context.Background(), ffmpeg, "-nostdin", "-v", "error", "-y",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=70", src)
@@ -488,7 +489,7 @@ func TestWindowedSTT_RealSegmentExtraction(t *testing.T) {
 	// it, so every request the provider sees is acceptable.
 	tr := &windowRecordingTranscriber{capBytes: len(content) * 2 / 3}
 	st := &fakeIngestStore{}
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(tr)
 

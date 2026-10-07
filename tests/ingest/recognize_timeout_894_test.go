@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Regression guards for #894, the recognition wall-clock ceiling.
@@ -121,12 +122,12 @@ func TestRecognizeCallTimeout_OverflowClamps(t *testing.T) {
 // capped every call at ten minutes, so no configuration could exceed it.
 func TestRecognizeTimeout_ConfiguredBoundIsHonoured(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeTimeout = 45 * time.Minute
 	cfg.RecognizeTimeoutPerMediaSecond = 0
 
@@ -156,12 +157,12 @@ func TestRecognizeTimeout_ConfiguredBoundIsHonoured(t *testing.T) {
 // to end: the probed media duration, not a flat constant, sets the bound.
 func TestRecognizeTimeout_ScalesWithMediaDuration(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "broadcast.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, cfg, st)
@@ -192,12 +193,12 @@ func TestRecognizeTimeout_ScalesWithMediaDuration(t *testing.T) {
 // RECOGNIZE_FAILED classification (§14.4) is unchanged.
 func TestRecognizeTimeout_ClassifiedApartFromABrokenBackend(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeTimeout = 40 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
 
@@ -233,12 +234,12 @@ func TestRecognizeTimeout_BrokenBackendIsNotATimeout(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, cfg, st)
@@ -297,13 +298,13 @@ func TestRecognizeServeClient_HonoursCallerDeadline(t *testing.T) {
 func TestRecognizeTimeout_DoesNotEmptyTheCorpus(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "broadcast.mp4"), "fake-video-bytes")
 	writeFile(t, filepath.Join(root, "broadcast.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nWebb delivers the pitch\n\n"+
 			"00:00:02.000 --> 00:00:05.000\nFreeman flies out to centrefield\n")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -314,7 +315,7 @@ func TestRecognizeTimeout_DoesNotEmptyTheCorpus(t *testing.T) {
 	// An isolated state dir: the default is ./.dir2mcp relative to the process
 	// working directory, which these parallel tests would otherwise share with each
 	// other and leave behind in the package directory.
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeProvider = "serve"
 	cfg.RecognizeTimeout = 40 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
@@ -362,10 +363,10 @@ func TestRecognizeTimeout_DoesNotEmptyTheCorpus(t *testing.T) {
 func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video-bytes")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -376,7 +377,7 @@ func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
 	// An isolated state dir: the default is ./.dir2mcp relative to the process
 	// working directory, which these parallel tests would otherwise share with each
 	// other and leave behind in the package directory.
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeProvider = "serve"
 	cfg.RecognizeTimeout = 40 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
@@ -405,12 +406,12 @@ func TestRecognizeTimeout_EmptyDocumentStillFailsLoudly(t *testing.T) {
 // keep the hard path and must NOT be degraded as a recognition timeout.
 func TestRecognizeTimeout_ParentCancellationIsNotATimeout(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	// Generous, so the only expiry that can happen is the parent's cancellation.
 	cfg.RecognizeTimeout = time.Hour
 	cfg.RecognizeTimeoutPerMediaSecond = 0
@@ -448,12 +449,12 @@ func TestRecognizeTimeout_ParentCancellationIsNotATimeout(t *testing.T) {
 // that is not evidence about the backend and must keep the hard path.
 func TestRecognizeTimeout_ParentDeadlineIsNotATimeout(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeTimeout = time.Hour
 	cfg.RecognizeTimeoutPerMediaSecond = 0
 
@@ -527,12 +528,12 @@ func TestRecognizeServeClient_FallbackDeadlineDoesNotBreakTheCall(t *testing.T) 
 // cases the request was never delivered.
 func TestRecognizeTimeout_UnreachableBackendIsNotATimeout(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeTimeout = 150 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
 
@@ -569,12 +570,12 @@ func TestRecognizeTimeout_DeliveredRequestThatStallsIsATimeout(t *testing.T) {
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
 
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "game7.mp4"), "fake-video")
 
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeTimeout = 60 * time.Millisecond
 	cfg.RecognizeTimeoutPerMediaSecond = 0
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // recordingTranslator keeps every prompt it receives and answers both the
@@ -39,7 +40,7 @@ const hintLine = "[00:00] Студентам университета имени
 // cfg, returning every prompt the translator saw.
 func runNameHintTranslation(t *testing.T, cfg config.Config, sourceLang, source string) string {
 	t.Helper()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.MediaTranslateEnabled = true
 	cfg.MediaTranslateTargetLangs = []string{"en"}
 	svc := mustNewIngestService(t, cfg, &fakeIngestStore{})

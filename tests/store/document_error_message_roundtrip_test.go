@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_DocumentErrorMessageRoundtrip pins the persistence
@@ -136,7 +137,7 @@ func TestSQLiteStore_DocumentErrorMessageTruncation(t *testing.T) {
 
 func newTempSQLiteStore(t *testing.T, ctx context.Context) *store.SQLiteStore {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {

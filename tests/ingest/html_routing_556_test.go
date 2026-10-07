@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/ingest/docling"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // fakeStructuredExtractor is a model.DocumentExtractor that also implements the
@@ -57,7 +58,7 @@ const sampleHTML = "<html><head><title>Page Title</title></head><body><h1>Headin
 
 func newHTMLService(t *testing.T, st *store.SQLiteStore, root string) *ingest.Service {
 	t.Helper()
-	return mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, st)
+	return mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, st)
 }
 
 // TestHTML_RoutesToStructured_WhenDoclingActive is the #556 core: when a
@@ -65,7 +66,7 @@ func newHTMLService(t *testing.T, st *store.SQLiteStore, root string) *ingest.Se
 // through it, producing an extracted_markdown representation (structure preserved)
 // instead of flat raw_text (§7.4.A).
 func TestHTML_RoutesToStructured_WhenDoclingActive(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "page.html"), sampleHTML)
 	st := newRealStore(t)
 	svc := newHTMLService(t, st, root)
@@ -94,7 +95,7 @@ func TestHTML_RoutesToStructured_WhenDoclingActive(t *testing.T) {
 // with only a flat OCR extractor active (which cannot read html), html falls back
 // to the raw_text baseline — never dropped, never mis-routed to the flat engine.
 func TestHTML_FallsBackToRawText_WhenFlatExtractor(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "page.html"), sampleHTML)
 	st := newRealStore(t)
 	svc := newHTMLService(t, st, root)
@@ -113,7 +114,7 @@ func TestHTML_FallsBackToRawText_WhenFlatExtractor(t *testing.T) {
 // with no extractor at all (the lean build), html is still indexed as raw_text
 // exactly as before docling routing existed.
 func TestHTML_FallsBackToRawText_WhenNoExtractor(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "page.html"), sampleHTML)
 	st := newRealStore(t)
 	svc := newHTMLService(t, st, root)
@@ -133,7 +134,7 @@ func TestHTML_FallsBackToRawText_WhenNoExtractor(t *testing.T) {
 // that returns no parseable structure (or errors) must not drop the html — it
 // falls back to raw_text.
 func TestHTML_FallsBackToRawText_WhenStructuredYieldsNothing(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "page.html"), sampleHTML)
 	st := newRealStore(t)
 	svc := newHTMLService(t, st, root)

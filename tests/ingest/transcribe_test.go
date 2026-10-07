@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 type fakeTranscriber struct {
@@ -32,7 +33,7 @@ func (f *fakeTranscriber) Transcribe(_ context.Context, _ string, _ []byte) (str
 
 func TestGenerateTranscriptRepresentation_PersistsTimeChunks(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
@@ -88,7 +89,7 @@ func assertTranscriptSpanWindows(t *testing.T, st *fakeIngestStore) {
 
 func TestReadOrComputeTranscript_UsesCache(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	content := []byte("same-audio-bytes")
 	cachePath := filepath.Join(stateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
@@ -117,7 +118,7 @@ func TestReadOrComputeTranscript_UsesCache(t *testing.T) {
 
 func TestGenerateTranscriptRepresentation_TranscriberError(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{err: errors.New("provider down")})
@@ -134,7 +135,7 @@ func TestGenerateTranscriptRepresentation_TranscriberError(t *testing.T) {
 
 func TestReadOrComputeTranscript_PrunesCacheByTTL(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(0, time.Second)
 
@@ -195,7 +196,7 @@ func (e *staticEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, t
 
 func TestTranscriptIngest_EndToEnd_AppearsInAskWithCitations(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
@@ -271,7 +272,7 @@ func (f *fakeStructuredTranscriber) TranscribeStructured(_ context.Context, _ st
 // spans (spec §8.6.1) without changing the chunk count or text.
 func TestGenerateTranscriptRepresentation_AttachesWordSpans(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeStructuredTranscriber{
@@ -345,7 +346,7 @@ func transcriptMetaWordsFlag(t *testing.T, metaJSON string) bool {
 // word-granularity flag, so meta_json.words is absent/false (§8.6.9).
 func TestGenerateTranscriptRepresentation_SegmentOnlyOmitsWordsFlag(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})

@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Output-set reconciliation (dir2mcp #692).
@@ -103,8 +104,8 @@ func assertChunksTombstoned(t *testing.T, st *store.SQLiteStore, repID int64) {
 // while the still-wanted en transcript and the source transcript are untouched.
 func TestReconcile_RemovedTranslationTargetIsRetired(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 	ctx := context.Background()
@@ -145,8 +146,8 @@ func TestReconcile_RemovedTranslationTargetIsRetired(t *testing.T) {
 // transcript stays, because STT still produces it.
 func TestReconcile_DisablingTranslationRetiresEveryTranslation(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 	ctx := context.Background()
@@ -193,8 +194,8 @@ func TestReconcile_DisablingTranslationRetiresEveryTranslation(t *testing.T) {
 // transcript would stay live forever.
 func TestReconcile_UnresolvedTranslatorDefersCleanup(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 	ctx := context.Background()
@@ -241,8 +242,8 @@ func TestReconcile_UnresolvedTranslatorDefersCleanup(t *testing.T) {
 // output, so no translation setting may ever retire it (§8.6.4).
 func TestReconcile_SidecarTranscriptSurvivesTranslationOff(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.en.srt"),
 		"1\n00:00:00,000 --> 00:00:02,000\nauthored line\n\n2\n00:00:02,000 --> 00:00:04,000\nsecond line\n")
@@ -275,8 +276,8 @@ func TestReconcile_SidecarTranscriptSurvivesTranslationOff(t *testing.T) {
 // with an unchanged pipeline leaves every output in place.
 func TestReconcile_SteadyStateScanRetiresNothing(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 	ctx := context.Background()
@@ -302,8 +303,8 @@ func TestReconcile_SteadyStateScanRetiresNothing(t *testing.T) {
 // slots.
 func TestReconcile_DisabledSummariesAreRetired(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.txt"), "alpha beta gamma delta")
 	st := newRealStore(t)
 	ctx := context.Background()

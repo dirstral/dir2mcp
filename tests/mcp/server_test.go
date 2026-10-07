@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func postToolsListWithSession(serverURL, mcpPath, sessionID string) (*http.Response, error) {
@@ -182,7 +183,7 @@ func TestSessionPersistsAcrossServerRestart(t *testing.T) {
 	cfg.SessionInactivityTimeout = time.Hour
 	cfg.SessionMaxLifetime = 0
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("Init store failed: %v", err)
 	}
@@ -298,7 +299,7 @@ func TestMCPInitialize_ServerNameRespectsOverride(t *testing.T) {
 func TestMCPInitialize_ServerNameAutoDerivedWhenEmpty(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	cfg.RootDir = t.TempDir()
+	cfg.RootDir = testutil.TempDir(t)
 	cfg.ServerName = ""
 
 	got := initializeServerInfoName(t, cfg)

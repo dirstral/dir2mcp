@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests pin ingest.DescribePandocEngine, the SPEC §7.7 engine-list entry
@@ -48,7 +49,7 @@ func TestDescribePandocEngine_AutoBrokenBinary(t *testing.T) {
 // Under auto with no pandoc anywhere, the engine is unavailable and the reason
 // names the fix surface (PATH).
 func TestDescribePandocEngine_AutoNotFound(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 	if _, err := exec.LookPath("pandoc"); err == nil {
 		t.Fatal("test precondition: pandoc must not resolve on the empty PATH")
 	}

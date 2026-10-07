@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC 8.6.1 names one authored cue as the transcript segment of a subtitle
@@ -59,12 +60,12 @@ func sparseCues() []testCue {
 // and their spans (one span per chunk). STT must not run.
 func ingestSidecarChunks(t *testing.T, cfg config.Config, cues []testCue) ([]model.Chunk, []model.Span) {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "media", "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "media", "talk.vtt"), renderVTT(cues))
 
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetTranscriber(&explodingTranscriber{t: t})

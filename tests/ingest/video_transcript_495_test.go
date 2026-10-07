@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // capturingTranscriber records the filename and bytes it is handed so a test can
@@ -40,11 +41,11 @@ func (c *capturingTranscriber) Transcribe(_ context.Context, relPath string, dat
 // the binary; the real audio extraction is covered by avutil.
 func TestVideoTranscript_RoutedThroughSTT(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video-container-bytes")
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
 	tr := &capturingTranscriber{text: "[00:00] hello from the video\n[00:03] second line"}
 	svc.SetTranscriber(tr)
 	svc.SetSTTIdentity("whisper", "whisper-large-v3")
@@ -105,11 +106,11 @@ func TestVideoTranscript_RoutedThroughSTT(t *testing.T) {
 // surfaced as a durable status="error" so it is not a silent no-op (#398).
 func TestVideoTranscript_NoAudioTrack_DegradesGracefully(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "silent.mp4"), "fake-video-no-audio")
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
 	tr := &capturingTranscriber{text: "unused"}
 	svc.SetTranscriber(tr)
 	svc.SetSTTIdentity("whisper", "whisper-large-v3")

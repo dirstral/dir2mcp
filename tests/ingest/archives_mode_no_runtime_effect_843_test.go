@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // ingestUnderArchivesMode indexes one corpus holding an archive nested inside an
@@ -37,7 +38,7 @@ import (
 func ingestUnderArchivesMode(t *testing.T, mode string) *store.SQLiteStore {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	innerZip := buildZip(t, map[string]string{"inner.txt": "nested payload"})
 	outerZip := buildZip(t, map[string]string{
@@ -48,7 +49,7 @@ func ingestUnderArchivesMode(t *testing.T, mode string) *store.SQLiteStore {
 		t.Fatalf("write archive: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/scancache"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // scanCacheTestConfig builds a config with the scan cache enabled and an
@@ -17,7 +18,7 @@ func scanCacheTestConfig(t *testing.T, root string) config.Config {
 	t.Helper()
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = filepath.Join(t.TempDir(), "state")
+	cfg.StateDir = filepath.Join(testutil.TempDir(t), "state")
 	cfg.IngestScanCache = true
 	return cfg
 }
@@ -26,7 +27,7 @@ func scanCacheTestConfig(t *testing.T, root string) config.Config {
 // run over an unchanged tree (served from the persisted scan cache) produces the
 // same active documents as the first run, and that the cache file is created.
 func TestServiceRun_ScanCacheUnchangedTreeYieldsSameDocs(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("alpha text"))
 	mustWriteFile(t, filepath.Join(root, "sub", "b.txt"), []byte("beta text"))
 
@@ -66,7 +67,7 @@ func TestServiceRun_ScanCacheUnchangedTreeYieldsSameDocs(t *testing.T) {
 // modification (which does NOT bump the parent directory mtime) is still picked
 // up on a cached re-run: the document's content hash changes.
 func TestServiceRun_ScanCacheDetectsModifiedFile(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	target := filepath.Join(root, "sub", "b.txt")
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("alpha"))
 	mustWriteFile(t, target, []byte("beta original"))
@@ -105,7 +106,7 @@ func TestServiceRun_ScanCacheDetectsModifiedFile(t *testing.T) {
 // files (both bump the parent directory mtime, invalidating the cached
 // signature) are reflected on a cached re-run.
 func TestServiceRun_ScanCacheDetectsAddAndRemove(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "dir", "keep.txt"), []byte("keep"))
 	mustWriteFile(t, filepath.Join(root, "dir", "remove.txt"), []byte("bye"))
 
@@ -139,7 +140,7 @@ func TestServiceRun_ScanCacheDetectsAddAndRemove(t *testing.T) {
 // TestServiceRun_ScanCacheDisabledNoCacheFile verifies the default (cache off)
 // performs a full walk and never creates the cache file.
 func TestServiceRun_ScanCacheDisabledNoCacheFile(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("alpha"))
 	mustWriteFile(t, filepath.Join(root, "sub", "b.txt"), []byte("beta"))
 

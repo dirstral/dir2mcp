@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // insertChunkWithLanguage upserts a document + representation (carrying the given
@@ -47,7 +48,7 @@ func insertChunkWithLanguage(t *testing.T, st *store.SQLiteStore, relPath, langu
 // resolution backend (#325): the distinct non-empty effective languages recorded
 // across non-deleted chunks are returned, sorted and de-duplicated.
 func TestListCorpusLanguages_DistinctSorted(t *testing.T) {
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "langs.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "langs.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestListCorpusLanguages_DistinctSorted(t *testing.T) {
 // TestListCorpusLanguages_EmptyCorpus pins that an empty corpus yields no
 // languages (so "auto" cross-lingual expansion is a no-op).
 func TestListCorpusLanguages_EmptyCorpus(t *testing.T) {
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "empty.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "empty.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

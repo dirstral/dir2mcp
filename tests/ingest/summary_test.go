@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Document-level summary generation for hierarchical retrieval (SPEC §5.2 /
@@ -105,7 +106,7 @@ func TestDocumentSummary_Disabled_ProducesNoSummary(t *testing.T) {
 		sources: []store.SummarySourceRep{{RepID: 1, DocID: 5, RepType: ingest.RepTypeRawText, Chunks: 2}},
 		texts:   map[int64][]string{1: {"alpha", "beta"}},
 	}
-	svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, st)
 	gen := &fakeSummarizer{}
 	svc.SetSummarizer(gen, "mistral", "mistral-small-latest")
 
@@ -128,7 +129,7 @@ func TestDocumentSummary_PersistsCoverageMeta(t *testing.T) {
 		sources: []store.SummarySourceRep{{RepID: 11, DocID: 5, RepType: ingest.RepTypeRawText, Chunks: 2}},
 		texts:   map[int64][]string{11: {"alpha", "beta"}},
 	}
-	svc := mustNewIngestService(t, hierarchicalConfig(t.TempDir()), st)
+	svc := mustNewIngestService(t, hierarchicalConfig(testutil.TempDir(t)), st)
 	gen := &fakeSummarizer{}
 	svc.SetSummarizer(gen, "mistral", "mistral-small-latest")
 
@@ -216,7 +217,7 @@ func TestDocumentSummary_FailOpenWithNoChatProvider(t *testing.T) {
 	}
 	// mustNewIngestService constructs with no provider credentials, so
 	// resolveSummaryBinding finds no chat provider and leaves the binding nil.
-	svc := mustNewIngestService(t, hierarchicalConfig(t.TempDir()), st)
+	svc := mustNewIngestService(t, hierarchicalConfig(testutil.TempDir(t)), st)
 
 	svc.GenerateDocumentSummaries(context.Background(), model.Document{DocID: 5, RelPath: "notes.md", DocType: "md"})
 
@@ -234,7 +235,7 @@ func TestDocumentSummary_FailOpenOnGeneratorError(t *testing.T) {
 		sources: []store.SummarySourceRep{{RepID: 11, DocID: 5, RepType: ingest.RepTypeRawText, Chunks: 1}},
 		texts:   map[int64][]string{11: {"alpha"}},
 	}
-	svc := mustNewIngestService(t, hierarchicalConfig(t.TempDir()), st)
+	svc := mustNewIngestService(t, hierarchicalConfig(testutil.TempDir(t)), st)
 	svc.SetSummarizer(&fakeSummarizer{genErr: errors.New("provider down")}, "mistral", "m")
 
 	// Must not panic and must not fail: GenerateDocumentSummaries returns nothing.
@@ -246,7 +247,7 @@ func TestDocumentSummary_FailOpenOnGeneratorError(t *testing.T) {
 
 	// A source-enumeration failure is equally non-fatal.
 	failing := &summaryStore{sourceErr: errors.New("db unavailable")}
-	svc2 := mustNewIngestService(t, hierarchicalConfig(t.TempDir()), failing)
+	svc2 := mustNewIngestService(t, hierarchicalConfig(testutil.TempDir(t)), failing)
 	svc2.SetSummarizer(&fakeSummarizer{}, "mistral", "m")
 	svc2.GenerateDocumentSummaries(context.Background(), model.Document{DocID: 5, RelPath: "notes.md", DocType: "md"})
 	if len(failing.reps) != 0 {
@@ -272,7 +273,7 @@ func TestDocumentSummary_AutoPicksPrimaryTextRepresentation(t *testing.T) {
 			13: {"raw"},
 		},
 	}
-	svc := mustNewIngestService(t, hierarchicalConfig(t.TempDir()), st)
+	svc := mustNewIngestService(t, hierarchicalConfig(testutil.TempDir(t)), st)
 	svc.SetSummarizer(&fakeSummarizer{}, "mistral", "m")
 
 	svc.GenerateDocumentSummaries(context.Background(), model.Document{DocID: 5, RelPath: "talk.mp3", DocType: "audio"})
@@ -303,7 +304,7 @@ func TestDocumentSummary_ExplicitSourceRepsProduceDistinctSummaries(t *testing.T
 		},
 		texts: map[int64][]string{12: {"spoken words"}, 13: {"written words"}},
 	}
-	cfg := hierarchicalConfig(t.TempDir())
+	cfg := hierarchicalConfig(testutil.TempDir(t))
 	cfg.RetrievalHierarchicalSourceReps = []string{ingest.RepTypeTranscript, ingest.RepTypeRawText}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetSummarizer(&fakeSummarizer{}, "mistral", "m")
@@ -339,7 +340,7 @@ func TestDocumentSummary_ExplicitSourceRepsProduceDistinctSummaries(t *testing.T
 // change to any identity component re-derives.
 func TestDocumentSummary_CachedByDerivationIdentity(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	newStore := func() *summaryStore {
 		return &summaryStore{
 			sources: []store.SummarySourceRep{{RepID: 11, DocID: 5, RepType: ingest.RepTypeRawText, Chunks: 1}},
@@ -391,7 +392,7 @@ func TestDocumentSummary_PromptOverrideIsHashedAndUsed(t *testing.T) {
 		sources: []store.SummarySourceRep{{RepID: 11, DocID: 5, RepType: ingest.RepTypeRawText, Chunks: 1}},
 		texts:   map[int64][]string{11: {"the quick brown fox"}},
 	}
-	cfg := hierarchicalConfig(t.TempDir())
+	cfg := hierarchicalConfig(testutil.TempDir(t))
 	cfg.RetrievalHierarchicalPrompt = "OVERRIDE-INSTRUCTIONS"
 	svc := mustNewIngestService(t, cfg, st)
 	gen := &fakeSummarizer{}

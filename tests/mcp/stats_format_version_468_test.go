@@ -7,6 +7,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestMCPStats_FormatVersion asserts the dir2mcp_stats output carries the df-000
@@ -15,7 +16,7 @@ import (
 // It is the payload-shape version, independent of the pinned protocol_version.
 func TestMCPStats_FormatVersion(t *testing.T) {
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 

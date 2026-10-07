@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_RecentFailures_OrderAndLimit pins the contract the
@@ -15,7 +16,7 @@ import (
 // limit applied. Backs SPEC §15.6.
 func TestSQLiteStore_RecentFailures_OrderAndLimit(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -74,7 +75,7 @@ func TestSQLiteStore_RecentFailures_OrderAndLimit(t *testing.T) {
 // will not include recent_failures in its output.
 func TestSQLiteStore_RecentFailures_EmptyOnHealthyCorpus(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

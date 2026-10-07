@@ -8,6 +8,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestQualityGate_QuarantinesDegenerateTranscript verifies that when the output
@@ -17,7 +18,7 @@ import (
 // worker — which only picks up embedding_status='pending' — never embeds them.
 func TestQualityGate_QuarantinesDegenerateTranscript(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: strings.Repeat("thank you ", 60)})
@@ -51,7 +52,7 @@ func TestQualityGate_QuarantinesDegenerateTranscript(t *testing.T) {
 // embedded normally.
 func TestQualityGate_CleanTranscriptNotQuarantined(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] welcome to the lecture today\n[00:02] we discuss several distinct topics in depth\n[00:05] including history geography and science across many regions"})
@@ -82,7 +83,7 @@ func TestQualityGate_CleanTranscriptNotQuarantined(t *testing.T) {
 // fully skipped, preserving pre-0.16.0 behaviour.
 func TestQualityGate_DisabledViaSetter(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
 	svc.SetQualityGate(nil) // disable screening
@@ -125,7 +126,7 @@ const englishClipTranscript = "[00:00] welcome to the interview today\n" +
 // is embedded normally instead of being discarded as ~100% off-script.
 func TestQualityGate_PinnedLanguageDoesNotQuarantineOtherLanguage(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	// MediaSTTLanguageStrict defaults to false (unset here).
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
@@ -157,7 +158,7 @@ func TestQualityGate_PinnedLanguageDoesNotQuarantineOtherLanguage(t *testing.T) 
 // (English) transcript is quarantined as a language mismatch.
 func TestQualityGate_PinnedLanguageStrictQuarantinesOffScript(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{
 		StateDir:               stateDir,
@@ -189,7 +190,7 @@ func TestQualityGate_PinnedLanguageStrictQuarantinesOffScript(t *testing.T) {
 // degenerate OCR result is quarantined identically to the transcript path.
 func TestQualityGate_QuarantinesDegenerateOCR(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
 	svc.SetOCR(&fakeOCR{text: strings.Repeat("page header ", 80)})

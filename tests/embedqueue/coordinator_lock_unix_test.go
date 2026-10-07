@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests are unix-only: AcquireCoordinatorLock is backed by flock and only
@@ -21,7 +22,7 @@ import (
 // acquisition of the same lock path is refused with ErrCoordinatorLocked, and the
 // path becomes acquirable again after the first holder releases.
 func TestCoordinatorLock_DetectAndRefuse(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "embed-coordinator.lock")
+	path := filepath.Join(testutil.TempDir(t), "embed-coordinator.lock")
 
 	first, err := embedqueue.AcquireCoordinatorLock(path)
 	if err != nil {
@@ -49,7 +50,7 @@ func TestCoordinatorLock_DetectAndRefuse(t *testing.T) {
 // TestCoordinatorLock_ReleaseIdempotent pins that Release is safe to call twice and
 // on a nil lock (defensive shutdown paths).
 func TestCoordinatorLock_ReleaseIdempotent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "embed-coordinator.lock")
+	path := filepath.Join(testutil.TempDir(t), "embed-coordinator.lock")
 	l, err := embedqueue.AcquireCoordinatorLock(path)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)

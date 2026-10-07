@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
@@ -43,7 +44,7 @@ func loadMultimodalConfig(t *testing.T, root, mode string) config.Config {
 		"    text_model: gemini-embedding-2\n" +
 		"    code_model: gemini-embedding-2\n" +
 		"    multimodal: " + mode + "\n"
-	cfgPath := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	cfgPath := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -61,11 +62,11 @@ func loadMultimodalConfig(t *testing.T, root, mode string) config.Config {
 // multimodal embedding by the worker.
 func TestProcessDocument_AugmentEmitsImageMediaChunk(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "pic.png"), []byte("PNGDATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -107,12 +108,12 @@ func TestProcessDocument_AugmentEmitsImageMediaChunk(t *testing.T) {
 // a page span per page) for direct per-page multimodal embedding.
 func TestProcessDocument_AugmentEmitsPdfPageChunks(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	pdf := makeTestPDF(t, 2)
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), pdf, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -147,11 +148,11 @@ func TestProcessDocument_AugmentEmitsPdfPageChunks(t *testing.T) {
 // behavior-preserving: an image yields no media chunk.
 func TestProcessDocument_OffEmitsNoMediaChunk(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "pic.png"), []byte("PNGDATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

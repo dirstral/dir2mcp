@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestListFilesAndSearchPrefixAgree is the cross-check for issue #286 Bug B:
@@ -17,7 +18,7 @@ import (
 // two code paths can no longer drift on prefix semantics.
 func TestListFilesAndSearchPrefixAgree(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

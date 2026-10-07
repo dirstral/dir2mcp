@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func healthyStub(t *testing.T) *httptest.Server {
@@ -50,10 +51,10 @@ func TestRecognizeBackend_ManagedLifecycle_LaunchHealthyAndKilledOnShutdown(t *t
 	skipOnWindows(t, managedBackendUnixOnly)
 	t.Parallel()
 	stub := healthyStub(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	cfg := config.Config{
-		RootDir: root, StateDir: t.TempDir(),
+		RootDir: root, StateDir: testutil.TempDir(t),
 		RecognizeProvider:     "serve",
 		RecognizeServeURL:     stub.URL,
 		RecognizeServeCommand: "sleep 60",
@@ -85,7 +86,7 @@ func TestRecognizeBackend_CommandExitsBeforeHealthy_FailsStartup(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	cfg := config.Config{
-		RootDir: t.TempDir(), StateDir: t.TempDir(),
+		RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t),
 		RecognizeProvider:     "serve",
 		RecognizeServeURL:     srv.URL,
 		RecognizeServeCommand: "true",
@@ -107,7 +108,7 @@ func TestRecognizeBackend_NeverHealthy_TimesOutAndTerminatesChild(t *testing.T) 
 	t.Cleanup(srv.Close)
 
 	cfg := config.Config{
-		RootDir: t.TempDir(), StateDir: t.TempDir(),
+		RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t),
 		RecognizeProvider:     "serve",
 		RecognizeServeURL:     srv.URL,
 		RecognizeServeCommand: "sleep 60",
@@ -130,7 +131,7 @@ func TestRecognizeBackend_NeverHealthy_TimesOutAndTerminatesChild(t *testing.T) 
 func TestRecognizeBackend_ConnectOnly_UnreachableIsWarningNotError(t *testing.T) {
 	t.Parallel()
 	cfg := config.Config{
-		RootDir: t.TempDir(), StateDir: t.TempDir(),
+		RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t),
 		RecognizeProvider: "serve",
 		// A port nothing listens on: connect-only mode warns and proceeds;
 		// per-document ingest errors remain the hard signal.
@@ -147,9 +148,9 @@ func TestRecognizeBackend_ConnectOnly_UnreachableIsWarningNotError(t *testing.T)
 
 func TestRecognizeBackend_NoOpWhenRecognitionOff(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "keep.txt"), "x")
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir()}, &fakeIngestStore{})
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t)}, &fakeIngestStore{})
 	if err := svc.StartRecognizeBackend(context.Background()); err != nil {
 		t.Fatalf("recognition off must be a lifecycle no-op, got %v", err)
 	}

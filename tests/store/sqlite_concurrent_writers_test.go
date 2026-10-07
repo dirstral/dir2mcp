@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_ConcurrentWritersNoBusy guards against the SQLITE_BUSY
@@ -44,7 +45,7 @@ func TestSQLiteStore_ConcurrentWritersNoBusy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), raceScaled(30*time.Second))
 	defer cancel()
 
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 

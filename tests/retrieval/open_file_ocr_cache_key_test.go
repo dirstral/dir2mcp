@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests lock the fix for issue #488: open_file's OCR/transcript cache
@@ -88,7 +89,7 @@ func (c *countingCorpusFS) Localize(context.Context, string) (string, func(), er
 // authoritative, identity-aware key retrieval must reproduce.
 func ingestOCRCacheKey(t *testing.T, stateDir string, content []byte) string {
 	t.Helper()
-	cfg := config.Config{RootDir: t.TempDir(), StateDir: stateDir, STTProvider: "off"}
+	cfg := config.Config{RootDir: testutil.TempDir(t), StateDir: stateDir, STTProvider: "off"}
 	ing, err := ingest.NewService(cfg, &fakeKeyStore{})
 	if err != nil {
 		t.Fatalf("ingest.NewService: %v", err)
@@ -102,7 +103,7 @@ func ingestOCRCacheKey(t *testing.T, stateDir string, content []byte) string {
 // once the active OCR identity is plumbed in — and is MISSED with the old
 // bytes-only key (no identity), reproducing the bug.
 func TestOpenFile_OCRCacheKey_IdentityAwareHit(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 identity-aware body")
@@ -150,7 +151,7 @@ func TestOpenFile_OCRCacheKey_IdentityAwareHit(t *testing.T) {
 // different identity is active (a model/provider swap the re-ingest gate treats
 // as stale).
 func TestOpenFile_OCRCacheKey_DifferentIdentityMisses(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 mismatch body")
@@ -183,7 +184,7 @@ func TestOpenFile_OCRCacheKey_DifferentIdentityMisses(t *testing.T) {
 // identity-folded key (incl. the language suffix); open_file returns it once the
 // active transcript identity is plumbed in.
 func TestOpenFile_TranscriptCacheKey_IdentityAwareHit(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	audioBytes := []byte("fake-audio-bytes")
@@ -236,7 +237,7 @@ func TestOpenFile_TranscriptCacheKey_IdentityAwareHit(t *testing.T) {
 // open_file derives the identity-aware key WITHOUT streaming the object — zero
 // CorpusFS Open calls — and still returns the cached text.
 func TestOpenFile_OCRCacheKey_SkipsObjectGETWhenStoreHasHash(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 perf body")
@@ -276,7 +277,7 @@ func TestOpenFile_OCRCacheKey_SkipsObjectGETWhenStoreHasHash(t *testing.T) {
 // whitespace-padded identity still reconstructs ingest's byte-identical key and
 // HITS the cache, instead of silently missing on the stray whitespace.
 func TestOpenFile_OCRCacheKey_WhitespacePaddedIdentityHits(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 whitespace body")
@@ -315,7 +316,7 @@ func TestOpenFile_OCRCacheKey_WhitespacePaddedIdentityHits(t *testing.T) {
 // reconstructs ingest's key and HITS, instead of folding the bogus hash and
 // regressing to OCR_NOT_READY.
 func TestOpenFile_OCRCacheKey_MalformedStoreHashFallsBack(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 malformed-hash body")

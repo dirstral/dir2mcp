@@ -13,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestNewRepresentationGeneratorNil(t *testing.T) {
@@ -178,7 +179,7 @@ func TestRepresentationGeneratorIntegration(t *testing.T) {
 		DocType: "code",
 	}
 
-	tmp := filepath.Join(t.TempDir(), "main.go")
+	tmp := filepath.Join(testutil.TempDir(t), "main.go")
 	content := "package main\n\nfunc main() {}\n"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
 		t.Fatalf("write temp file: %v", err)
@@ -296,7 +297,7 @@ func TestGenerateRawTextTooLarge(t *testing.T) {
 	doc := model.Document{DocID: 1, RelPath: "large.txt", DocType: "text"}
 
 	// create a file just above the defaultMaxFileSizeBytes limit
-	tmp := filepath.Join(t.TempDir(), "large.txt")
+	tmp := filepath.Join(testutil.TempDir(t), "large.txt")
 	f, err := os.Create(tmp)
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)

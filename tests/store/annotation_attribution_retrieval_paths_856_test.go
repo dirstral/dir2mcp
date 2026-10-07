@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The two store read paths a retrieval candidate comes from must both carry a
@@ -58,7 +59,7 @@ func embeddedAnnotationChunk(t *testing.T, st *store.SQLiteStore, relPath, text 
 
 func attributionStore(t *testing.T) (*store.SQLiteStore, uint64) {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

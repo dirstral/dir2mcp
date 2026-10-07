@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #961 / SPEC §8.6.13. A 73-minute recording was scheduled as eight decode
@@ -343,7 +344,7 @@ func TestWindowedSTT_CoverageSurvivesTheTranscriptCache(t *testing.T) {
 func partialFloorService(t *testing.T, root string, st model.Store, minCoverage float64, action string) (*ingest.Service, *appstate.IndexingState, *syncBuffer) {
 	t.Helper()
 	const totalMS = 30 * 60 * 1000
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}
 	svc := mustNewIngestService(t, cfg, st)
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
 	svc.SetIndexingState(state)
@@ -377,7 +378,7 @@ func partialFloorService(t *testing.T, root string, st model.Store, minCoverage 
 func TestPartialTranscriptFloor_SkipRecordsDurableSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -416,7 +417,7 @@ func TestPartialTranscriptFloor_SkipRecordsDurableSkip(t *testing.T) {
 func TestPartialTranscriptFloor_WarnIndexesAnyway(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -445,7 +446,7 @@ func TestPartialTranscriptFloor_WarnIndexesAnyway(t *testing.T) {
 func TestPartialTranscriptFloor_OffByDefault(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -578,7 +579,7 @@ func (w *silentWindowTranscriber) TranscribeStructured(_ context.Context, _ stri
 func TestPartialTranscriptFloor_EmptyTranscriptFromAPartialDecodeIsNotSilence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "quiet.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -641,7 +642,7 @@ func liveTranscriptReps(t *testing.T, st *store.SQLiteStore, relPath string) int
 func TestPartialTranscriptFloor_SkipRetiresWhatAnEarlierRunIndexed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
 	st := newRealStore(t)
 	f := ingest.DiscoveredFile{RelPath: "long.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -681,7 +682,7 @@ func TestPartialTranscriptFloor_SkipRetiresWhatAnEarlierRunIndexed(t *testing.T)
 func TestPartialTranscriptFloor_SkipNeverRetiresASidecarTranscript(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -747,7 +748,7 @@ func (s *retireFailingStore961) SoftDeleteRepresentations(
 // this PR did before review.
 func TestPartialFloor_ARefusalThatCannotRetireDoesNotRecordASkip(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	base := newRealStore(t)
 	st := &retireFailingStore961{SQLiteStore: base, err: errors.New("database is locked")}
 

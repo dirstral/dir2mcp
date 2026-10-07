@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedSubtreeCorpus builds the corpus the #678 tests use and returns the
@@ -24,7 +25,7 @@ import (
 // unrelated control.
 func seedSubtreeCorpus(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, "docs", "a", "b"), 0o755); err != nil {
 		t.Fatalf("mkdir docs tree: %v", err)
 	}
@@ -68,7 +69,7 @@ var subtreeRemovedPaths = []string{
 // indexed, and starts the watcher.
 func startSubtreeWatcher(t *testing.T, ctx context.Context, root string) *store.SQLiteStore {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -123,7 +124,7 @@ func TestWatch_TombstonesDescendantsOfMovedOutDir(t *testing.T) {
 
 	// Move the tree out of the corpus in one operation. The kernel reports the
 	// rename of "docs"; it reports nothing about the files inside it.
-	outside := filepath.Join(t.TempDir(), "moved-out")
+	outside := filepath.Join(testutil.TempDir(t), "moved-out")
 	if err := os.Rename(filepath.Join(root, "docs"), outside); err != nil {
 		t.Fatalf("rename docs out of root: %v", err)
 	}

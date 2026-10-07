@@ -6,10 +6,11 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/scancache"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestSQLiteCache_StoreAndLookupRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache", "scan.sqlite")
+	path := filepath.Join(testutil.TempDir(t), "cache", "scan.sqlite")
 	c := scancache.Open(path)
 	defer func() { _ = c.Close() }()
 
@@ -53,7 +54,7 @@ func TestSQLiteCache_StoreAndLookupRoundTrip(t *testing.T) {
 }
 
 func TestSQLiteCache_LookupMissReturnsNoError(t *testing.T) {
-	c := scancache.Open(filepath.Join(t.TempDir(), "scan.sqlite"))
+	c := scancache.Open(filepath.Join(testutil.TempDir(t), "scan.sqlite"))
 	defer func() { _ = c.Close() }()
 
 	_, ok, err := c.LookupDir("nope")
@@ -66,7 +67,7 @@ func TestSQLiteCache_LookupMissReturnsNoError(t *testing.T) {
 }
 
 func TestSQLiteCache_StoreUpsertsAndPersists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "scan.sqlite")
+	path := filepath.Join(testutil.TempDir(t), "scan.sqlite")
 
 	c := scancache.Open(path)
 	if err := c.StoreDir("d", corpusfs.CachedDirSignature{DirMTimeUnixNano: 1}); err != nil {

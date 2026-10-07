@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -44,7 +45,7 @@ func watchedDirs(t *testing.T, absRoot string, opts DiscoverOptions) map[string]
 // watchExcludeCorpus creates one directory per name the tests care about.
 func watchExcludeCorpus(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	for _, name := range []string{"dist", "node_modules", "notes", ".dir2mcp"} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)

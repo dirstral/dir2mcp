@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestListFilesPagePerf_694 measures what a list_files caller actually pays for
@@ -68,7 +69,7 @@ func TestListFilesPagePerf_694(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	dbPath := filepath.Join(tmp, "meta.sqlite")
 	root := filepath.Join(tmp, "corpus")
 	st := store.NewSQLiteStore(dbPath)

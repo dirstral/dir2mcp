@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestRepresentationMetaByType covers the read side of the derivation-identity
@@ -16,7 +17,7 @@ import (
 // for an exact rep_type, an empty string when the document has no such
 // representation, and os.ErrNotExist when the document is missing.
 func TestRepresentationMetaByType(t *testing.T) {
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

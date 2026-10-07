@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // seedTranscript inserts a document plus a transcript representation with the
@@ -16,7 +17,7 @@ import (
 func seedTranscript(t *testing.T, relPath, metaJSON string, chunks []model.Chunk, spans [][]model.Span) *store.SQLiteStore {
 	t.Helper()
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -95,7 +96,7 @@ func TestTranscriptSpanChunksOrdered(t *testing.T) {
 // reported as os.ErrNotExist (distinct from "no transcript").
 func TestTranscriptRepresentationsMissingDoc(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -109,7 +110,7 @@ func TestTranscriptRepresentationsMissingDoc(t *testing.T) {
 // no transcript representation yields an empty slice and a nil error.
 func TestTranscriptRepresentationsNoTranscript(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

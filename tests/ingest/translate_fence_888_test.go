@@ -7,6 +7,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #888: the translate prompts sent subtitle cues to a model as plain
@@ -21,7 +22,7 @@ import (
 
 func translateSvc(t *testing.T) *ingest.Service {
 	t.Helper()
-	return mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
+	return mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, &fakeIngestStore{})
 }
 
 func TestTranslate888_PerLinePromptFencesTheCue(t *testing.T) {
