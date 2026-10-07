@@ -192,3 +192,27 @@ func TestMediaSubtitlesEmit_DirMustBeOutsideCorpus(t *testing.T) {
 		}
 	}
 }
+
+// TestMediaSubtitlesEmit_DirThroughSymlinkIntoCorpusIsRejected pins that the
+// containment check follows symlinks: an output root that lies outside the
+// corpus as written but reaches it through a symlink is inside, also when the
+// final directory does not exist yet.
+func TestMediaSubtitlesEmit_DirThroughSymlinkIntoCorpusIsRejected(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "media"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "subs-link")
+	if err := os.Symlink(filepath.Join(root, "media"), link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	for _, bad := range []string{link, filepath.Join(link, "not-yet", "created")} {
+		cfg := config.Default()
+		cfg.RootDir = root
+		cfg.MediaSubtitlesEmitEnabled = true
+		cfg.MediaSubtitlesEmitDir = bad
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "outside the corpus root") {
+			t.Fatalf("dir %q reaches the corpus through a symlink and must be rejected, got %v", bad, err)
+		}
+	}
+}

@@ -5782,8 +5782,12 @@ func (c *Config) validateMediaSubtitlesEmit() error {
 }
 
 // emitDirInsideCorpus reports whether dir resolves to the corpus root or a path
-// below it. Both are made absolute and cleaned first; when either cannot be
-// resolved the check fails open (false), leaving the decision to the write path.
+// below it. Both are made absolute and cleaned first, and the check runs twice:
+// on the paths as written and on the paths with symlinks resolved, so an output
+// root that reaches the corpus through a symlink is also inside. The output root
+// may not exist yet, so its longest existing ancestor is resolved. When either
+// path cannot be made absolute the check fails open (false), leaving the
+// decision to the write path.
 func emitDirInsideCorpus(dir, root string) bool {
 	if strings.TrimSpace(root) == "" {
 		return false
@@ -5793,11 +5797,37 @@ func emitDirInsideCorpus(dir, root string) bool {
 	if err1 != nil || err2 != nil {
 		return false
 	}
-	rel, err := filepath.Rel(absRoot, absDir)
+	if pathWithin(absRoot, absDir) {
+		return true
+	}
+	return pathWithin(resolveExistingPrefix(absRoot), resolveExistingPrefix(absDir))
+}
+
+// pathWithin reports whether p is base or a path below base. Both are absolute.
+func pathWithin(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
 	if err != nil {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// resolveExistingPrefix resolves the symlinks of the longest existing ancestor
+// of the absolute path p and appends the rest of p unchanged. A path with no
+// resolvable ancestor is returned as it is.
+func resolveExistingPrefix(p string) string {
+	tail := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
 }
 
 // normalizeSubtitleEmitFormats lower-cases, trims and dedupes the write-back

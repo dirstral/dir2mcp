@@ -114,10 +114,10 @@ func (s *Service) loadOwnedArtifacts(ctx context.Context) {
 	for _, r := range rows {
 		rec := ownedArtifact{DocID: r.DocID, Format: r.Format, Lang: r.Lang,
 			SizeBytes: r.SizeBytes, MTimeUnix: r.MTimeUnix, ContentSHA256: r.ContentSHA256}
-		switch {
-		case r.OutputRoot == "":
+		switch r.OutputRoot {
+		case "":
 			inCorpus[r.RelPath] = rec
-		case r.OutputRoot == root:
+		case root:
 			outRoot[r.RelPath] = rec
 		}
 	}
