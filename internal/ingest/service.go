@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/scancache"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -395,12 +396,30 @@ type Service struct {
 	ocrCacheWrites     int
 	ocrCachePruneEvery int
 
-	// sidecarIndex maps every discovered file's rel_path to its mtime, built once
-	// per scan (setSidecarIndex). The transcript path uses it to detect subtitle
-	// sidecars next to a media file and to mtime-gate their ingestion (§8.6.4).
-	// Nil until a scan sets it; direct callers fall back to a one-shot walk.
-	sidecarIndex map[string]int64
+	// sidecarIndex holds every discovered subtitle file's stat, grouped by
+	// directory (sidecar.go buildSidecarIndex), built once per scan so sidecar
+	// binding is a per-directory lookup rather than a walk of the corpus.
+	sidecarIndex map[string]map[string]sidecarStat
 	sidecarMu    sync.RWMutex
+
+	// Subtitle write-back state (SPEC §8.6.14, emit.go). ownedArtifacts is the
+	// in-memory projection of the df-003 §5.6 ownership rows written beside the
+	// media (output root ""), plus marker adoptions, loaded once per scan
+	// (ownedLoaded) so sidecar discovery can exclude files this pipeline wrote.
+	// outRootOwned holds the rows of the current non-empty media.subtitles.emit.dir;
+	// only write-back reads it, because discovery never looks under that root.
+	// emitRenderer is the shared subtitle renderer, built once.
+	ownedArtifacts map[string]ownedArtifact
+	outRootOwned   map[string]ownedArtifact
+	ownedLoaded    bool
+	ownedMu        sync.RWMutex
+	// unownedChecked remembers, per process, the subtitle files found to carry no
+	// intact provenance marker at a given stat, so a sidecar with no ownership
+	// row is read for a marker once rather than on every lookup (emit.go).
+	unownedChecked   map[string]sidecarStat
+	emitRenderer     *subexport.Renderer
+	emitRendererOnce sync.Once
+	emitWarnOnce     sync.Once
 
 	// batch holds the optional per-scan batch-ergonomics state (SPEC §8.6.11):
 	// the JSONL run manifest writer and the side-channel progress reporter. It is
@@ -1473,7 +1492,7 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 // media.subtitles.{drop_urls,expect_script,drop_phrases,scrub_phrases,collapse_repeats}
 // (issues #545, #765; SPEC §8.6.3). The same options clean STT transcript chunks, translated
 // transcript chunks and sidecar-cue chunks before embedding, and they are the
-// SAME subtitle.CleanOptions shape the export path builds (cli.newCuePipeline),
+// SAME subtitle.CleanOptions shape the export path builds (subexport.NewPipeline),
 // so a hallucinated URL, a wholly-spam chunk or a repetition run is neither
 // exported nor indexed, keeping the index and the sidecar in agreement rather
 // than leaving cues that are invisible in the sidecar but citable from the index.
@@ -2049,6 +2068,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	// can detect subtitle sidecars next to any media rendition and mtime-gate
 	// their ingestion (§8.6.4) even for renditions dropped by variant grouping.
 	s.setSidecarIndex(discovered)
+	s.loadOwnedArtifacts(ctx)
 
 	// Collapse multi-rendition media to a single canonical file (spec §8.6.5)
 	// before ingestion so chunks/embeddings are not duplicated across renditions.
@@ -2272,15 +2292,41 @@ func etagUnchanged(f DiscoveredFile, existing model.Document, forceReindex bool)
 	return existing.SizeBytes == f.SizeBytes
 }
 
-// trySkipUnchangedRemoteDocument implements the remote (S3) incremental fast
-// path (SPEC §7.8.3, #245). It looks up the recorded document and, when the
-// object's ETag+size signal an unchanged body, records run-progress counters and
-// returns handled=true so the caller skips the GET + content_hash recompute. It
-// returns handled=false (no error) when the object is new, changed, or local
-// (empty ETag), letting the normal read/hash path run; a genuine store failure
-// is returned as an error. content_hash stays the canonical identity and the
-// stored row is left untouched on the skip path.
-func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, forceReindex bool, seen map[string]struct{}) (bool, error) {
+// mediaStatUnchanged is the cheap change signal for a LOCAL/NFS media file (SPEC
+// §7.8 change-detection identity: "the cheap pre-check is (size, mtime)"). It
+// is deliberately limited to audio/video. A media read is the whole file —
+// gigabytes over NFS, held in memory — and a corpus of 145k videos read in full
+// on every scan is days of I/O for no new information, whereas an in-place edit
+// that keeps a video's byte length AND its second-resolution mtime is not a
+// case that occurs. Text documents are cheap to read and the project pins that
+// a same-size same-second edit of one is still caught by the hash (#667), so
+// they are excluded here and keep the confirm-by-hash path unchanged.
+func mediaStatUnchanged(f DiscoveredFile, existing model.Document, forceReindex bool) bool {
+	if forceReindex || strings.TrimSpace(f.ETag) != "" {
+		return false
+	}
+	if !isSidecarMediaType(ClassifyDocType(f.RelPath)) {
+		return false
+	}
+	if existing.Deleted || existing.Status == "error" {
+		return false
+	}
+	if f.MTimeUnix == 0 || existing.MTimeUnix == 0 {
+		return false
+	}
+	return existing.SizeBytes == f.SizeBytes && existing.MTimeUnix == f.MTimeUnix
+}
+
+// trySkipUnchangedDocument implements the cheap-signal incremental fast path
+// (SPEC §7.8, #245): the S3 ETag+size for a remote object, the (size, mtime) pair
+// for a local/NFS media file. It looks up the recorded document and, when the
+// signal says the body is unchanged, records run-progress counters and returns
+// handled=true so the caller skips the read + content_hash recompute. It
+// returns handled=false (no error) when the document is new, changed, or has no
+// cheap signal (a local text file), letting the normal read/hash path run; a
+// genuine store failure is returned as an error. content_hash stays the canonical
+// identity and the stored row is left untouched on the skip path.
+func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile, forceReindex bool, seen map[string]struct{}) (bool, error) {
 	existing, err := s.store.GetDocumentByPath(ctx, f.RelPath)
 	if err != nil {
 		if isUnexpectedStoreErr(err) {
@@ -2288,7 +2334,7 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 		}
 		return false, nil
 	}
-	if !etagUnchanged(f, existing, forceReindex) {
+	if !etagUnchanged(f, existing, forceReindex) && !mediaStatUnchanged(f, existing, forceReindex) {
 		return false, nil
 	}
 	// An empty recorded content_hash means the document was never durably
@@ -2317,8 +2363,9 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if currentFP != existing.SidecarFingerprint {
 		return false, nil
 	}
-	// The ETag proves the bytes did not change, not that they classify the
-	// same way: a classifier upgrade (SPEC §7.3) can give the path a new type.
+	// The cheap signal (ETag, or size and mtime) proves the bytes did not
+	// change, not that they classify the same way: a classifier upgrade
+	// (SPEC §7.3) can give the path a new type.
 	if storedTypeStale(existing.DocType, f.RelPath) {
 		return false, nil
 	}
@@ -2331,17 +2378,17 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if existing.Status == "ok" && s.derivationIdentityStale(ctx, f.RelPath) {
 		return false, nil
 	}
-	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
+	s.skipUnchangedDocument(ctx, f, existing, seen)
 	return true, nil
 }
 
 // storedTypeStale reports whether a stored row's doc type no longer matches
-// what the classifier gives its path, so the remote fast path must re-read the
-// object. The stored type is the path type refined by SniffTextDocType, so a
-// path that classifies as binary_ignored may be stored as binary_ignored or
-// text: only the bytes can tell the two apart, and the fast path exists to
-// avoid that read. Such an object is re-classified when its ETag changes or on
-// reindex. Every other mismatch (an extension the table gained, for example
+// what the classifier gives its path, so the cheap-signal fast path must
+// re-read the document. The stored type is the path type refined by
+// SniffTextDocType, so a path that classifies as binary_ignored may be stored
+// as binary_ignored or text: only the bytes can tell the two apart, and the
+// fast path exists to avoid that read. Such an object is re-classified when its
+// ETag changes or on reindex. Every other mismatch (an extension the table gained, for example
 // .mjs to code) is exact and needs no read to detect.
 func storedTypeStale(storedType, relPath string) bool {
 	if storedType == "" {
@@ -2354,19 +2401,23 @@ func storedTypeStale(storedType, relPath string) bool {
 	return storedType != pathType
 }
 
-// skipUnchangedRemoteDocument records the run-progress counters for an object
-// whose ETag matched (so it was not re-read) and preserves the existing
+// skipUnchangedDocument records the run-progress counters for a document whose
+// cheap signal matched (so it was not re-read) and preserves the existing
 // behavior for archive containers, whose already-ingested members must be
 // retained in `seen` so markMissingAsDeleted does not tombstone them. The stored
 // document row is intentionally left untouched: its content_hash, ETag, and
 // representations are still valid. Counters mirror the unchanged-content path so
 // status totals stay consistent across runs.
-func (s *Service) skipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, existing model.Document, seen map[string]struct{}) {
-	// The remote fast path returns before processDocument's own reconciliation
-	// call sites, so reconcile here too (#692). Without this, an object-store
-	// corpus would never retire an obsolete output on the path it takes for every
-	// unchanged object.
+func (s *Service) skipUnchangedDocument(ctx context.Context, f DiscoveredFile, existing model.Document, seen map[string]struct{}) {
+	// The fast path returns before processDocument's own reconciliation call
+	// sites, so reconcile here too (#692). Without this, a corpus would never
+	// retire an obsolete output on the path it takes for every unchanged document.
 	s.reconcileDocumentOutputs(ctx, f.RelPath)
+	// §8.6.14: an unchanged media document already has every transcript this run
+	// would produce, so subtitle write-back runs here exactly as on the
+	// unchanged-content path. This is what lets write-back be enabled on an
+	// already-indexed archive and fill the files in without a reindex.
+	s.emitSubtitles(ctx, existing)
 	switch existing.Status {
 	case "ok":
 		s.addIndexed(1)
@@ -2484,11 +2535,13 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return s.deriveDocument(ctx, f, secretPatterns)
 	}
 
-	// Remote (S3) incremental fast path (SPEC §7.8.3, #245): when the object's
-	// ETag+size match the recorded document, the body is unchanged, so skip the
-	// full GET + content_hash recompute entirely. No-op for local/NFS corpora
-	// (empty ETag) and under --force/reindex.
-	if handled, err := s.trySkipUnchangedRemoteDocument(ctx, f, forceReindex, seen); err != nil || handled {
+	// Cheap-signal incremental fast path (SPEC §7.8 change-detection identity):
+	// for an S3 object the ETag+size (#245), for a LOCAL/NFS MEDIA file the
+	// (size, mtime) pair. When the signal matches the recorded document the body
+	// is unchanged, so the full read + content_hash recompute is skipped. Text
+	// documents on a local corpus keep confirming by hash (#667). No-op under
+	// --force/reindex.
+	if handled, err := s.trySkipUnchangedDocument(ctx, f, forceReindex, seen); err != nil || handled {
 		return err
 	}
 
@@ -2560,6 +2613,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		// still retired. Retiring costs nothing to undo: both covered outputs are
 		// backed by an on-disk derivation cache.
 		s.reconcileDocumentOutputs(ctx, doc.RelPath)
+		// §8.6.14: an unchanged document already has every transcript this run
+		// would produce, so write-back runs here too. That is what lets an operator
+		// enable it on an already-indexed corpus and have the files appear without
+		// a reindex; under if_missing it is a stat per artifact on a steady state.
+		s.emitSubtitles(ctx, doc)
 		s.creditIndexed(indexedPending)
 		s.markActiveSkipped()
 		return nil
@@ -2614,6 +2672,12 @@ func (s *Service) settleProcessedDocument(
 	// recordAssetOutputs reads the representation types after processDocument
 	// returns.
 	s.reconcileDocumentOutputs(ctx, doc.RelPath)
+	// §8.6.14 subtitle write-back runs once every transcript representation of
+	// the document for this run has committed (single-pass; under two-phase the
+	// transcription pass is a no-op here and the derivation pass emits). It is
+	// per-document and non-fatal, and precedes the done marker so a crash between
+	// the two simply re-runs an idempotent step next time.
+	s.emitSubtitles(ctx, *doc)
 	// Stamp the withheld #402 done marker now that the
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and
@@ -2837,19 +2901,12 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	// reset at processDocument entry (deriveDocument is reached only from there),
 	// so a translation rejected in this derivation pass is counted once and cannot
 	// leak its dedup state into the next asset without a redundant reset here.
-	// No translation configured, or the multimodal "replace" mode that stands in
-	// for STT→text (so no transcript exists to translate): nothing to derive. This
-	// matches the single-pass gates so the corpus-wide output is identical.
-	if !s.translationConfigured() {
-		s.markActiveSkipped()
-		return nil
-	}
-
 	docType := ClassifyDocType(f.RelPath)
 	// Audio AND video carry model-derived transcripts (issue #495): a video's
 	// source transcript was produced from its extracted audio track in the
 	// transcription pass, so its translation is derived here exactly like audio.
-	if !isSidecarMediaType(docType) || s.transcriber == nil {
+	// Non-media assets have nothing to derive and nothing to write back.
+	if !isSidecarMediaType(docType) {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -2859,33 +2916,54 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 		return fmt.Errorf("get existing document: %w", err)
 	}
 	// A document the transcription pass did not record as a healthy media asset has
-	// no source transcript to translate; skip it.
+	// no source transcript to translate or to write back; skip it.
 	if isNotFoundError(err) || doc.Status != "ok" {
 		s.markActiveSkipped()
 		return nil
 	}
 	s.recordContentHash(doc.ContentHash)
 
+	derived := s.deriveDocumentTranslations(ctx, f, doc)
+	// §8.6.14: the derivation pass is the point where every transcript of the
+	// document for this run exists (source from the transcription pass,
+	// translations just above), so this is where write-back runs under two-phase.
+	// Observably the same files single-pass writes, in a different order.
+	s.emitSubtitles(ctx, doc)
+	if !derived {
+		s.markActiveSkipped()
+	}
+	return nil
+}
+
+// deriveDocumentTranslations runs the derivation pass's translation step for one
+// media document and reports whether translation work ran at all. It mirrors
+// the gating of the single-pass translation step exactly so the final set of
+// representations is observably identical: translation applies only to a
+// model-derived (STT) transcript of a media document, and only when translation
+// is configured. A provider failure is a non-fatal per-asset outcome recorded on
+// the manifest (TRANSLATE_FAILED, §8.6.11/§14.4); the source transcript stays
+// searchable, so documents.status is untouched.
+func (s *Service) deriveDocumentTranslations(ctx context.Context, f DiscoveredFile, doc model.Document) bool {
+	// No translation configured, or the multimodal "replace" mode that stands in
+	// for STT→text (so no transcript exists to translate): nothing to derive. This
+	// matches the single-pass gates so the corpus-wide output is identical.
+	if !s.translationConfigured() || s.transcriber == nil {
+		return false
+	}
 	content, err := s.readDocumentContent(ctx, f.RelPath)
 	if err != nil {
 		// A read failure in the derivation pass must not fail the run: the source
 		// transcript already exists. Record skipped and move on.
 		s.getLogger().Printf("two-phase derivation: read %s: %v (skipping translation)", f.RelPath, err)
-		s.markActiveSkipped()
-		return nil
+		return false
 	}
-
 	if err := s.deriveTranscriptTranslations(ctx, doc, content); err != nil {
 		s.getLogger().Printf("two-phase derivation translation skipped for %s: %v", f.RelPath, err)
 		s.addErrors(1)
-		// §8.6.11/§14.4: record the canonical translation-failure code
-		// (TRANSLATE_FAILED for a provider failure) on the derivation-pass manifest
-		// record; the source transcript (persisted in the transcription pass) stays
-		// searchable, so documents.status is untouched. No-op with no batch run.
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return nil
+	return true
 }
 
 // deriveTranscriptTranslations recomputes each selected track's source transcript

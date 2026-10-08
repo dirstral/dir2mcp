@@ -615,6 +615,85 @@ back into the authored cues (or the STT segments). With
 `transcript_chunk_sec: 0`, a sidecar chunk is a block of cues packed to 1200
 characters with no recorded boundaries, so export renders that block as one cue.
 
+### Subtitle write-back: subtitles beside the media as it is indexed (SPEC §8.6.14)
+
+`dir2mcp export` renders one document on demand. An archive whose editors,
+players or downstream tools read subtitle files from the media's own folder
+wants every document's subtitles **on disk**, kept current as the corpus grows,
+without an operator exporting 140,000 documents one at a time. Write-back does
+that. It is **off by default**.
+
+```yaml
+media:
+  subtitles:
+    ttml:
+      enabled: true         # only needed when `ttml` is listed below
+    emit:
+      enabled: true         # default false
+      formats: [vtt, ttml]  # subset of vtt|srt|ttml; default [vtt]
+      languages: []         # [] => every language the document has a transcript for
+      policy: if_missing    # if_missing (default) | refresh
+      dir: ""               # "" => beside the media; else mirror the corpus tree under this root
+```
+
+Once a media document's transcripts exist (STT, sidecar, translation), dir2mcp
+writes:
+
+| Artifact | Name | When |
+|---|---|---|
+| VTT / SRT | `<stem>.<lang>.vtt` (the [sidecar shape](#subtitle-sidecars-which-file-becomes-a-transcript-spec-864)) | once per transcript language |
+| TTML | `<stem>.ttml`, bilingual (source + first `media.translate.target_langs` entry the document has) | once per document |
+
+With `media.variants.group: true` the stem is the **group** stem
+(`episode_1080p.mp4` → `episode.ru.vtt`), so one set of files serves every
+rendition. The cues are **identical to `dir2mcp export`** for the same document,
+language and format: one renderer, one cue pipeline (`filter_words`, the
+`media.subtitles.*` cleaning, `segmentation`). A written VTT or TTML also
+carries a one-line provenance comment that export does not (see below). **SMIL is never written** by
+write-back: an archive's packaging manifests belong to whatever produced the
+media, and stay an on-demand `export --format ttml --out` concern.
+
+**A written file is dir2mcp's output, not a human's.** Every file written is
+recorded in the state database (path, size, mtime, content hash). While it is
+unchanged on disk it is **owned**: sidecar discovery skips it, so writing a VTT
+beside a video never changes the video's identity, never re-ingests the VTT as
+an "authored" transcript, never bypasses the quality gate, and never stops a
+better STT model from re-transcribing the video later. Ownership belongs to the
+record, not to the setting: turning write-back off later does not turn the files
+it wrote into authored transcripts. A written file someone **edits** stops being
+owned and becomes an authored sidecar from then on, with the usual precedence
+over STT. Discovery decides that by size and mtime (a stat, since it runs over
+every file on every scan); before a `refresh` rewrite dir2mcp also checks the
+file's bytes against the recorded hash, so an edit that kept the same size and
+timestamp is never overwritten either. Files dir2mcp did not write are **never
+overwritten**: under `if_missing` an existing sidecar of that format and
+language simply counts as present, and under `refresh` only owned files whose
+render changed are rewritten (so a re-derived transcript reaches disk). Files
+written under a separate `dir` are outputs only; discovery never looks there, so
+they neither bind as sidecars nor need excluding. That root must lie outside the
+corpus, and each ownership record remembers the root it was written under, so
+changing `dir` later never lets an old record claim an in-corpus file.
+
+**Ownership survives losing the state folder.** The ownership records live in
+the state database, which can be deleted, reset for a fresh index, or lost with
+a disk. So every written VTT and TTML also proves itself: right after the header
+it carries a comment such as `NOTE dir2mcp-emitted v1 sha256=…`, holding the hash
+of the rest of the file. When a scan finds a subtitle file with no record, it
+checks that comment: an intact one means dir2mcp's own unedited output, which is
+treated as owned and re-recorded; a mismatch means someone edited it, so it is
+authored. Players ignore the comment. SRT has no comment syntax, so an SRT that
+outlives its record reads as authored; still back up the state folder before
+resetting it.
+
+Each write is atomic. A failed write is a non-fatal per-document outcome,
+recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)
+as `SUBTITLE_WRITE_FAILED`; the transcript stays indexed. Written artifacts
+appear in the manifest's `outputs` as `vtt:ru`, `srt:en`, `ttml`. Under
+`media.batch.two_phase` the files are written in the derivation pass and are the
+same files single-pass writes. Enabling write-back on an already-indexed corpus
+fills the files in on the next scan without a reindex. A `source.kind: s3`
+corpus has no filesystem to write beside the media and requires `dir`.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition
@@ -781,6 +860,13 @@ Notes:
 - A file that **stops** being eligible is retired at once. If it grows past `ingest.max_file_mb` it keeps a visible `skipped` row with the reason, and its chunks leave retrieval. If it becomes gitignored it is tombstoned, exactly as a full rescan would tombstone it. An edit to a `.gitignore` file triggers a reconcile of the tree, because one rule can change the eligibility of many paths at once.
 - **The watcher needs a filesystem.** `source.kind: local` and `source.kind: nfs` are ordinary directory trees, so both use it. A remote corpus (`source.kind: s3`) has no filesystem to watch, so the watcher does not start for it. The index reconciles on a periodic rescan of the remote source instead, and `dir2mcp up` prints a warning at startup. `watch_debounce` and the `watch_overflows` stat apply only to the filesystem watcher; a remote corpus reports neither.
 - Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
+- **What a rescan reads.** A text document is confirmed by its content hash on
+  every scan (an in-place edit that keeps size and timestamp is still caught). A
+  local or NFS **media** file whose size and mtime match the recorded document is
+  skipped without being read (SPEC §7.8's cheap pre-check), and so is an S3 object
+  whose ETag and size match. On a large video archive this is the difference
+  between a rescan that stats files and one that reads terabytes; the first scan
+  still reads each selected rendition once.
 
 ### Gemini embeddings (`gemini-embedding-001`)
 

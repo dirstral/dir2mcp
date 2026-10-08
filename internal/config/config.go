@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -159,6 +160,12 @@ const (
 // a secondary segment whose start is within this many milliseconds of a primary
 // cue is merged into that cue.
 const DefaultMediaSubtitlesAlignToleranceMS = 2500
+
+// DefaultMediaSubtitlesEmitPolicy is the SPEC §8.6.14 default overwrite policy
+// for subtitle write-back: a file dir2mcp did not write is never overwritten,
+// and a (language, format) is written only when the document has no bound
+// sidecar of it.
+const DefaultMediaSubtitlesEmitPolicy = "if_missing"
 
 // DefaultMediaTranslateWindowLines / DefaultMediaTranslateContextLines are the
 // built-in chat translate-engine window sizes (issue #573): translate cues in
@@ -971,6 +978,36 @@ type Config struct {
 	// runs remain traceable to the same span.
 	MediaSubtitlesSegmentation string
 
+	// MediaSubtitlesEmitEnabled opts IN to subtitle write-back (SPEC §8.6.14,
+	// config `media.subtitles.emit.enabled`): once a media document's transcript
+	// representations exist, ingest renders the configured subtitle formats and
+	// writes them beside the media (or under MediaSubtitlesEmitDir). OFF by
+	// default. Output-neutral: it changes no representation, chunk, embedding or
+	// citation. A written file is an OWNED output recorded in the store and is
+	// excluded from §8.6.4 sidecar discovery, so write-back never re-ingests its
+	// own output as an authored transcript.
+	MediaSubtitlesEmitEnabled bool
+	// MediaSubtitlesEmitFormats is the subset of vtt|srt|ttml to write (config
+	// `media.subtitles.emit.formats`, default [vtt]). VTT/SRT are written once
+	// per transcript language in the §8.6.4 sidecar shape `<stem>.<lang>.<ext>`;
+	// TTML once per document as `<stem>.ttml` (bilingual when a translation
+	// exists) and requires MediaSubtitlesTTMLEnabled. SMIL is never written.
+	MediaSubtitlesEmitFormats []string
+	// MediaSubtitlesEmitLanguages restricts which transcript languages get a
+	// VTT/SRT (config `media.subtitles.emit.languages`). Empty (the default)
+	// means every language the document has a transcript for.
+	MediaSubtitlesEmitLanguages []string
+	// MediaSubtitlesEmitPolicy is `if_missing` (default: write a (language,
+	// format) only when the document has no bound sidecar of it; never overwrite
+	// a file dir2mcp did not write) or `refresh` (additionally rewrite an OWNED
+	// file whose render changed, so a re-derived transcript reaches disk).
+	MediaSubtitlesEmitPolicy string
+	// MediaSubtitlesEmitDir is the output root (config `media.subtitles.emit.dir`).
+	// Empty (the default) writes beside the media inside the corpus; non-empty
+	// mirrors the corpus-relative directory tree under this root. Required for a
+	// source with no writable filesystem (source.kind: s3).
+	MediaSubtitlesEmitDir string
+
 	// The five media.subtitles.* keys below are the editorial cue-cleaning
 	// pipeline. They apply to EVERY exported subtitle format — VTT, SRT and TTML
 	// (plus its companion SMIL) — not to one format each: the spec describes
@@ -1524,6 +1561,11 @@ type fileConfig struct {
 	MediaSubtitlesTTMLAlignToleranceMS *int
 	MediaSubtitlesSMILEnabled          *bool
 	MediaSubtitlesSegmentation         *string
+	MediaSubtitlesEmitEnabled          *bool
+	MediaSubtitlesEmitFormats          []string
+	MediaSubtitlesEmitLanguages        []string
+	MediaSubtitlesEmitPolicy           *string
+	MediaSubtitlesEmitDir              *string
 	MediaSubtitlesGlossary             []string
 	MediaSubtitlesDropPhrases          []string
 	MediaSubtitlesScrubPhrases         []string
@@ -1701,6 +1743,11 @@ type persistedConfig struct {
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
 	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
 	MediaSubtitlesSegmentation         string        `yaml:"media_subtitles_segmentation"`
+	MediaSubtitlesEmitEnabled          bool          `yaml:"media_subtitles_emit_enabled"`
+	MediaSubtitlesEmitFormats          []string      `yaml:"media_subtitles_emit_formats"`
+	MediaSubtitlesEmitLanguages        []string      `yaml:"media_subtitles_emit_languages"`
+	MediaSubtitlesEmitPolicy           string        `yaml:"media_subtitles_emit_policy"`
+	MediaSubtitlesEmitDir              string        `yaml:"media_subtitles_emit_dir"`
 	MediaSubtitlesGlossary             []string      `yaml:"media_subtitles_glossary"`
 	MediaSubtitlesDropPhrases          []string      `yaml:"media_subtitles_drop_phrases"`
 	MediaSubtitlesScrubPhrases         []string      `yaml:"media_subtitles_scrub_phrases"`
@@ -2006,6 +2053,14 @@ func Default() Config {
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          false,
 		MediaSubtitlesSegmentation:         "chunk",
+		// Subtitle write-back (SPEC §8.6.14) is OFF by default; formats and policy
+		// carry their spec defaults so an enabled-but-unspecified config writes
+		// one VTT per transcript language and never overwrites a foreign file.
+		MediaSubtitlesEmitEnabled:   false,
+		MediaSubtitlesEmitFormats:   []string{"vtt"},
+		MediaSubtitlesEmitLanguages: nil,
+		MediaSubtitlesEmitPolicy:    DefaultMediaSubtitlesEmitPolicy,
+		MediaSubtitlesEmitDir:       "",
 		// Export-time cue cleaning (clean_srt.py port) is OFF by default: no
 		// glossary rewrites, no phrase drops, no repetition-collapse (< 2
 		// disables), no URL drop.
@@ -2167,6 +2222,11 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
 		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
 		MediaSubtitlesSegmentation:         cfg.MediaSubtitlesSegmentation,
+		MediaSubtitlesEmitEnabled:          cfg.MediaSubtitlesEmitEnabled,
+		MediaSubtitlesEmitFormats:          append([]string(nil), cfg.MediaSubtitlesEmitFormats...),
+		MediaSubtitlesEmitLanguages:        append([]string(nil), cfg.MediaSubtitlesEmitLanguages...),
+		MediaSubtitlesEmitPolicy:           cfg.MediaSubtitlesEmitPolicy,
+		MediaSubtitlesEmitDir:              cfg.MediaSubtitlesEmitDir,
 		MediaSubtitlesGlossary:             append([]string(nil), cfg.MediaSubtitlesGlossary...),
 		MediaSubtitlesDropPhrases:          append([]string(nil), cfg.MediaSubtitlesDropPhrases...),
 		MediaSubtitlesScrubPhrases:         append([]string(nil), cfg.MediaSubtitlesScrubPhrases...),
@@ -3137,6 +3197,7 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
 	applyMediaSubtitlesFileParsed(cfg, fc)
+	applyMediaSubtitlesEmitFileParsed(cfg, fc)
 	applyMediaProcessingFileParsed(cfg, fc)
 	applyMediaBatchFileParsed(cfg, fc)
 }
@@ -3237,6 +3298,27 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 // applyMediaSubtitlesFileParsed copies the set media.subtitles.* file fields
 // (SPEC §8.6.10) onto cfg. Split out of applyMediaFileParsed so each apply
 // helper stays under the cyclomatic-complexity budget.
+// applyMediaSubtitlesEmitFileParsed overlays the media.subtitles.emit.* keys
+// (SPEC §8.6.14). Separate from applyMediaSubtitlesFileParsed so each stays
+// within the cyclomatic-complexity budget.
+func applyMediaSubtitlesEmitFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MediaSubtitlesEmitEnabled != nil {
+		cfg.MediaSubtitlesEmitEnabled = *fc.MediaSubtitlesEmitEnabled
+	}
+	if fc.MediaSubtitlesEmitFormats != nil {
+		cfg.MediaSubtitlesEmitFormats = normalizeStringSlice(fc.MediaSubtitlesEmitFormats)
+	}
+	if fc.MediaSubtitlesEmitLanguages != nil {
+		cfg.MediaSubtitlesEmitLanguages = normalizeStringSlice(fc.MediaSubtitlesEmitLanguages)
+	}
+	if fc.MediaSubtitlesEmitPolicy != nil {
+		cfg.MediaSubtitlesEmitPolicy = *fc.MediaSubtitlesEmitPolicy
+	}
+	if fc.MediaSubtitlesEmitDir != nil {
+		cfg.MediaSubtitlesEmitDir = *fc.MediaSubtitlesEmitDir
+	}
+}
+
 func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesTTMLEnabled != nil {
 		cfg.MediaSubtitlesTTMLEnabled = *fc.MediaSubtitlesTTMLEnabled
@@ -3745,6 +3827,11 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
 	"media_subtitles_segmentation":            "media.subtitles.segmentation",
+	"media_subtitles_emit_enabled":            "media.subtitles.emit.enabled",
+	"media_subtitles_emit_formats":            "media.subtitles.emit.formats",
+	"media_subtitles_emit_languages":          "media.subtitles.emit.languages",
+	"media_subtitles_emit_policy":             "media.subtitles.emit.policy",
+	"media_subtitles_emit_dir":                "media.subtitles.emit.dir",
 	"media_subtitles_glossary":                "media.subtitles.glossary",
 	"media_subtitles_drop_phrases":            "media.subtitles.drop_phrases",
 	"media_subtitles_scrub_phrases":           "media.subtitles.scrub_phrases",
@@ -3869,7 +3956,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "media", "media.variants", "media.translate", "media.clip", "media.stt", "media.diarize", "media.batch":
 		return true
-	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil":
+	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil", "media.subtitles.emit":
 		return true
 	case "index.pgvector":
 		return true
@@ -3930,6 +4017,9 @@ var boolFileScalarTargets = map[string]func(*fileConfig) **bool{
 	},
 	"media.subtitles.smil.enabled": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesSMILEnabled
+	},
+	"media.subtitles.emit.enabled": func(c *fileConfig) **bool {
+		return &c.MediaSubtitlesEmitEnabled
 	},
 	"media.subtitles.drop_urls": func(c *fileConfig) **bool {
 		return &c.MediaSubtitlesDropURLs
@@ -4341,6 +4431,10 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaSubtitlesSegmentation = strPtr(value)
 	case "media.subtitles.expect_script":
 		cfg.MediaSubtitlesExpectScript = strPtr(value)
+	case "media.subtitles.emit.policy":
+		cfg.MediaSubtitlesEmitPolicy = strPtr(value)
+	case "media.subtitles.emit.dir":
+		cfg.MediaSubtitlesEmitDir = strPtr(value)
 	case "media.translate.engine":
 		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.stt.on_uncovered_language":
@@ -4399,7 +4493,7 @@ func appendConfigListValue(target *[]string, item string) {
 
 func setFileListValue(cfg *fileConfig, key, value string) {
 	key = canonicalizeConfigKey(key)
-	if setRetrievalFileListValue(cfg, key, value) {
+	if setRetrievalFileListValue(cfg, key, value) || setMediaSubtitlesEmitFileListValue(cfg, key, value) {
 		return
 	}
 	switch key {
@@ -4428,6 +4522,21 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 	}
 }
 
+// setMediaSubtitlesEmitFileListValue appends the media.subtitles.emit.* list
+// keys (SPEC §8.6.14), returning true when key matched. Split out of
+// setFileListValue so it stays within the gocyclo budget.
+func setMediaSubtitlesEmitFileListValue(cfg *fileConfig, key, value string) bool {
+	switch key {
+	case "media.subtitles.emit.formats":
+		appendConfigListValue(&cfg.MediaSubtitlesEmitFormats, value)
+	case "media.subtitles.emit.languages":
+		appendConfigListValue(&cfg.MediaSubtitlesEmitLanguages, value)
+	default:
+		return false
+	}
+	return true
+}
+
 // setRetrievalFileListValue appends the retrieval.* list-valued keys
 // (cross-lingual target langs #574, hierarchical source_reps/levels #329),
 // returning true when key matched. Split out of setFileListValue so it stays
@@ -4451,7 +4560,7 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -4617,6 +4726,11 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
 	writeScalar("media_subtitles_segmentation", cfg.MediaSubtitlesSegmentation)
+	writeBool("media_subtitles_emit_enabled", cfg.MediaSubtitlesEmitEnabled)
+	writeList("media_subtitles_emit_formats", cfg.MediaSubtitlesEmitFormats)
+	writeList("media_subtitles_emit_languages", cfg.MediaSubtitlesEmitLanguages)
+	writeScalar("media_subtitles_emit_policy", cfg.MediaSubtitlesEmitPolicy)
+	writeScalar("media_subtitles_emit_dir", cfg.MediaSubtitlesEmitDir)
 	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
 	writeList("media_subtitles_drop_phrases", cfg.MediaSubtitlesDropPhrases)
 	writeList("media_subtitles_scrub_phrases", cfg.MediaSubtitlesScrubPhrases)
@@ -5183,6 +5297,7 @@ func (c *Config) Validate() error {
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
+		c.validateMediaSubtitlesEmit,
 		c.validateMediaDiarize,
 		c.validateNumericBounds,
 		c.validateIngestExcludeDirs,
@@ -5626,6 +5741,133 @@ func (c *Config) validateMediaSubtitles() error {
 		return fmt.Errorf("media.subtitles.expect_script: %w", err)
 	}
 	return nil
+}
+
+// validateMediaSubtitlesEmit normalizes and gates the subtitle write-back keys
+// (SPEC §8.6.14). Normalization (policy enum, format set, language tags, dir
+// whitespace) runs whether or not write-back is enabled so `config print` shows
+// canonical values; the two hard gates — ttml needs the TTML surface, an object
+// store needs an output root — apply only when write-back is enabled, because
+// an unused surface must never make a configuration invalid.
+func (c *Config) validateMediaSubtitlesEmit() error {
+	policy, err := normalizeClosedEnum("media.subtitles.emit.policy", c.MediaSubtitlesEmitPolicy,
+		DefaultMediaSubtitlesEmitPolicy, []string{"if_missing", "refresh"})
+	if err != nil {
+		return err
+	}
+	c.MediaSubtitlesEmitPolicy = policy
+	formats, err := normalizeSubtitleEmitFormats(c.MediaSubtitlesEmitFormats)
+	if err != nil {
+		return err
+	}
+	c.MediaSubtitlesEmitFormats = formats
+	c.MediaSubtitlesEmitLanguages = normalizeLowerUniqueList(c.MediaSubtitlesEmitLanguages)
+	c.MediaSubtitlesEmitDir = strings.TrimSpace(c.MediaSubtitlesEmitDir)
+	if !c.MediaSubtitlesEmitEnabled {
+		return nil
+	}
+	if slices.Contains(formats, "ttml") && !c.MediaSubtitlesTTMLEnabled {
+		return errors.New("CONFIG_INVALID: media.subtitles.emit.formats lists ttml, which requires " +
+			"media.subtitles.ttml.enabled: true (SPEC §8.6.14)")
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Source.Kind), "s3") && c.MediaSubtitlesEmitDir == "" {
+		return errors.New("CONFIG_INVALID: media.subtitles.emit.dir is required when source.kind is s3: " +
+			"an object store has no filesystem to write beside the media (SPEC §8.6.14)")
+	}
+	if c.MediaSubtitlesEmitDir != "" && emitDirInsideCorpus(c.MediaSubtitlesEmitDir, c.RootDir) {
+		return errors.New("CONFIG_INVALID: media.subtitles.emit.dir must resolve outside the corpus root: " +
+			"an output root inside the corpus would place subtitles beside other media (SPEC §8.6.14)")
+	}
+	return nil
+}
+
+// emitDirInsideCorpus reports whether dir resolves to the corpus root or a path
+// below it. Both are made absolute and cleaned first, and the check runs twice:
+// on the paths as written and on the paths with symlinks resolved, so an output
+// root that reaches the corpus through a symlink is also inside. The output root
+// may not exist yet, so its longest existing ancestor is resolved. When either
+// path cannot be made absolute the check fails open (false), leaving the
+// decision to the write path.
+func emitDirInsideCorpus(dir, root string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	absDir, err1 := filepath.Abs(dir)
+	absRoot, err2 := filepath.Abs(root)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if pathWithin(absRoot, absDir) {
+		return true
+	}
+	return pathWithin(resolveExistingPrefix(absRoot), resolveExistingPrefix(absDir))
+}
+
+// pathWithin reports whether p is base or a path below base. Both are absolute.
+func pathWithin(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// resolveExistingPrefix resolves the symlinks of the longest existing ancestor
+// of the absolute path p and appends the rest of p unchanged. A path with no
+// resolvable ancestor is returned as it is.
+func resolveExistingPrefix(p string) string {
+	tail := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
+}
+
+// normalizeSubtitleEmitFormats lower-cases, trims and dedupes the write-back
+// format list, rejects anything outside vtt|srt|ttml, and substitutes the spec
+// default [vtt] for an empty list. Order is preserved after dedup.
+func normalizeSubtitleEmitFormats(raw []string) ([]string, error) {
+	out := normalizeLowerUniqueList(raw)
+	if len(out) == 0 {
+		return []string{"vtt"}, nil
+	}
+	for _, f := range out {
+		switch f {
+		case "vtt", "srt", "ttml":
+		default:
+			return nil, fmt.Errorf("media.subtitles.emit.formats must be a subset of vtt, srt, ttml: %q", f)
+		}
+	}
+	return out, nil
+}
+
+// normalizeLowerUniqueList trims, lower-cases and dedupes a string list,
+// dropping blanks and preserving first-seen order. A nil input yields nil.
+func normalizeLowerUniqueList(raw []string) []string {
+	if raw == nil {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		v := strings.ToLower(strings.TrimSpace(item))
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // validateIngestExtractor normalizes IngestExtractor (defaulting empty) and

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,21 +10,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
-	"github.com/dirstral/dir2mcp/internal/store"
-	"github.com/dirstral/dir2mcp/internal/subtitle"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 )
 
 // transcriptStore is the read capability the export command needs from the
 // metadata store: list a document's transcript representations (with meta_json
 // for language matching) and load a representation's chunk+span rows. The CLI
 // type-asserts the configured store against this interface so test fakes can
-// supply their own implementation without depending on the sqlite store.
-type transcriptStore interface {
-	TranscriptRepresentations(ctx context.Context, relPath string) ([]store.TranscriptRepresentation, error)
-	TranscriptSpanChunks(ctx context.Context, repID int64) ([]store.TranscriptSpanChunk, error)
-}
+// supply their own implementation without depending on the sqlite store. It is
+// the subexport.Store surface under its historical local name.
+type transcriptStore = subexport.Store
 
 type exportOptions struct {
 	format string
@@ -42,6 +37,10 @@ type exportOptions struct {
 // document, writing it to --out (atomically) or to stdout. It resolves the
 // transcript representation (matching --lang when given, otherwise the document's
 // sole/source transcript) and renders its time-spanned chunks as cues.
+//
+// The rendering itself lives in internal/subexport, shared with ingest-time
+// write-back (SPEC §8.6.14), so a file written beside a media document is
+// byte-identical to what this command prints for it.
 func (a *App) runExport(ctx context.Context, global globalOptions, args []string) int {
 	opts, err := parseExportOptions(args)
 	if err != nil {
@@ -79,201 +78,41 @@ func (a *App) runExport(ctx context.Context, global globalOptions, args []string
 		return a.runTTMLExport(ctx, global, cfg, ts, opts)
 	}
 
-	pipe, err := newCuePipeline(cfg)
+	renderer, err := subexport.NewRenderer(cfg)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
 		return exitConfigInvalid
 	}
-	rendered, code := a.renderTranscriptExport(ctx, global, ts, opts, pipe, cfg.MediaSubtitlesSegmentation)
-	if code != exitSuccess {
-		return code
+	rendered, err := renderer.RenderTimed(ctx, ts, opts.relPath, opts.lang, opts.format)
+	if err != nil {
+		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, exportErrorMessage(err, opts.relPath, opts.lang, false))
+		return exitGeneric
 	}
-
 	return a.emitExport(global, opts, rendered)
 }
 
-// cuePipeline is the single cue-preparation pipeline every subtitle format
-// renders through: the media.filter_words word filter followed by the
-// media.subtitles.* editorial cleaning passes (glossary, drop_phrases,
-// scrub_phrases, collapse_repeats, drop_urls, expect_script).
-//
-// Five of the six cleaning keys (drop_urls, expect_script, drop_phrases,
-// scrub_phrases, collapse_repeats) are ALSO applied at ingest, before chunks are embedded
-// (issues #545, #765), from the same subtitle.CleanOptions shape this builds.
-// Re-running them here is deliberate rather than redundant: under broadcast
-// segmentation the cues are rebuilt finer than the stored chunks, and a corpus
-// indexed before the keys were enabled still carries uncleaned chunks until it
-// is re-indexed. Only glossary is export-only (SPEC §8.6.2).
-//
-// It exists because TTML used to skip the cleaning half entirely (issue #729):
-// the same transcript exported as SRT and as TTML disagreed on every rule under
-// media.subtitles.*, and bilingual TTML aligned cue sets that the exports would
-// never render. Formats differ in how cues are BUILT (segmentation, bilingual
-// alignment) but MUST NOT differ in how cues are CLEANED, so the cleaning half
-// lives here and every renderer calls apply.
-//
-// Note what is deliberately NOT here: media.subtitles.segmentation. Broadcast
-// re-segmentation rewrites cue boundaries for VTT/SRT reading speed and is
-// documented as VTT/SRT-only in config; it is a build-stage concern, not an
-// editorial one, and stays with the VTT/SRT builder.
-type cuePipeline struct {
-	filter *subtitle.WordFilter
-	clean  subtitle.CleanOptions
-}
-
-// newCuePipeline compiles the configured filter/glossary/drop/scrub rules. The
-// config loader already validated all of them, so a compile error here is
-// unexpected; it is returned (and surfaced as a config-time failure) rather than
-// silently degrading into a no-op pipeline that would ship uncleaned cues.
-func newCuePipeline(cfg config.Config) (cuePipeline, error) {
-	glossary, err := subtitle.NewGlossary(cfg.MediaSubtitlesGlossary)
-	if err != nil {
-		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.glossary: %w", err)
-	}
-	drop, err := subtitle.NewDropSet(cfg.MediaSubtitlesDropPhrases)
-	if err != nil {
-		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.drop_phrases: %w", err)
-	}
-	scrub, err := subtitle.NewDropSet(cfg.MediaSubtitlesScrubPhrases)
-	if err != nil {
-		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.scrub_phrases: %w", err)
-	}
-	script, err := subtitle.NewScriptGuard(cfg.MediaSubtitlesExpectScript)
-	if err != nil {
-		return cuePipeline{}, fmt.Errorf("invalid media.subtitles.expect_script: %w", err)
-	}
-	return cuePipeline{
-		filter: subtitle.NewWordFilter(cfg.MediaFilterWords),
-		clean: subtitle.CleanOptions{
-			DropURLs:        cfg.MediaSubtitlesDropURLs,
-			Script:          script,
-			Drop:            drop,
-			Scrub:           scrub,
-			CollapseRepeats: cfg.MediaSubtitlesCollapseRepeats,
-			Glossary:        glossary,
-		},
-	}, nil
-}
-
-// apply runs the word filter then the cleaning passes over built cues, in that
-// order, so filter_words removal and the cleanup compose (a cue emptied by the
-// filter is dropped before the cleaning passes ever see it). An empty config
-// leaves cues unchanged, so enabling nothing changes nothing.
-func (p cuePipeline) apply(cues []subtitle.Cue) []subtitle.Cue {
-	// media.filter_words: exported subtitles never contain the configured
-	// boilerplate/credits/watermark phrases, consistent with how ingest strips
-	// them before embedding. Cues empty after filtering are dropped.
-	cues = subtitle.FilterCues(cues, p.filter)
-	// media.subtitles.{glossary,drop_phrases,scrub_phrases,collapse_repeats,drop_urls}.
-	return subtitle.CleanCues(cues, p.clean)
-}
-
-// renderTranscriptExport resolves the transcript representation, builds cues
-// from its chunks, and renders them in the requested format. It returns the
-// serialized document, or an exit code on error (no transcript, no chunks,
-// unknown language, store failure).
-func (a *App) renderTranscriptExport(ctx context.Context, global globalOptions, ts transcriptStore, opts exportOptions, pipe cuePipeline, segmentation string) (string, int) {
-	reps, err := ts.TranscriptRepresentations(ctx, opts.relPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("no document found at %q", opts.relPath))
-			return "", exitGeneric
+// exportErrorMessage renders the historical, path-qualified error text for a
+// subexport failure so the CLI contract is unchanged by the shared renderer.
+// lang is the language the failed resolution asked for; invalidField prefixes
+// the missing-language message with INVALID_FIELD, which is the TTML path's
+// wording.
+func exportErrorMessage(err error, relPath, lang string, invalidField bool) string {
+	switch {
+	case errors.Is(err, subexport.ErrNoDocument):
+		return fmt.Sprintf("no document found at %q", relPath)
+	case errors.Is(err, subexport.ErrNoTranscript):
+		return fmt.Sprintf("document %q has no transcript representation", relPath)
+	case errors.Is(err, subexport.ErrNoLanguage):
+		msg := fmt.Sprintf("document %q has no transcript for language %q", relPath, lang)
+		if invalidField {
+			return "INVALID_FIELD: " + msg
 		}
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("load transcript representations: %v", err))
-		return "", exitGeneric
+		return msg
+	case errors.Is(err, subexport.ErrNoCues):
+		return fmt.Sprintf("document %q transcript has no time-coded cues to export", relPath)
+	default:
+		return err.Error()
 	}
-	if len(reps) == 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("document %q has no transcript representation", opts.relPath))
-		return "", exitGeneric
-	}
-
-	rep, ok := selectTranscriptRep(reps, opts.lang)
-	if !ok {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("document %q has no transcript for language %q", opts.relPath, opts.lang))
-		return "", exitGeneric
-	}
-
-	rows, err := ts.TranscriptSpanChunks(ctx, rep.RepID)
-	if err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("load transcript chunks: %v", err))
-		return "", exitGeneric
-	}
-
-	chunks := make([]subtitle.TranscriptChunk, 0, len(rows))
-	for _, r := range rows {
-		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
-	}
-	cues := pipe.apply(buildCuesForSegmentation(chunks, segmentation, transcriptRepIsTranslation(rep.MetaJSON)))
-	if len(cues) == 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("document %q transcript has no time-coded cues to export", opts.relPath))
-		return "", exitGeneric
-	}
-
-	switch opts.format {
-	case "vtt":
-		return subtitle.RenderVTT(cues), exitSuccess
-	default: // "srt" (validated in parseExportOptions)
-		return subtitle.RenderSRT(cues), exitSuccess
-	}
-}
-
-// buildCuesForSegmentation selects the cue builder by the configured
-// media.subtitles.segmentation mode: "broadcast" re-segments into broadcast-
-// legible cues; any other value (including the "chunk" default and empty) uses
-// BuildCues, so the historical behavior is unchanged unless broadcast is
-// explicitly selected.
-//
-// In broadcast mode the source of the timing matters:
-//   - A native STT transcript that carries real per-word timings re-segments
-//     from them (BuildBroadcastCues).
-//   - A translation (isTranslation) is always reflowed. Any per-word timings a
-//     translate provider emits are FABRICATED — words pile at a single timestamp
-//     with zero duration — so honoring them would cram a whole clause into a
-//     sub-second cue and spike reading speed. ReflowChunkCues instead distributes
-//     each run's on-screen time across its tokens. This gates on the source, not
-//     on timings-present, so a future translate provider that emits word timings
-//     can never bypass the reflow.
-//   - A native transcript with no per-word timings (BuildBroadcastCues returns
-//     nil) is reflowed too.
-func buildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string, isTranslation bool) []subtitle.Cue {
-	if strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
-		if !isTranslation {
-			if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
-				return cues
-			}
-		}
-		return subtitle.ReflowChunkCues(subtitle.BuildCues(chunks))
-	}
-	return subtitle.BuildCues(chunks)
-}
-
-// transcriptRepIsTranslation reports whether a transcript representation's
-// meta_json marks it as a machine translation (source == "translation", set by
-// the ingest translate path). Broadcast export always reflows a translation
-// rather than honoring its fabricated per-word timings; see buildCuesForSegmentation.
-// It fails closed: non-empty but unparseable meta_json is treated as a translation
-// so a corrupt rep can never route fabricated timings into the broadcast path.
-func transcriptRepIsTranslation(metaJSON string) bool {
-	trimmed := strings.TrimSpace(metaJSON)
-	if trimmed == "" {
-		return false
-	}
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &meta); err != nil {
-		// Fail closed: meta_json is present but unparseable, so we cannot confirm
-		// this is a native transcript with real per-word timings. Treat it as a
-		// translation and reflow rather than risk honoring fabricated timings (see
-		// buildCuesForSegmentation). Native transcript meta_json is always written
-		// by json.Marshal, so this only fires on corruption — and reflowing a
-		// native transcript merely trades re-segmentation for safe timing, whereas
-		// honoring fabricated translation timings is a correctness bug.
-		return true
-	}
-	// A missing "source" key is the normal native-transcript case (only the
-	// translate path sets source="translation"; native reps carry language meta
-	// but no source), so absence means native — not translation.
-	src, _ := meta["source"].(string)
-	return strings.EqualFold(strings.TrimSpace(src), "translation")
 }
 
 // emitExport writes the rendered subtitle document to --out (atomically) or to
@@ -333,50 +172,6 @@ func parseExportOptions(args []string) (exportOptions, error) {
 	}
 	opts.lang = strings.TrimSpace(opts.lang)
 	return opts, nil
-}
-
-// selectTranscriptRep chooses the transcript representation to export. With an
-// empty lang it returns the first (source/only) transcript — there is no
-// hardcoded default language. With a non-empty lang it returns the first
-// representation whose meta_json language matches (case-insensitively),
-// reporting ok=false when none match.
-func selectTranscriptRep(reps []store.TranscriptRepresentation, lang string) (store.TranscriptRepresentation, bool) {
-	if len(reps) == 0 {
-		return store.TranscriptRepresentation{}, false
-	}
-	lang = strings.TrimSpace(lang)
-	if lang == "" {
-		return reps[0], true
-	}
-	for _, rep := range reps {
-		if strings.EqualFold(transcriptRepLanguage(rep.MetaJSON), lang) {
-			return rep, true
-		}
-	}
-	return store.TranscriptRepresentation{}, false
-}
-
-// transcriptRepLanguage extracts a language code from a transcript
-// representation's meta_json, accepting either a "language" or "lang" key.
-// Returns "" when the metadata is absent or unparseable, so language-tagged
-// sidecar transcripts (#253) match while legacy untagged ones simply do not.
-func transcriptRepLanguage(metaJSON string) string {
-	trimmed := strings.TrimSpace(metaJSON)
-	if trimmed == "" {
-		return ""
-	}
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &meta); err != nil {
-		return ""
-	}
-	for _, key := range []string{"language", "lang"} {
-		if v, ok := meta[key]; ok {
-			if s, ok := v.(string); ok {
-				return strings.TrimSpace(s)
-			}
-		}
-	}
-	return ""
 }
 
 // writeFileAtomic writes data to path via a sibling temp file + rename so a
