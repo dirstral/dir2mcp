@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/scancache"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -153,8 +154,14 @@ type Service struct {
 	// primary subtag, so a recording that alternates between two languages
 	// builds each once. Resolved once from config in NewService.
 	languageScope string
-	routeMu       sync.Mutex
-	routes        map[string]routedSTT
+	// routeErrorFallback is the resolved media.stt.on_route_error policy (SPEC
+	// §8.2.4, #1059): true under "default", when a language_providers candidate
+	// that fails with a transport or provider error is replaced once by the
+	// default profile for that window or item; false under "fail", today's
+	// failed window or item.
+	routeErrorFallback bool
+	routeMu            sync.Mutex
+	routes             map[string]routedSTT
 	// languageRouteIDs is media.stt.language_providers resolved to route
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
@@ -395,12 +402,30 @@ type Service struct {
 	ocrCacheWrites     int
 	ocrCachePruneEvery int
 
-	// sidecarIndex maps every discovered file's rel_path to its mtime, built once
-	// per scan (setSidecarIndex). The transcript path uses it to detect subtitle
-	// sidecars next to a media file and to mtime-gate their ingestion (§8.6.4).
-	// Nil until a scan sets it; direct callers fall back to a one-shot walk.
-	sidecarIndex map[string]int64
+	// sidecarIndex holds every discovered subtitle file's stat, grouped by
+	// directory (sidecar.go buildSidecarIndex), built once per scan so sidecar
+	// binding is a per-directory lookup rather than a walk of the corpus.
+	sidecarIndex map[string]map[string]sidecarStat
 	sidecarMu    sync.RWMutex
+
+	// Subtitle write-back state (SPEC §8.6.14, emit.go). ownedArtifacts is the
+	// in-memory projection of the df-003 §5.6 ownership rows written beside the
+	// media (output root ""), plus marker adoptions, loaded once per scan
+	// (ownedLoaded) so sidecar discovery can exclude files this pipeline wrote.
+	// outRootOwned holds the rows of the current non-empty media.subtitles.emit.dir;
+	// only write-back reads it, because discovery never looks under that root.
+	// emitRenderer is the shared subtitle renderer, built once.
+	ownedArtifacts map[string]ownedArtifact
+	outRootOwned   map[string]ownedArtifact
+	ownedLoaded    bool
+	ownedMu        sync.RWMutex
+	// unownedChecked remembers, per process, the subtitle files found to carry no
+	// intact provenance marker at a given stat, so a sidecar with no ownership
+	// row is read for a marker once rather than on every lookup (emit.go).
+	unownedChecked   map[string]sidecarStat
+	emitRenderer     *subexport.Renderer
+	emitRendererOnce sync.Once
+	emitWarnOnce     sync.Once
 
 	// batch holds the optional per-scan batch-ergonomics state (SPEC §8.6.11):
 	// the JSONL run manifest writer and the side-channel progress reporter. It is
@@ -1013,6 +1038,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		minTranscriptCoverage:           normalizeMinCoverage(cfg.MediaSTTMinCoverage),
 		onPartialTranscript:             normalizeOnPartialTranscript(cfg.MediaSTTOnPartialTranscript),
 		languageScope:                   normalizeLanguageScope(cfg.MediaSTTLanguageScope),
+		routeErrorFallback:              cfg.RouteErrorFallsBack(),
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -1473,7 +1499,7 @@ func (s *Service) captionWordFilter() *subtitle.WordFilter {
 // media.subtitles.{drop_urls,expect_script,drop_phrases,scrub_phrases,collapse_repeats}
 // (issues #545, #765; SPEC §8.6.3). The same options clean STT transcript chunks, translated
 // transcript chunks and sidecar-cue chunks before embedding, and they are the
-// SAME subtitle.CleanOptions shape the export path builds (cli.newCuePipeline),
+// SAME subtitle.CleanOptions shape the export path builds (subexport.NewPipeline),
 // so a hallucinated URL, a wholly-spam chunk or a repetition run is neither
 // exported nor indexed, keeping the index and the sidecar in agreement rather
 // than leaving cues that are invisible in the sidecar but citable from the index.
@@ -2049,6 +2075,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	// can detect subtitle sidecars next to any media rendition and mtime-gate
 	// their ingestion (§8.6.4) even for renditions dropped by variant grouping.
 	s.setSidecarIndex(discovered)
+	s.loadOwnedArtifacts(ctx)
 
 	// Collapse multi-rendition media to a single canonical file (spec §8.6.5)
 	// before ingestion so chunks/embeddings are not duplicated across renditions.
@@ -2272,15 +2299,41 @@ func etagUnchanged(f DiscoveredFile, existing model.Document, forceReindex bool)
 	return existing.SizeBytes == f.SizeBytes
 }
 
-// trySkipUnchangedRemoteDocument implements the remote (S3) incremental fast
-// path (SPEC §7.8.3, #245). It looks up the recorded document and, when the
-// object's ETag+size signal an unchanged body, records run-progress counters and
-// returns handled=true so the caller skips the GET + content_hash recompute. It
-// returns handled=false (no error) when the object is new, changed, or local
-// (empty ETag), letting the normal read/hash path run; a genuine store failure
-// is returned as an error. content_hash stays the canonical identity and the
-// stored row is left untouched on the skip path.
-func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, forceReindex bool, seen map[string]struct{}) (bool, error) {
+// mediaStatUnchanged is the cheap change signal for a LOCAL/NFS media file (SPEC
+// §7.8 change-detection identity: "the cheap pre-check is (size, mtime)"). It
+// is deliberately limited to audio/video. A media read is the whole file —
+// gigabytes over NFS, held in memory — and a corpus of 145k videos read in full
+// on every scan is days of I/O for no new information, whereas an in-place edit
+// that keeps a video's byte length AND its second-resolution mtime is not a
+// case that occurs. Text documents are cheap to read and the project pins that
+// a same-size same-second edit of one is still caught by the hash (#667), so
+// they are excluded here and keep the confirm-by-hash path unchanged.
+func mediaStatUnchanged(f DiscoveredFile, existing model.Document, forceReindex bool) bool {
+	if forceReindex || strings.TrimSpace(f.ETag) != "" {
+		return false
+	}
+	if !isSidecarMediaType(ClassifyDocType(f.RelPath)) {
+		return false
+	}
+	if existing.Deleted || existing.Status == "error" {
+		return false
+	}
+	if f.MTimeUnix == 0 || existing.MTimeUnix == 0 {
+		return false
+	}
+	return existing.SizeBytes == f.SizeBytes && existing.MTimeUnix == f.MTimeUnix
+}
+
+// trySkipUnchangedDocument implements the cheap-signal incremental fast path
+// (SPEC §7.8, #245): the S3 ETag+size for a remote object, the (size, mtime) pair
+// for a local/NFS media file. It looks up the recorded document and, when the
+// signal says the body is unchanged, records run-progress counters and returns
+// handled=true so the caller skips the read + content_hash recompute. It
+// returns handled=false (no error) when the document is new, changed, or has no
+// cheap signal (a local text file), letting the normal read/hash path run; a
+// genuine store failure is returned as an error. content_hash stays the canonical
+// identity and the stored row is left untouched on the skip path.
+func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile, forceReindex bool, seen map[string]struct{}) (bool, error) {
 	existing, err := s.store.GetDocumentByPath(ctx, f.RelPath)
 	if err != nil {
 		if isUnexpectedStoreErr(err) {
@@ -2288,7 +2341,7 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 		}
 		return false, nil
 	}
-	if !etagUnchanged(f, existing, forceReindex) {
+	if !etagUnchanged(f, existing, forceReindex) && !mediaStatUnchanged(f, existing, forceReindex) {
 		return false, nil
 	}
 	// An empty recorded content_hash means the document was never durably
@@ -2317,8 +2370,9 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if currentFP != existing.SidecarFingerprint {
 		return false, nil
 	}
-	// The ETag proves the bytes did not change, not that they classify the
-	// same way: a classifier upgrade (SPEC §7.3) can give the path a new type.
+	// The cheap signal (ETag, or size and mtime) proves the bytes did not
+	// change, not that they classify the same way: a classifier upgrade
+	// (SPEC §7.3) can give the path a new type.
 	if storedTypeStale(existing.DocType, f.RelPath) {
 		return false, nil
 	}
@@ -2331,17 +2385,17 @@ func (s *Service) trySkipUnchangedRemoteDocument(ctx context.Context, f Discover
 	if existing.Status == "ok" && s.derivationIdentityStale(ctx, f.RelPath) {
 		return false, nil
 	}
-	s.skipUnchangedRemoteDocument(ctx, f, existing, seen)
+	s.skipUnchangedDocument(ctx, f, existing, seen)
 	return true, nil
 }
 
 // storedTypeStale reports whether a stored row's doc type no longer matches
-// what the classifier gives its path, so the remote fast path must re-read the
-// object. The stored type is the path type refined by SniffTextDocType, so a
-// path that classifies as binary_ignored may be stored as binary_ignored or
-// text: only the bytes can tell the two apart, and the fast path exists to
-// avoid that read. Such an object is re-classified when its ETag changes or on
-// reindex. Every other mismatch (an extension the table gained, for example
+// what the classifier gives its path, so the cheap-signal fast path must
+// re-read the document. The stored type is the path type refined by
+// SniffTextDocType, so a path that classifies as binary_ignored may be stored
+// as binary_ignored or text: only the bytes can tell the two apart, and the
+// fast path exists to avoid that read. Such an object is re-classified when its
+// ETag changes or on reindex. Every other mismatch (an extension the table gained, for example
 // .mjs to code) is exact and needs no read to detect.
 func storedTypeStale(storedType, relPath string) bool {
 	if storedType == "" {
@@ -2354,19 +2408,23 @@ func storedTypeStale(storedType, relPath string) bool {
 	return storedType != pathType
 }
 
-// skipUnchangedRemoteDocument records the run-progress counters for an object
-// whose ETag matched (so it was not re-read) and preserves the existing
+// skipUnchangedDocument records the run-progress counters for a document whose
+// cheap signal matched (so it was not re-read) and preserves the existing
 // behavior for archive containers, whose already-ingested members must be
 // retained in `seen` so markMissingAsDeleted does not tombstone them. The stored
 // document row is intentionally left untouched: its content_hash, ETag, and
 // representations are still valid. Counters mirror the unchanged-content path so
 // status totals stay consistent across runs.
-func (s *Service) skipUnchangedRemoteDocument(ctx context.Context, f DiscoveredFile, existing model.Document, seen map[string]struct{}) {
-	// The remote fast path returns before processDocument's own reconciliation
-	// call sites, so reconcile here too (#692). Without this, an object-store
-	// corpus would never retire an obsolete output on the path it takes for every
-	// unchanged object.
+func (s *Service) skipUnchangedDocument(ctx context.Context, f DiscoveredFile, existing model.Document, seen map[string]struct{}) {
+	// The fast path returns before processDocument's own reconciliation call
+	// sites, so reconcile here too (#692). Without this, a corpus would never
+	// retire an obsolete output on the path it takes for every unchanged document.
 	s.reconcileDocumentOutputs(ctx, f.RelPath)
+	// §8.6.14: an unchanged media document already has every transcript this run
+	// would produce, so subtitle write-back runs here exactly as on the
+	// unchanged-content path. This is what lets write-back be enabled on an
+	// already-indexed archive and fill the files in without a reindex.
+	s.emitSubtitles(ctx, existing)
 	switch existing.Status {
 	case "ok":
 		s.addIndexed(1)
@@ -2484,11 +2542,13 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return s.deriveDocument(ctx, f, secretPatterns)
 	}
 
-	// Remote (S3) incremental fast path (SPEC §7.8.3, #245): when the object's
-	// ETag+size match the recorded document, the body is unchanged, so skip the
-	// full GET + content_hash recompute entirely. No-op for local/NFS corpora
-	// (empty ETag) and under --force/reindex.
-	if handled, err := s.trySkipUnchangedRemoteDocument(ctx, f, forceReindex, seen); err != nil || handled {
+	// Cheap-signal incremental fast path (SPEC §7.8 change-detection identity):
+	// for an S3 object the ETag+size (#245), for a LOCAL/NFS MEDIA file the
+	// (size, mtime) pair. When the signal matches the recorded document the body
+	// is unchanged, so the full read + content_hash recompute is skipped. Text
+	// documents on a local corpus keep confirming by hash (#667). No-op under
+	// --force/reindex.
+	if handled, err := s.trySkipUnchangedDocument(ctx, f, forceReindex, seen); err != nil || handled {
 		return err
 	}
 
@@ -2560,6 +2620,11 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		// still retired. Retiring costs nothing to undo: both covered outputs are
 		// backed by an on-disk derivation cache.
 		s.reconcileDocumentOutputs(ctx, doc.RelPath)
+		// §8.6.14: an unchanged document already has every transcript this run
+		// would produce, so write-back runs here too. That is what lets an operator
+		// enable it on an already-indexed corpus and have the files appear without
+		// a reindex; under if_missing it is a stat per artifact on a steady state.
+		s.emitSubtitles(ctx, doc)
 		s.creditIndexed(indexedPending)
 		s.markActiveSkipped()
 		return nil
@@ -2614,6 +2679,12 @@ func (s *Service) settleProcessedDocument(
 	// recordAssetOutputs reads the representation types after processDocument
 	// returns.
 	s.reconcileDocumentOutputs(ctx, doc.RelPath)
+	// §8.6.14 subtitle write-back runs once every transcript representation of
+	// the document for this run has committed (single-pass; under two-phase the
+	// transcription pass is a no-op here and the derivation pass emits). It is
+	// per-document and non-fatal, and precedes the done marker so a crash between
+	// the two simply re-runs an idempotent step next time.
+	s.emitSubtitles(ctx, *doc)
 	// Stamp the withheld #402 done marker now that the
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and
@@ -2837,19 +2908,12 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	// reset at processDocument entry (deriveDocument is reached only from there),
 	// so a translation rejected in this derivation pass is counted once and cannot
 	// leak its dedup state into the next asset without a redundant reset here.
-	// No translation configured, or the multimodal "replace" mode that stands in
-	// for STT→text (so no transcript exists to translate): nothing to derive. This
-	// matches the single-pass gates so the corpus-wide output is identical.
-	if !s.translationConfigured() {
-		s.markActiveSkipped()
-		return nil
-	}
-
 	docType := ClassifyDocType(f.RelPath)
 	// Audio AND video carry model-derived transcripts (issue #495): a video's
 	// source transcript was produced from its extracted audio track in the
 	// transcription pass, so its translation is derived here exactly like audio.
-	if !isSidecarMediaType(docType) || s.transcriber == nil {
+	// Non-media assets have nothing to derive and nothing to write back.
+	if !isSidecarMediaType(docType) {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -2859,33 +2923,54 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 		return fmt.Errorf("get existing document: %w", err)
 	}
 	// A document the transcription pass did not record as a healthy media asset has
-	// no source transcript to translate; skip it.
+	// no source transcript to translate or to write back; skip it.
 	if isNotFoundError(err) || doc.Status != "ok" {
 		s.markActiveSkipped()
 		return nil
 	}
 	s.recordContentHash(doc.ContentHash)
 
+	derived := s.deriveDocumentTranslations(ctx, f, doc)
+	// §8.6.14: the derivation pass is the point where every transcript of the
+	// document for this run exists (source from the transcription pass,
+	// translations just above), so this is where write-back runs under two-phase.
+	// Observably the same files single-pass writes, in a different order.
+	s.emitSubtitles(ctx, doc)
+	if !derived {
+		s.markActiveSkipped()
+	}
+	return nil
+}
+
+// deriveDocumentTranslations runs the derivation pass's translation step for one
+// media document and reports whether translation work ran at all. It mirrors
+// the gating of the single-pass translation step exactly so the final set of
+// representations is observably identical: translation applies only to a
+// model-derived (STT) transcript of a media document, and only when translation
+// is configured. A provider failure is a non-fatal per-asset outcome recorded on
+// the manifest (TRANSLATE_FAILED, §8.6.11/§14.4); the source transcript stays
+// searchable, so documents.status is untouched.
+func (s *Service) deriveDocumentTranslations(ctx context.Context, f DiscoveredFile, doc model.Document) bool {
+	// No translation configured, or the multimodal "replace" mode that stands in
+	// for STT→text (so no transcript exists to translate): nothing to derive. This
+	// matches the single-pass gates so the corpus-wide output is identical.
+	if !s.translationConfigured() || s.transcriber == nil {
+		return false
+	}
 	content, err := s.readDocumentContent(ctx, f.RelPath)
 	if err != nil {
 		// A read failure in the derivation pass must not fail the run: the source
 		// transcript already exists. Record skipped and move on.
 		s.getLogger().Printf("two-phase derivation: read %s: %v (skipping translation)", f.RelPath, err)
-		s.markActiveSkipped()
-		return nil
+		return false
 	}
-
 	if err := s.deriveTranscriptTranslations(ctx, doc, content); err != nil {
 		s.getLogger().Printf("two-phase derivation translation skipped for %s: %v", f.RelPath, err)
 		s.addErrors(1)
-		// §8.6.11/§14.4: record the canonical translation-failure code
-		// (TRANSLATE_FAILED for a provider failure) on the derivation-pass manifest
-		// record; the source transcript (persisted in the transcription pass) stays
-		// searchable, so documents.status is untouched. No-op with no batch run.
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return nil
+	return true
 }
 
 // deriveTranscriptTranslations recomputes each selected track's source transcript
@@ -2936,7 +3021,7 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 // means the track produced no source transcript (empty/failed in the transcription
 // pass), which is a legitimate no-op — never a re-transcription.
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
-	transcriptText, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, _, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return err
 	}
@@ -4959,7 +5044,7 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	// active engine (auto with no docling/OCR, or the pandoc pin).
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
 	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		return s.generatePandocMarkdownRepresentation(ctx, doc, content)
+		return s.logExtractFailure(ctx, doc, "pandoc", s.generatePandocMarkdownRepresentation(ctx, doc, content))
 	}
 
 	if s.extractor == nil {
@@ -4979,13 +5064,14 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 		// below runs the same docling command again, which doubles the time and
 		// times out again, so record the timeout now (#1105).
 		if isDoclingTimeout(err) {
-			return err
+			return s.logExtractFailure(ctx, doc, "docling", err)
 		}
 	}
 
 	ocrText, err := s.readOrComputeOCR(ctx, doc, content)
 	if err != nil {
-		return err
+		engine, _ := s.extractorProviderModel()
+		return s.logExtractFailure(ctx, doc, engine, err)
 	}
 
 	ocrText = strings.TrimSpace(ocrText)
@@ -5704,7 +5790,7 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 // single-track path; each additional track N ≥ 1 is persisted under
 // `transcript@t<N>` with its container-declared track/language/label in meta_json.
 func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, string, error) {
-	transcriptText, words, coverage, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, words, coverage, route, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -5802,6 +5888,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// short recording is unchanged (#961).
 	meta.Coverage = coverage
 	s.applyWindowLanguageMeta(&meta, coverage)
+	s.applyItemRouteMeta(&meta, route)
 	s.warnPartialTranscript(doc, tc, coverage)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -6080,7 +6167,7 @@ func (s *Service) warnPartialTranscript(doc model.Document, tc trackContext, cov
 // track N ≥ 1 is first demuxed to a compact per-track audio clip and transcribed as
 // a standalone audio document, keying the transcribe cache on the extracted bytes so
 // each track caches independently.
-func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, error) {
+func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	if tc.audioIndex <= 0 {
 		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "", doc.RelPath)
 	}
@@ -6091,9 +6178,9 @@ func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, c
 			// transcript" (handled by the caller as an empty, non-fatal outcome), not
 			// a provider failure.
 			s.getLogger().Printf("media.stt.tracks: %s has no audio track %d to transcribe; skipping it (§8.6.12)", doc.RelPath, tc.audioIndex)
-			return "", nil, nil, nil
+			return "", nil, nil, nil, nil
 		}
-		return "", nil, nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
+		return "", nil, nil, nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
 	}
 	// Transcribe the extracted clip as a standalone audio document: DocType audio so
 	// transcribe() does not re-demux, and an audio-suffixed rel_path so the provider
@@ -6859,7 +6946,7 @@ func TranscriptLangSuffix(language string) string {
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
-	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
+	text, _, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
 	return text, err
 }
 
@@ -6872,14 +6959,14 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // originRelPath is the rel_path of the DOCUMENT this transcript belongs to,
 // which is doc.RelPath for an ordinary decode and the real document's path for a
 // per-track decode whose doc is synthetic. Only the #974 redecode mark reads it.
-func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, error) {
+func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	if s.transcriber == nil {
-		return "", nil, nil, errors.New("transcriber not configured")
+		return "", nil, nil, nil, errors.New("transcriber not configured")
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", nil, nil, fmt.Errorf("create transcript cache dir: %w", err)
+		return "", nil, nil, nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
 	// Key the cache on the media bytes AND the active STT derivation identity
@@ -6894,6 +6981,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
 	screenedPath := filepath.Join(cacheDir, base+".screened")
+	routePath := filepath.Join(cacheDir, base+".route.json")
 	// #974: an operator asked for this document to be decoded again, so the cache
 	// is not consulted. The entry is rewritten below, so this costs one decode
 	// rather than leaving the document uncached forever.
@@ -6909,13 +6997,17 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
 			// text. A cache hit that dropped it would re-index the same PARTIAL
 			// transcript as a complete one on the next run, which is the whole defect.
-			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), nil
+			// SPEC §8.2.4: the item-level route record is restored with the text
+			// for the same reason the coverage is: a cache hit that dropped it
+			// would record the next run's transcript under the text detector's
+			// language and no route, so the record would differ run to run.
+			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), readCachedItemRoute(routePath), nil
 		}
 	}
 
-	transcript, words, coverage, err := s.transcribe(ctx, doc, content)
+	transcript, words, coverage, route, err := s.transcribe(ctx, doc, content)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		return "", nil, nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
@@ -6927,11 +7019,14 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	// costs an archive that lies. Word timing keeps its best-effort treatment
 	// (missing timing degrades gracefully; missing coverage asserts completeness).
 	if !s.publishCachedCoverage(coveragePath, coverage) {
-		return string(transcriptBytes), words, coverage, nil
+		return string(transcriptBytes), words, coverage, route, nil
+	}
+	if !s.publishCachedItemRoute(routePath, route) {
+		return string(transcriptBytes), words, coverage, route, nil
 	}
 	s.publishScreenedMarker(screenedPath, coverage)
 	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
-		return "", nil, nil, fmt.Errorf("write transcript cache: %w", err)
+		return "", nil, nil, nil, fmt.Errorf("write transcript cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
@@ -6951,7 +7046,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
-	return string(transcriptBytes), words, coverage, nil
+	return string(transcriptBytes), words, coverage, route, nil
 }
 
 // readOrComputeWhisperTranslation produces the English transcript for
@@ -7068,21 +7163,27 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // request when it fits and decodes it in overlapping windows when it does not
 // (issue #954): a 3-hour recording used to be refused whole on the provider's
 // payload cap and left the document at status=error with no transcript.
-func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, error) {
+func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	relPath := doc.RelPath
 	if doc.DocType == "video" {
 		audio, err := s.extractVideoAudioTrack(ctx, doc, content)
 		if err != nil {
 			if errors.Is(err, avutil.ErrNoAudioStream) {
 				s.getLogger().Printf("no audio track to transcribe in video %s; skipping STT", doc.RelPath)
-				return "", nil, nil, nil
+				return "", nil, nil, nil, nil
 			}
-			return "", nil, nil, err
+			return "", nil, nil, nil, err
 		}
 		content = audio
 		relPath = videoAudioRelPath(doc.RelPath)
 	}
-	return s.transcribeStructuredWindowed(ctx, relPath, content)
+	// SPEC §8.2.4: under item scope with an identifier bound, the item's
+	// language is resolved before transcription and selects the route.
+	if s.itemIdentifierActive() {
+		return s.transcribeItemRouted(ctx, relPath, content)
+	}
+	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber)
+	return text, words, coverage, nil, err
 }
 
 // extractVideoAudioTrack demuxes a video's audio track to a compact STT-ready

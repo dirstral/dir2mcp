@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Store primitives behind output-set reconciliation (dir2mcp #692):
@@ -17,7 +18,7 @@ import (
 
 func newReconcileStore(t *testing.T) *store.SQLiteStore {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)

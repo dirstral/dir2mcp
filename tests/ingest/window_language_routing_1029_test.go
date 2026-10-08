@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §8.2.2 (dirstral-spec 0.71.0), dir2mcp #1029. §8.2.1 resolves ONE
@@ -123,6 +124,8 @@ type covLang struct {
 	LanguageConfidence *float64 `json:"language_confidence"`
 	Route              string   `json:"route"`
 	Covered            bool     `json:"covered"`
+	// FallbackFrom is the §8.2.4 route fallback record (dir2mcp #1059).
+	FallbackFrom string `json:"fallback_from"`
 }
 
 // covRefused is one coverage.refused entry.
@@ -515,10 +518,10 @@ func TestWindowLanguage_FloorPerWindow_SkipRefusesOnlyThatWindow(t *testing.T) {
 func TestWindowLanguage_AllWindowsRefusedIsALanguageSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
 	svc.SetTranscriber(&langWindowTranscriber{def: langReply{lang: "uk", conf: 0.9}})
@@ -638,13 +641,13 @@ func TestWindowLanguage_RouteIdentityNamesTheModel(t *testing.T) {
 			"    language_scope: window\n" +
 			"    language_providers:\n" +
 			"      uk: whisper-uk\n"
-		path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+		path := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 		writeFile(t, path, yaml)
 		cfg, err := config.LoadFile(path)
 		if err != nil {
 			t.Fatalf("LoadFile: %v", err)
 		}
-		cfg.StateDir = t.TempDir()
+		cfg.StateDir = testutil.TempDir(t)
 		svc := mustNewIngestService(t, cfg, &fakeIngestStore{})
 		svc.SetSTTIdentity("whisper", "large-v3")
 		return svc.ActiveTranscriptIdentity()
@@ -665,7 +668,7 @@ func TestWindowLanguage_RouteIdentityNamesTheModel(t *testing.T) {
 // window scope re-derives.
 func TestWindowLanguage_ScopeJoinsTheDerivationIdentity(t *testing.T) {
 	t.Parallel()
-	svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
+	svc := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, &fakeIngestStore{})
 	svc.SetSTTIdentity("whisper", "large-v3")
 	svc.SetLanguageScope("item")
 	item := svc.ActiveTranscriptIdentity()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #693: `list_files` with `include_hidden=false` still returned nested
@@ -123,7 +124,7 @@ func TestListFilesPagesOnlyVisibleRows_693(t *testing.T) {
 
 func seedHiddenCorpus693(t *testing.T) (stateDir, root string, st *store.SQLiteStore) {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st = store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

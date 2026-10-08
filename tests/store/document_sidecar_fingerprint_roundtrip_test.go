@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_DocumentSidecarFingerprintRoundtrip verifies that the
@@ -17,7 +18,7 @@ import (
 // never compares against a stale value.
 func TestSQLiteStore_DocumentSidecarFingerprintRoundtrip(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 

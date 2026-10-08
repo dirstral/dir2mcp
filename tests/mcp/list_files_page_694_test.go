@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #694: every list_files call walked the ENTIRE matching corpus from store
@@ -115,7 +116,7 @@ func TestListFilesDeepPageDoesNotRestartFromZero_694(t *testing.T) {
 // the rule is "any segment that starts with a dot", so `visible/.config/b.md`
 // is hidden too.
 func TestListFilesHiddenFilteringSurvivesTheSQLPushdown_694(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -157,7 +158,7 @@ func TestListFilesHiddenFilteringSurvivesTheSQLPushdown_694(t *testing.T) {
 // matters: every EMITTED path round-trips through open_file. That gate is
 // page-scoped now, and page-scoped is enough.
 func TestListFilesStillDropsRowsWhoseFileIsGone_694(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -205,7 +206,7 @@ func corpusRelPath694(i int) string {
 // vacuously against broken code.
 func seedCountingCorpus694(t *testing.T, n int) (*countingStore694, string, string) {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

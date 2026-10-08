@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // openRaw opens a second, independent connection to the same sqlite file so a
@@ -33,7 +34,7 @@ func openRaw(t *testing.T, dbPath string) *sql.DB {
 // future non-additive migration had no tripwire.
 func TestSchemaVersionStamped(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -56,7 +57,7 @@ func TestSchemaVersionStamped(t *testing.T) {
 // migrated in place (#405).
 func TestSchemaVersionDowngradeGuard(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 
 	// Initialize normally, then forge a far-future schema version.
 	st := store.NewSQLiteStore(dbPath)
@@ -85,7 +86,7 @@ func TestSchemaVersionDowngradeGuard(t *testing.T) {
 // check must precede it (#405).
 func TestSchemaVersionRejectedBeforeWALCreated(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 
 	// Build a minimal database stamped with a far-future schema version using a
 	// raw connection in the default (rollback) journal mode, so the fixture
@@ -127,7 +128,7 @@ func TestSchemaVersionRejectedBeforeWALCreated(t *testing.T) {
 // schema's cascades are correctly declared rather than misleading.
 func TestForeignKeyCascade(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -194,7 +195,7 @@ func TestForeignKeyCascade(t *testing.T) {
 // drift through, silently losing lexical recall for the missing chunks.
 func TestFTSPartialDriftRepaired(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

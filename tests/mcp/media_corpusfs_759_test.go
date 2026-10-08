@@ -24,6 +24,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #759: the MCP on-demand media paths reconstructed a local path as
@@ -103,8 +104,8 @@ const s3CorpusPrefix = "corpus/"
 // bug and not a "root does not exist" artifact.
 func newS3Corpus(t *testing.T, objects map[string][]byte) *s3Corpus {
 	t.Helper()
-	rootDir := t.TempDir()
-	stateDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	cacheDir := filepath.Join(stateDir, "corpus-cache")
 
 	keyed := make(map[string][]byte, len(objects))

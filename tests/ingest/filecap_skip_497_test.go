@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestFileCapOversize_SurfacedAsSkippedAndLogged is the regression guard for
@@ -33,7 +34,7 @@ func TestFileCapOversize_SurfacedAsSkippedAndLogged(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	// A tiny file that fits, and one that exceeds a 1 MiB cap.
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("small and fine"), 0o600); err != nil {
@@ -44,7 +45,7 @@ func TestFileCapOversize_SurfacedAsSkippedAndLogged(t *testing.T) {
 		t.Fatalf("write oversize file: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

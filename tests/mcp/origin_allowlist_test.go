@@ -44,7 +44,7 @@ func TestOriginAllowlist_DefaultConfigBlocksElevenLabs(t *testing.T) {
 }
 
 func TestOriginAllowlist_EnvAllowsElevenLabsAndKeepsLocalhost(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 
 	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://elevenlabs.io")

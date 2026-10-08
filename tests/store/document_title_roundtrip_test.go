@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_DocumentTitleRoundtrip verifies that the title column
@@ -14,7 +15,7 @@ import (
 // GetDocumentByPath and ListFiles. Empty titles must remain empty.
 func TestSQLiteStore_DocumentTitleRoundtrip(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 

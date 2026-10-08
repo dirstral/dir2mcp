@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #1105: the per-document docling limit comes from
@@ -23,7 +24,7 @@ import (
 // timeout closes the pipes at once.
 func writeSlowDocling(t *testing.T) string {
 	t.Helper()
-	fake := filepath.Join(t.TempDir(), "slow-docling")
+	fake := filepath.Join(testutil.TempDir(t), "slow-docling")
 	script := "#!/bin/sh\nexec sleep 30\n"
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake docling: %v", err)
@@ -146,7 +147,7 @@ func TestDoclingTimeout_ProcessDocumentRunsDoclingOnce(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping POSIX-only command test on Windows")
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	counter := filepath.Join(dir, "runs.txt")
 	fake := filepath.Join(dir, "counting-docling")
 	script := "#!/bin/sh\necho run >> '" + counter + "'\nexec sleep 30\n"
@@ -154,14 +155,14 @@ func TestDoclingTimeout_ProcessDocumentRunsDoclingOnce(t *testing.T) {
 		t.Fatalf("write fake docling: %v", err)
 	}
 
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	const rel = "reports/annual-tables.pdf"
 	if err := os.MkdirAll(filepath.Join(root, "reports"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	writeFile(t, filepath.Join(root, rel), "%PDF-1.4 fake")
 	st := newRealStore(t)
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
 	svc.SetDocumentExtractor(ingest.NewDoclingExtractorWithTimeout(fake+" --output {output} {input}", 300*time.Millisecond))
 
 	f := ingest.DiscoveredFile{RelPath: rel, SizeBytes: 13, MTimeUnix: time.Now().Unix()}

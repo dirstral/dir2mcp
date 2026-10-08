@@ -17,6 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Bounded source reads (dir2mcp #682).
@@ -228,11 +229,11 @@ func liveRepTypes682(t *testing.T, st *store.SQLiteStore, relPath string) []stri
 //
 // On `main` the scan reads all 4 MiB and records the document as `ok`.
 func TestSizeCapRead_UnderReportingSourceIsBoundedAndSkipped(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	fs := &underReportingFS682{relPath: "liar.txt", reportedLen: 512, bodyLen: overCapBytes682}
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+	svc := mustNewIngestService(t, capConfig682(root, testutil.TempDir(t)), st)
 	svc.SetCorpusFS(fs)
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -250,7 +251,7 @@ func TestSizeCapRead_UnderReportingSourceIsBoundedAndSkipped(t *testing.T) {
 //
 // On `main` the scan reads the whole grown file and records it as `ok`.
 func TestSizeCapRead_LocalGrowthAfterDiscoveryIsBoundedAndSkipped(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.txt"), "small so far")
 	fs := &growOnOpenFS682{
 		inner:  corpusfs.NewLocalFS(root),
@@ -260,7 +261,7 @@ func TestSizeCapRead_LocalGrowthAfterDiscoveryIsBoundedAndSkipped(t *testing.T) 
 	}
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+	svc := mustNewIngestService(t, capConfig682(root, testutil.TempDir(t)), st)
 	svc.SetCorpusFS(fs)
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -280,11 +281,11 @@ func TestSizeCapRead_LocalGrowthAfterDiscoveryIsBoundedAndSkipped(t *testing.T) 
 //
 // On `main` the file is counted as indexed.
 func TestSizeCapRead_CountsAsSkipNotError(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	fs := &underReportingFS682{relPath: "liar.txt", reportedLen: 512, bodyLen: overCapBytes682}
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+	svc := mustNewIngestService(t, capConfig682(root, testutil.TempDir(t)), st)
 	svc.SetCorpusFS(fs)
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
 	svc.SetIndexingState(state)
@@ -307,8 +308,8 @@ func TestSizeCapRead_CountsAsSkipNotError(t *testing.T) {
 // On `main` the second scan reads the grown file and reindexes it, so the
 // representation survives and the row never says size_cap at all.
 func TestSizeCapRead_RetiresWhatTheSmallerFileIndexed(t *testing.T) {
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.txt"), "small so far")
 	st := newRealStore(t)
 	cfg := capConfig682(root, stateDir)
@@ -346,8 +347,8 @@ func TestSizeCapRead_RetiresWhatTheSmallerFileIndexed(t *testing.T) {
 // On `main` the second scan writes the size_cap row and leaves the first scan's
 // representation live.
 func TestSizeCapDiscovery_RetiresWhatTheSmallerFileIndexed(t *testing.T) {
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	path := filepath.Join(root, "notes.txt")
 	writeFile(t, path, "small so far")
 	st := newRealStore(t)
@@ -383,11 +384,11 @@ func TestSizeCapDiscovery_RetiresWhatTheSmallerFileIndexed(t *testing.T) {
 //
 // On `main` the container reads in full and is recorded with skip_reason="archive".
 func TestSizeCapRead_OverCapArchiveIsNotExpanded(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	fs := &underReportingFS682{relPath: "bundle.zip", reportedLen: 512, bodyLen: overCapBytes682}
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+	svc := mustNewIngestService(t, capConfig682(root, testutil.TempDir(t)), st)
 	svc.SetCorpusFS(fs)
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -424,11 +425,11 @@ func TestSizeCapRead_OverCapArchiveIsNotExpanded(t *testing.T) {
 func TestSizeCapRead_RaisesOneFileSkipEvent(t *testing.T) {
 	for _, relPath := range []string{"liar.txt", "bundle.zip"} {
 		t.Run(relPath, func(t *testing.T) {
-			root := t.TempDir()
+			root := testutil.TempDir(t)
 			fs := &underReportingFS682{relPath: relPath, reportedLen: 512, bodyLen: overCapBytes682}
 			st := newRealStore(t)
 
-			svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+			svc := mustNewIngestService(t, capConfig682(root, testutil.TempDir(t)), st)
 			svc.SetCorpusFS(fs)
 			var reasons []string
 			svc.SetOnDocumentSkip(func(_, _, reason string) {
@@ -457,8 +458,8 @@ func TestSizeCapRead_RaisesOneFileSkipEvent(t *testing.T) {
 //
 // On `main` the asset is recorded as "completed".
 func TestSizeCapRead_ManifestCarriesFileTooLarge(t *testing.T) {
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	manifestPath := filepath.Join(stateDir, "run.jsonl")
 	fs := &underReportingFS682{relPath: "liar.txt", reportedLen: 512, bodyLen: overCapBytes682}
 	st := newRealStore(t)
@@ -509,8 +510,8 @@ func (s *retireFailingStore682) SoftDeleteRepresentations(ctx context.Context, r
 // had, the run reports one error, and the next scan retries: the cap verdict is
 // reproducible, so a retry costs a re-read and nothing more.
 func TestSizeCapRead_RefusedRetirementLeavesTheDocumentAsItWas(t *testing.T) {
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.txt"), "small so far")
 	st := &retireFailingStore682{SQLiteStore: newRealStore(t)}
 	cfg := capConfig682(root, stateDir)
@@ -563,11 +564,11 @@ func TestSizeCapRead_RefusedRetirementLeavesTheDocumentAsItWas(t *testing.T) {
 // one byte, every file then measures as past the cap, and the whole corpus is
 // skipped as size_cap. Clamping keeps a nonsense value harmless.
 func TestSizeCapRead_AbsurdCapIsClampedNotOverflowed(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.txt"), "ordinary small file")
 	st := newRealStore(t)
 
-	cfg := capConfig682(root, t.TempDir())
+	cfg := capConfig682(root, testutil.TempDir(t))
 	// Past the largest MB value that converts to bytes without overflowing.
 	cfg.IngestMaxFileMB = math.MaxInt/(1024*1024) + 5
 
@@ -590,11 +591,11 @@ func TestSizeCapRead_AbsurdCapIsClampedNotOverflowed(t *testing.T) {
 // must still be indexed: the bound must refuse only what passes it, and an
 // off-by-one here would silently drop every file at the boundary.
 func TestSizeCapRead_FileAtTheCapIsStillIndexed(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "exact.txt"), strings.Repeat("a", int(readCapBytes682)))
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, capConfig682(root, t.TempDir()), st)
+	svc := mustNewIngestService(t, capConfig682(root, testutil.TempDir(t)), st)
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

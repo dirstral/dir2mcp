@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteBroker_PragmasConfigured pins F5 (issue #433): when the broker opens
@@ -14,7 +16,7 @@ import (
 // busy_timeout is connection-local and only observable on the broker's own handle.
 func TestSQLiteBroker_PragmasConfigured(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "queue.db")
+	path := filepath.Join(testutil.TempDir(t), "queue.db")
 
 	b, err := NewSQLiteBroker(ctx, path, 5)
 	if err != nil {

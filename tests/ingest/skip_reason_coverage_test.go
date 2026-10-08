@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSkipReasonCoverage is the honest-coverage regression guard for #414: a
@@ -21,7 +22,7 @@ import (
 // surface via the ingestor's in-run per-reason counter instead.
 func TestSkipReasonCoverage(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	// An ingestable file (indexed, no skip_reason).
 	writeCorpusFile(t, root, "notes.txt", []byte("just some plain prose that indexes fine"))
@@ -40,7 +41,7 @@ func TestSkipReasonCoverage(t *testing.T) {
 	// never counted, so an all-symlink corpus reported a clean empty scan.
 	linkSkipped := writeCorpusSymlink(t, root, "notes.txt", "link-to-notes.txt")
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

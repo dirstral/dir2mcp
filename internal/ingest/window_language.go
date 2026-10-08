@@ -190,16 +190,33 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	var out windowDecode
 	cur := st.route
 	results, err := s.decodePieces(ctx, relPath, cur.stt, pieces, plan)
+	fallbackFrom := ""
+	if len(results) == 0 && err != nil {
+		// SPEC §8.2.4: a route candidate that fails is replaced once by the
+		// default profile under on_route_error=default. The carried route is a
+		// candidate whenever it is not the default.
+		results, cur, fallbackFrom, err = s.fallBackToDefault(ctx, relPath, pieces, plan, core, cur, err)
+	}
 	out.err = err
 	if len(results) == 0 {
 		return out
 	}
 	idTag, idConf, idOK := s.identifyWindow(ctx, relPath, pieces, core, st)
 	lang, source, conf := st.resolveWith(results, idTag, idConf, idOK)
-	results, cur = s.rerouteWindow(ctx, relPath, pieces, plan, core, results, cur, lang)
+	if fallbackFrom == "" {
+		results, cur = s.rerouteWindow(ctx, relPath, pieces, plan, core, results, cur, lang)
+	}
 	v := s.judgeWindow(results, cur, lang, core)
 	lastGood := cur
 	results, cur, v, ferr := s.fallThroughCandidates(ctx, relPath, pieces, plan, core, lang, results, cur, v)
+	if ferr != nil && s.routeErrorFallback {
+		var fb string
+		results, cur, fb, ferr = s.fallBackToDefault(ctx, relPath, pieces, plan, core, cur, ferr)
+		if ferr == nil {
+			fallbackFrom = fb
+			v = s.judgeWindow(results, cur, lang, core)
+		}
+	}
 	if ferr != nil {
 		// A candidate that fails to decode is a failed window (§8.6.13), not a
 		// refusal: the window is retried on the next run. The state advances on
@@ -232,10 +249,34 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s is in %q, outside %s's declared coverage %v; indexed anyway and recorded covered=false (SPEC §8.2.2)",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 	}
-	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, v.covered)
+	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, v.covered, fallbackFrom)
 	st.recordDecoded(out.covered, out.languages)
 	st.advance(lang, source, conf, cur)
 	return out
+}
+
+// fallBackToDefault is the §8.2.4 route fallback for one window: when
+// media.stt.on_route_error is default and the route that failed is a candidate
+// (not the default profile), the pieces are decoded once on the default profile.
+// It returns the default's results, the default route, the name of the candidate
+// that failed, and the default's own error when that decode failed too. When the
+// fallback does not apply it returns no results and the original error, so the
+// window stays a failed window exactly as before.
+func (s *Service) fallBackToDefault(ctx context.Context, relPath string, pieces []windowPiece, plan windowSchedule, core CoverageRange, failed routedSTT, cause error) ([]pieceResult, routedSTT, string, error) {
+	def := s.defaultRoute()
+	if !s.routeErrorFallback || failed.route == def.route || failed.stt == nil {
+		return nil, failed, "", cause
+	}
+	s.getLogger().Printf("windowed %s: route %q failed on window [%d,%d]ms of %s: %v; decoding it once on the default profile %q (media.stt.on_route_error=default, SPEC §8.2.4)",
+		plan.label, failed.route, core.StartMS, core.EndMS, relPath, cause, def.route)
+	results, err := s.decodePieces(ctx, relPath, def.stt, pieces, plan)
+	if len(results) == 0 {
+		if err == nil {
+			err = fmt.Errorf("default profile %q returned nothing after route %q failed: %w", def.route, failed.route, cause)
+		}
+		return nil, failed, "", err
+	}
+	return results, def, failed.route, nil
 }
 
 // refuse records one window as refused over its core, minus the stretch the
@@ -398,7 +439,7 @@ func routeCovers(route routedSTT, lang string) bool {
 
 // recordWindow turns the decoded pieces of one window into merge input, coverage
 // ranges and one coverage.languages entry per piece, clipped to the core.
-func recordWindow(results []pieceResult, core CoverageRange, lang, source string, conf *float64, route routedSTT, covered bool) ([]TranscriptWindow, []CoverageRange, []model.CoverageLanguage) {
+func recordWindow(results []pieceResult, core CoverageRange, lang, source string, conf *float64, route routedSTT, covered bool, fallbackFrom string) ([]TranscriptWindow, []CoverageRange, []model.CoverageLanguage) {
 	var decoded []TranscriptWindow
 	var ranges []CoverageRange
 	var entries []model.CoverageLanguage
@@ -409,7 +450,7 @@ func recordWindow(results []pieceResult, core CoverageRange, lang, source string
 		if end <= start {
 			continue
 		}
-		entry := model.CoverageLanguage{StartMS: start, EndMS: end, Language: lang, LanguageSource: source, Route: route.route, Covered: covered}
+		entry := model.CoverageLanguage{StartMS: start, EndMS: end, Language: lang, LanguageSource: source, Route: route.route, Covered: covered, FallbackFrom: fallbackFrom}
 		if source == langSourceDetected && conf != nil {
 			c := *conf
 			entry.LanguageConfidence = &c
@@ -600,7 +641,7 @@ func coalesceCoverageLanguages(entries []model.CoverageLanguage, totalMS int) []
 }
 
 func sameLanguageEntry(a, b model.CoverageLanguage) bool {
-	return a.Language == b.Language && a.LanguageSource == b.LanguageSource && a.Route == b.Route && a.Covered == b.Covered
+	return a.Language == b.Language && a.LanguageSource == b.LanguageSource && a.Route == b.Route && a.Covered == b.Covered && a.FallbackFrom == b.FallbackFrom
 }
 
 func minConfidence(a, b *float64) *float64 {
@@ -775,15 +816,20 @@ func allWindowsRefusedReason(coverage *TranscriptCoverage) string {
 }
 
 // languageScopeIdentity renders the §8.2.2 component of the transcript
-// derivation identity (§8.6.7): empty under item scope, so every existing
-// corpus's identity is byte-stable, and
-// "scope=window;routes=<lang>=<profile>|<model>,..." with the routes sorted
-// under window scope. routes maps a language to its route identity as
+// derivation identity (§8.6.7): empty under item scope with no identifier
+// bound, so every existing corpus's identity is byte-stable, and
+// "scope=<scope>;routes=<lang>=<profile>|<model>,..." with the routes sorted
+// under window scope, or under item scope when the §8.2.4 identifier is bound
+// (its "@identifier" key is in routes): the identifier then decides which
+// route decodes each item. routes maps a language to its route identity as
 // languageRouteIdentities renders it. Both the scope and the route table change
 // which model decodes which audio, and therefore the text.
 func languageScopeIdentity(scope string, routes map[string]string) string {
-	if normalizeLanguageScope(scope) != languageScopeWindow {
-		return ""
+	scope = normalizeLanguageScope(scope)
+	if scope != languageScopeWindow {
+		if _, bound := routes[identifierRouteKey]; !bound {
+			return ""
+		}
 	}
 	keys := make([]string, 0, len(routes))
 	for k := range routes {
@@ -797,7 +843,7 @@ func languageScopeIdentity(scope string, routes map[string]string) string {
 		}
 		parts = append(parts, k+"="+strings.TrimSpace(routes[k]))
 	}
-	return "scope=window;routes=" + strings.Join(parts, ",")
+	return "scope=" + scope + ";routes=" + strings.Join(parts, ",")
 }
 
 // languageRouteIdentities resolves media.stt.language_providers to the identity
@@ -854,6 +900,18 @@ func routeIdentity(prof provider.Profile) string {
 func renderLanguageRoutes(routes map[string]string) string {
 	id := languageScopeIdentity(languageScopeWindow, routes)
 	return strings.TrimPrefix(id, "scope=window;routes=")
+}
+
+// itemLanguageRoutesRecord is the language_routes value an item-scoped
+// transcript records when the §8.2.4 identifier is bound: the same rendering as
+// under window scope, so transcriptIdentityFromMeta rebuilds the identity with
+// languageScopeIdentity(item, ...). Empty when no identifier is bound, which
+// leaves an item-scoped meta_json byte-for-byte unchanged.
+func itemLanguageRoutesRecord(routes map[string]string) string {
+	if _, bound := routes[identifierRouteKey]; !bound {
+		return ""
+	}
+	return renderLanguageRoutes(routes)
 }
 
 // parseLanguageRoutes inverts renderLanguageRoutes.

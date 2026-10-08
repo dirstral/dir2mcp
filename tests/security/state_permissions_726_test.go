@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/statefs"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #726: dir2mcp keeps corpus-derived plaintext under StateDir (OCR output,
@@ -47,7 +48,7 @@ func modeOf(t *testing.T, path string) fs.FileMode {
 
 func TestStateDirectoriesAreOwnerOnlyUnderAPermissiveUmask(t *testing.T) {
 	withPermissiveUmask(t)
-	root := filepath.Join(t.TempDir(), "state")
+	root := filepath.Join(testutil.TempDir(t), "state")
 
 	if err := statefs.MkdirAll(filepath.Join(root, "cache", "ocr")); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -61,7 +62,7 @@ func TestStateDirectoriesAreOwnerOnlyUnderAPermissiveUmask(t *testing.T) {
 
 func TestDerivedStateFilesAreOwnerOnlyUnderAPermissiveUmask(t *testing.T) {
 	withPermissiveUmask(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	transcript := filepath.Join(root, "transcript.json")
 	if err := statefs.WriteFile(transcript, []byte(`{"text":"corpus content"}`)); err != nil {
@@ -93,7 +94,7 @@ func TestDerivedStateFilesAreOwnerOnlyUnderAPermissiveUmask(t *testing.T) {
 // no matter what mode the new code passed.
 func TestAnExistingPermissiveStateTreeIsTightened(t *testing.T) {
 	withPermissiveUmask(t)
-	root := filepath.Join(t.TempDir(), "legacy")
+	root := filepath.Join(testutil.TempDir(t), "legacy")
 
 	// A state tree exactly as an older build left it.
 	if err := os.MkdirAll(filepath.Join(root, "cache", "docling"), 0o755); err != nil {
@@ -127,7 +128,7 @@ func TestAnExistingPermissiveStateTreeIsTightened(t *testing.T) {
 // stay 0644 forever even as the content was refreshed.
 func TestRewritingAFilePreviouslyWorldReadableTightensIt(t *testing.T) {
 	withPermissiveUmask(t)
-	path := filepath.Join(t.TempDir(), "summary.txt")
+	path := filepath.Join(testutil.TempDir(t), "summary.txt")
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestRewritingAFilePreviouslyWorldReadableTightensIt(t *testing.T) {
 // who made a cache read-only keeps it read-only.
 func TestHardeningNeverWidens(t *testing.T) {
 	withPermissiveUmask(t)
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "readonly.bin")
 	if err := os.WriteFile(path, []byte("x"), 0o400); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -161,7 +162,7 @@ func TestHardeningNeverWidens(t *testing.T) {
 // protecting.
 func TestHardenTreeSkipsAVanishedPath(t *testing.T) {
 	withPermissiveUmask(t)
-	if err := statefs.HardenTree(filepath.Join(t.TempDir(), "never-created")); err != nil {
+	if err := statefs.HardenTree(filepath.Join(testutil.TempDir(t), "never-created")); err != nil {
 		t.Fatalf("HardenTree on a missing root: %v", err)
 	}
 }
@@ -172,8 +173,8 @@ func TestHardenTreeSkipsAVanishedPath(t *testing.T) {
 // directory entirely.
 func TestHardenTreeDoesNotFollowSymlinks(t *testing.T) {
 	withPermissiveUmask(t)
-	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "outside.txt")
+	root := testutil.TempDir(t)
+	outside := filepath.Join(testutil.TempDir(t), "outside.txt")
 	if err := os.WriteFile(outside, []byte("not ours"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

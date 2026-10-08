@@ -64,8 +64,9 @@ func ReleaseTempDir(t *testing.T, dir string) {
 // into a failure. On Windows it is a plain os.MkdirTemp under the process temp
 // directory with the release from ReleaseTempDir, and not t.TempDir: the
 // framework's own cleanup would still fail the test on the same lock. On other
-// platforms it is t.TempDir. The tests/cli package uses it for every temp dir,
-// so a test cannot pick the wrong one.
+// platforms it is t.TempDir. Every test package that opens a sqlite file (a
+// store, an embed queue, a scan cache) or runs the binary uses it for every
+// temp dir, so a test cannot pick the wrong one.
 func TempDir(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS != "windows" {

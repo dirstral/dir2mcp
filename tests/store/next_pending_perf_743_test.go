@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestNextPendingDrainPerf_743 measures what an ingest actually pays: the cost
@@ -56,7 +57,7 @@ func TestNextPendingDrainPerf_743(t *testing.T) {
 			label = "all"
 		}
 		ctx := context.Background()
-		dbPath := filepath.Join(t.TempDir(), "perf.sqlite")
+		dbPath := filepath.Join(testutil.TempDir(t), "perf.sqlite")
 		st := store.NewSQLiteStore(dbPath)
 		if err := st.Init(ctx); err != nil {
 			t.Fatalf("Init: %v", err)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // newContextStore opens a fresh sqlite store with one document, returning the
@@ -15,7 +16,7 @@ import (
 func newContextStore(t *testing.T) (*store.SQLiteStore, string) {
 	t.Helper()
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

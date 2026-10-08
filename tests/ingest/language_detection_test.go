@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // sttServiceWithDetection mirrors sttService (derivation_identity_test.go) but
@@ -46,12 +47,12 @@ const englishExtracted = "The committee reviewed the annual report in detail and
 // records a best-effort detected language (§8.8 `detected`) with no pin.
 func TestOCRLanguageDetected_WhenNoPin(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "doc.pdf"), "fake-pdf-bytes")
 	st := newRealStore(t)
 	svc := mustNewIngestService(t, config.Config{
 		RootDir:                  root,
-		StateDir:                 t.TempDir(),
+		StateDir:                 testutil.TempDir(t),
 		LanguageDetectionEnabled: true,
 	}, st)
 	svc.SetDocumentExtractor(&fakeExtractor{text: englishExtracted})
@@ -80,10 +81,10 @@ func TestOCRLanguageDetected_WhenNoPin(t *testing.T) {
 // transcript records a best-effort detected language (§8.8 `detected`).
 func TestTranscriptLanguageDetected_WhenNoPin(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	svc := sttServiceWithDetection(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "", &fakeTranscriber{text: englishTranscript})
+	svc := sttServiceWithDetection(t, root, testutil.TempDir(t), st, "whisper", "whisper-large-v3", "", &fakeTranscriber{text: englishTranscript})
 
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
@@ -105,11 +106,11 @@ func TestTranscriptLanguageDetected_WhenNoPin(t *testing.T) {
 // over detection even when the audio is in a different language (§8.8 precedence).
 func TestTranscriptPin_NotOverriddenByDetection(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 	// English audio, but the operator pinned French — the pin must win.
-	svc := sttServiceWithDetection(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "fr", &fakeTranscriber{text: englishTranscript})
+	svc := sttServiceWithDetection(t, root, testutil.TempDir(t), st, "whisper", "whisper-large-v3", "fr", &fakeTranscriber{text: englishTranscript})
 
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
@@ -134,10 +135,10 @@ func TestTranscriptPin_NotOverriddenByDetection(t *testing.T) {
 // identity (no pin), spuriously re-transcribing the whole corpus.
 func TestTranscriptDetectedLanguage_DoesNotForceReDerivation(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	tr1 := &fakeTranscriber{text: englishTranscript}

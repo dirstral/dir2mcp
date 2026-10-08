@@ -9,6 +9,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Coverage expansion for hierarchical retrieval (SPEC §5.2 / §9.7, #329).
@@ -19,7 +20,7 @@ import (
 
 func newSummaryStore(t *testing.T) (*store.SQLiteStore, context.Context) {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "summary.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "summary.sqlite"))
 	ctx := context.Background()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

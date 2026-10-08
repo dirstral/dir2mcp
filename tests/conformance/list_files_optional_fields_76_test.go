@@ -39,6 +39,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // canonicalListFilesSchemaPath is the pinned canonical schema inside the
@@ -202,7 +203,7 @@ type listFilesCorpus76 struct {
 // against a server that ignores include_hidden entirely.
 func seedListFilesCorpus76(t *testing.T, docs []listFilesCorpus76) (*runningServer, config.Config) {
 	t.Helper()
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(tmp, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // requireSymlinkWatch skips on platforms where this scenario is not meaningful.
@@ -31,7 +32,7 @@ func requireSymlinkWatch(t *testing.T) {
 // the store plus the captured ingest log.
 func watchSymlinkFixture(t *testing.T, ctx context.Context, root string, followSymlinks bool) (*store.SQLiteStore, *syncBuffer) {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -69,8 +70,8 @@ func TestWatch_RefusesSymlinkEscapingRoot_717(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := testutil.TempDir(t)
+	outside := testutil.TempDir(t)
 	secret := filepath.Join(outside, "secret.txt")
 	if err := os.WriteFile(secret, []byte("out-of-root secret material"), 0o600); err != nil {
 		t.Fatalf("write secret: %v", err)
@@ -140,8 +141,8 @@ func TestWatch_RefusesRetargetedSymlink_717(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := testutil.TempDir(t)
+	outside := testutil.TempDir(t)
 	secret := filepath.Join(outside, "secret.txt")
 	if err := os.WriteFile(secret, []byte("out-of-root secret material"), 0o600); err != nil {
 		t.Fatalf("write secret: %v", err)
@@ -201,8 +202,8 @@ func TestWatch_SymlinkPolicyUnchangedWhenNotFollowing_717(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := testutil.TempDir(t)
+	outside := testutil.TempDir(t)
 	secret := filepath.Join(outside, "secret.txt")
 	if err := os.WriteFile(secret, []byte("out-of-root secret material"), 0o600); err != nil {
 		t.Fatalf("write secret: %v", err)

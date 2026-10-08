@@ -20,10 +20,11 @@ import (
 	"github.com/dirstral/dir2mcp/internal/elevenlabs"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
 	mustWriteFile(t, filepath.Join(root, "code", "main.go"), []byte("package main\n"))
 	// A REAL (if empty) zip. This fixture stands for "an archive container is
@@ -70,7 +71,7 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 // scan the daemon has performed. Two successive scans over an unchanged corpus
 // must therefore report the same steady-state totals instead of doubling.
 func TestServiceRun_CountersResetPerScan(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
 	mustWriteFile(t, filepath.Join(root, "code", "main.go"), []byte("package main\n"))
 	// A REAL (if empty) zip; see the fixture note in the test above.
@@ -191,7 +192,7 @@ func assertServiceRunDocStatuses(t *testing.T, st *memoryStore) {
 }
 
 func TestServiceRun_UnicodeDashesStillGenerateRepresentations(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "docs", "flow.md"), []byte("x402 – Payment Flow\navoid hard‑coding secrets.\n"))
 
 	cfg := config.Default()
@@ -220,7 +221,7 @@ func TestServiceRun_UnicodeDashesStillGenerateRepresentations(t *testing.T) {
 // SetOnDocumentsDeleted receives a single batch of tombstoned documents, and
 // does not report documents that still exist on disk.
 func TestServiceRun_OnDocumentsDeletedHookFired(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "alive.txt"), []byte("still here"))
 
 	st := newMemoryStore()
@@ -267,7 +268,7 @@ func TestServiceRun_OnDocumentsDeletedHookFired(t *testing.T) {
 }
 
 func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapper(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	st := newMemoryStore()
 	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
 	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
@@ -297,7 +298,7 @@ func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapper(t *testing.T) {
 }
 
 func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapperBoundsConcurrency(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	st := newMemoryStore()
 	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
 	st.docs["gone2.txt"] = model.Document{RelPath: "gone2.txt", DocType: "text", Status: "ok"}
@@ -373,7 +374,7 @@ func TestServiceRun_SetOnDocumentDeletedCompatibilityWrapperBoundsConcurrency(t 
 }
 
 func TestServiceRun_OnDocumentDeletedPanicRecovered(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	st := newMemoryStore()
 	st.docs["gone1.txt"] = model.Document{RelPath: "gone1.txt", DocType: "text", Status: "ok"}
@@ -427,7 +428,7 @@ func TestServiceRun_OnDocumentDeletedPanicRecovered(t *testing.T) {
 }
 
 func TestServiceRun_DoesNotExcludeAWSSecretsManagerProse(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "security.md"), []byte("Credentials are stored in AWS Secrets Manager.\n"))
 
 	cfg := config.Default()
@@ -447,7 +448,7 @@ func TestServiceRun_DoesNotExcludeAWSSecretsManagerProse(t *testing.T) {
 }
 
 func TestServiceRun_StillExcludesAWSSecretAssignments(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "secrets.md"), []byte("AWS Secret Access Key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"))
 
 	cfg := config.Default()
@@ -471,7 +472,7 @@ func TestServiceRun_StillExcludesAWSSecretAssignments(t *testing.T) {
 // document is updated to status=error rather than being left as status=ok
 // with zero representations.
 func TestServiceRun_RepGenerationFailureMarksDocAsError(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "fail.txt"), []byte("some valid text content\n"))
 
 	cfg := config.Default()
@@ -503,7 +504,7 @@ func TestServiceRun_RepGenerationFailureMarksDocAsError(t *testing.T) {
 // fails must count solely as an error, never as both indexed and error, so the
 // indexed+skipped+errors <= scanned invariant holds.
 func TestServiceRun_RepGenerationFailureCountsErrorNotIndexed(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "fail.txt"), []byte("some valid text content\n"))
 
 	cfg := config.Default()
@@ -537,7 +538,7 @@ func TestServiceRun_RepGenerationFailureCountsErrorNotIndexed(t *testing.T) {
 // previously stuck with status=error (zero representations) is re-processed on
 // the next incremental scan even when its content hash has not changed.
 func TestServiceRun_ErrorStatusDocIsRetriedOnNextRun(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	content := []byte("some valid text content\n")
 	mustWriteFile(t, filepath.Join(root, "retry.txt"), content)
 
@@ -571,7 +572,7 @@ func TestServiceRun_ErrorStatusDocIsRetriedOnNextRun(t *testing.T) {
 }
 
 func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
 
 	cfg := config.Default()
@@ -585,7 +586,7 @@ func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
 }
 
 func TestServiceRun_ContextCancelled(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("plain text"))
 
 	cfg := config.Default()
@@ -605,7 +606,7 @@ func TestServiceRun_ContextCancelled(t *testing.T) {
 // guards against the previous bug where the in-memory doc lacked an ID and
 // orphaned rows were written.
 func TestProcessDocument_DocIDSetBeforeRepGeneration(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "foo.txt")
 	if err := os.WriteFile(path, []byte("hello world"), 0o644); err != nil {
 		t.Fatalf("write test file: %v", err)
@@ -632,7 +633,7 @@ func TestProcessDocument_DocIDSetBeforeRepGeneration(t *testing.T) {
 }
 
 func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	audioPath := filepath.Join(root, "audio", "sample.mp3")
 	mustWriteFile(t, audioPath, []byte("fake-audio-bytes"))
 
@@ -678,7 +679,7 @@ func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
 // and keeps the pre-0.62 coverage this file had: media.transcript_chunk_sec of 0
 // indexes one chunk per transcript segment, with no merged-cue record.
 func TestServiceRun_TranscriptChunkWindowDisabled(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "audio", "sample.mp3"), []byte("fake-audio-bytes"))
 
 	cfg := config.Default()
@@ -716,7 +717,7 @@ func (e errTranscriber) Transcribe(context.Context, string, []byte) (string, err
 }
 
 func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	audioPath := filepath.Join(root, "audio", "broken.mp3")
 	mustWriteFile(t, audioPath, []byte("fake-audio-bytes"))
 
@@ -764,7 +765,7 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 // document, the dropped renditions never produce documents/chunks, and unrelated
 // media is untouched.
 func TestServiceRun_MediaVariantGroupingDedupsThroughScan(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "clip.1080p.mp4"), []byte("hi"))
 	mustWriteFile(t, filepath.Join(root, "clip.720p.mp4"), []byte("medium"))
 	mustWriteFile(t, filepath.Join(root, "clip.480p.mp4"), []byte("the-largest-bytes"))
@@ -802,7 +803,7 @@ func TestServiceRun_MediaVariantGroupingDedupsThroughScan(t *testing.T) {
 // default (group=false) leaves the scan path unchanged: every rendition is
 // ingested.
 func TestServiceRun_MediaVariantGroupingDisabled_IngestsAllRenditions(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "clip.1080p.mp4"), []byte("hi"))
 	mustWriteFile(t, filepath.Join(root, "clip.720p.mp4"), []byte("medium"))
 

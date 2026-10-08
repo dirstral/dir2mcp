@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // fakeMediaStore is a minimal model.Store that also reports chunk-modality
@@ -43,7 +44,7 @@ func (f *fakeMediaStore) ChunkModalityPresence(_ context.Context, _ string) (boo
 func TestOpenFile_MediaOnly_ReturnsMediaNoText(t *testing.T) {
 	for _, name := range []string{"doc.pdf", "pic.png", "clip.mp4", "voice.aac"} {
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
+			root := testutil.TempDir(t)
 			if err := os.WriteFile(filepath.Join(root, name), []byte("rawbinary"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +64,7 @@ func TestOpenFile_MediaOnly_ReturnsMediaNoText(t *testing.T) {
 // document that also has a text path (augment) is NOT media-only — with no OCR
 // cache yet it surfaces the retryable OCR_NOT_READY, not MEDIA_NO_TEXT.
 func TestOpenFile_MediaWithText_IsNotMediaNoText(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), []byte("%PDF-1.4 binary"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestOpenFile_MediaWithText_IsNotMediaNoText(t *testing.T) {
 // aligned with the media gate: an image that has OCR text (augment) serves that
 // text rather than raw image bytes (SPEC §15.4 — open_file returns text only).
 func TestOpenFile_ImageWithOCR_ServesText(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	imgBytes := []byte("\x89PNG\r\n\x1a\nrawimage")
 	if err := os.WriteFile(filepath.Join(root, "diagram.png"), imgBytes, 0o644); err != nil {
@@ -119,7 +120,7 @@ func TestOpenFile_ImageWithOCR_ServesText(t *testing.T) {
 // gated to media extensions: a markdown file is served normally even with a
 // store that would report media presence.
 func TestOpenFile_TextFile_UnaffectedByMediaGuard(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "# Title\n\nhello"
 	if err := os.WriteFile(filepath.Join(root, "readme.md"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)

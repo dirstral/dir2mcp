@@ -396,21 +396,32 @@ func sttPayloadCapBytes(stt model.Transcriber) int {
 // The transcript cache key is deliberately unchanged: windowing is DERIVED from
 // the media and the provider, not configured, and both paths return the same
 // `[mm:ss] text` contract, so a cached transcript stays valid either way.
-func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath string, content []byte) (string, []model.TimedWord, *TranscriptCoverage, error) {
+//
+// stt is the transcriber that decodes: the configured default, or the route the
+// §8.2.4 identifier selected for the item.
+func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath string, content []byte, stt model.Transcriber) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if len(content) == 0 {
-		return withoutCoverage(s.transcribeWith(ctx, s.transcriber, relPath, content))
+		return withoutCoverage(s.transcribeWith(ctx, stt, relPath, content))
 	}
-	capBytes := sttPayloadCapBytes(s.transcriber)
 	tmpPath, cleanup, err := stageMediaTemp(content, filepath.Ext(relPath))
 	if err != nil {
 		// Staging exists only to SLICE the audio; failing it must not lose a
 		// document that the single request would have transcribed.
 		s.getLogger().Printf("windowed transcription %s: stage failed (%v); sending one request", relPath, err)
-		return withoutCoverage(s.transcribeWith(ctx, s.transcriber, relPath, content))
+		return withoutCoverage(s.transcribeWith(ctx, stt, relPath, content))
 	}
 	defer cleanup()
-
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
+	return s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, stt)
+}
+
+// decodeStagedTranscript is the half of transcribeStructuredWindowed after the
+// media is staged and its duration probed: one request when the recording fits,
+// overlapping windows otherwise. It is split out so the §8.2.4 item route can
+// stage the media once, probe it for the identifier, and then decode it on the
+// selected route (and once more on the default profile when that route fails).
+func (s *Service) decodeStagedTranscript(ctx context.Context, relPath string, content []byte, tmpPath string, totalMS int, stt model.Transcriber) (string, []model.TimedWord, *TranscriptCoverage, error) {
+	capBytes := sttPayloadCapBytes(stt)
 	windowMS := STTWindowMS(totalMS, len(content), capBytes)
 	if windowMS <= 0 {
 		if capBytes > 0 && len(content) > capBytes {
@@ -433,9 +444,9 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 			s.getLogger().Printf("windowed transcription %s: media.stt.language_scope=window but the duration probe failed; decoding as one unscoped request", relPath)
 		}
 		return withoutCoverage(
-			s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.transcriber, totalMS), relPath, content))
+			s.transcribeWith(ctx, model.TranscriberForAudioDuration(stt, totalMS), relPath, content))
 	}
-	text, words, coverage, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, s.transcriber, totalMS, windowMS, "transcription")
+	text, words, coverage, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, stt, totalMS, windowMS, "transcription")
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		// ffmpeg is what SLICES the audio. When it is missing, or cannot cut this
@@ -445,7 +456,7 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 		// payload reports its own cap honestly.
 		s.getLogger().Printf("windowed transcription %s: the audio cannot be sliced (%v); sending one request", relPath, err)
 		return withoutCoverage(
-			s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.transcriber, totalMS), relPath, content))
+			s.transcribeWith(ctx, model.TranscriberForAudioDuration(stt, totalMS), relPath, content))
 	}
 	return text, words, coverage, err
 }

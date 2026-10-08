@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Cross-line translation context tests (issue #573): the chat translate engine
@@ -166,7 +167,7 @@ func countNumberedTargets(prompt string) int {
 // with the original [mm:ss] markers intact and in order.
 func TestTranscriptTranslation_WindowedPreservesOneToOne(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	source := "[00:00] one\n[00:03] two\n[00:06] three\n[00:09] four\n[00:12] five"
@@ -198,7 +199,7 @@ func TestTranscriptTranslation_WindowedPreservesOneToOne(t *testing.T) {
 // "do NOT translate or return"), not as a target.
 func TestTranscriptTranslation_WindowedProvidesCrossLineContext(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{
 		StateDir:                   stateDir,
@@ -266,7 +267,7 @@ func TestTranscriptTranslation_WindowedProvidesCrossLineContext(t *testing.T) {
 // has exactly one output cue per input cue with markers intact — never a desync.
 func TestTranscriptTranslation_MalformedBatchFallsBackTo1to1(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	source := "[00:00] uno\n[00:03] dos\n[00:06] tres"

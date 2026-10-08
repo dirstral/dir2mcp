@@ -73,6 +73,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		providerCheck(ctx, cfg, "embed", provider.CapEmbed, true, deep),
 		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
 		egressCheck(cfg),
+		sttRoutesCheck(cfg),
 		extractorCheck(cfg),
 		corpusRecordCheck(ctx, a, cfg),
 		extractionCoverageCheck(ctx, a, cfg),
@@ -971,6 +972,117 @@ func resolvedTextEmbedModel(cfg config.Config) string {
 // base_url, the effective host is the provider kind's built-in default (e.g.
 // kind: mistral -> api.mistral.ai), so a happy-path cloud setup is correctly
 // reported as egress even though its base_url is blank.
+// sttRoutesCheck reports the resolved STT route table (SPEC §8.2.4): the
+// language identifier when one is bound, each language route's candidates in
+// order with the model each binds and its eligibility under
+// media.stt.require_validation, and the on_route_error policy. A language whose
+// candidates are all ineligible is a warning naming the default profile that
+// decodes it instead. With nothing configured the check reports that
+// positively, because an omitted line and a clean configuration read the same
+// (§7.7). The informational stt_validation fields are surfaced unchanged.
+func sttRoutesCheck(cfg config.Config) doctorCheck {
+	const name = "stt_routes"
+	identifier := strings.TrimSpace(cfg.MediaSTTLanguageIdentifier)
+	if identifier == "" && len(cfg.MediaSTTLanguageProviders) == 0 {
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no language routes configured: the default STT profile decodes every language"}
+	}
+	byName := cfg.Providers().ByName()
+	defName, _, hasDefault := ingest.ResolveSTTProviderModel(cfg)
+	if !hasDefault {
+		defName = "(none)"
+	}
+	var parts []string
+	if identifier != "" {
+		scope := strings.ToLower(strings.TrimSpace(cfg.MediaSTTLanguageScope))
+		if scope == "" {
+			scope = "item"
+		}
+		parts = append(parts, fmt.Sprintf("identifier %s (%s) under %s scope, probe %ds",
+			identifier, sttModelLabel(byName[identifier]), scope, cfg.MediaSTTLanguageProbeSec))
+	}
+	langs := make([]string, 0, len(cfg.MediaSTTLanguageProviders))
+	for lang := range cfg.MediaSTTLanguageProviders {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	var uneligible []string
+	for _, lang := range langs {
+		line, eligible := sttRouteLine(cfg, byName, lang)
+		if eligible == 0 {
+			uneligible = append(uneligible, lang)
+		}
+		parts = append(parts, line)
+	}
+	policy := strings.TrimSpace(cfg.MediaSTTOnRouteError)
+	if policy == "" {
+		policy = "fail"
+	}
+	parts = append(parts, "on_route_error="+policy)
+	detail := strings.Join(parts, "; ")
+	if len(uneligible) > 0 {
+		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
+			"%s. No eligible candidate for %s under media.stt.require_validation: the default profile %s decodes them; add an stt_validation record or route them explicitly",
+			detail, strings.Join(uneligible, ", "), defName)}
+	}
+	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: detail}
+}
+
+// sttRouteLine renders one language's candidates in order, each with the model
+// it binds, its validation records for the language, and its eligibility under
+// media.stt.require_validation, and counts the eligible ones.
+func sttRouteLine(cfg config.Config, byName map[string]provider.Profile, lang string) (string, int) {
+	cands := cfg.MediaSTTLanguageCandidates[lang]
+	if len(cands) == 0 {
+		cands = []string{cfg.MediaSTTLanguageProviders[lang]}
+	}
+	eligible := 0
+	descs := make([]string, 0, len(cands))
+	for _, cand := range cands {
+		prof := byName[cand]
+		desc := cand + " (" + sttModelLabel(prof) + ")"
+		if rec := sttValidationLabel(prof, lang); rec != "" {
+			desc += " validated " + rec
+		}
+		if cfg.MediaSTTRequireValidation && !prof.ValidatedFor(lang) {
+			desc += " INELIGIBLE: no stt_validation record for " + lang
+		} else {
+			eligible++
+		}
+		descs = append(descs, desc)
+	}
+	return lang + " -> " + strings.Join(descs, " > "), eligible
+}
+
+// sttModelLabel names a profile's STT model for the doctor line, or says that
+// the endpoint's own default decodes when the profile binds none.
+func sttModelLabel(prof provider.Profile) string {
+	if m := strings.TrimSpace(prof.STTModel); m != "" {
+		return m
+	}
+	return "endpoint default model"
+}
+
+// sttValidationLabel renders a profile's stt_validation records for one
+// language exactly as the operator wrote them (SPEC §8.2.3: method and score
+// are informational and surfaced unchanged), joined when there are several.
+func sttValidationLabel(prof provider.Profile, lang string) string {
+	key := provider.PrimarySubtag(lang)
+	var out []string
+	for _, v := range prof.STTValidation {
+		if provider.PrimarySubtag(v.Language) != key {
+			continue
+		}
+		fields := make([]string, 0, 4)
+		for _, f := range []string{v.Method, v.Sample, v.Score, v.Date} {
+			if f = strings.TrimSpace(f); f != "" {
+				fields = append(fields, f)
+			}
+		}
+		out = append(out, "["+strings.Join(fields, ", ")+"]")
+	}
+	return strings.Join(out, " ")
+}
+
 func egressCheck(cfg config.Config) doctorCheck {
 	const name = "egress"
 	res := cfg.Providers()

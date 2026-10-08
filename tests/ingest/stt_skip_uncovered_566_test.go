@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // skipUncoveredService builds a media-ingesting service whose STT identity,
@@ -22,7 +23,7 @@ import (
 // "did not transcribe" signal for the skip path.
 func skipUncoveredService(t *testing.T, root string, st *store.SQLiteStore, pinLang string, coverage []string, action string) (*ingest.Service, *appstate.IndexingState, *fakeTranscriber) {
 	t.Helper()
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}
 	svc := mustNewIngestService(t, cfg, st)
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
 	svc.SetIndexingState(state)
@@ -45,7 +46,7 @@ func skipUncoveredService(t *testing.T, root string, st *store.SQLiteStore, pinL
 func TestSTTSkipUncovered_SkipRecordsDurableSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -89,7 +90,7 @@ func TestSTTSkipUncovered_SkipRecordsDurableSkip(t *testing.T) {
 func TestSTTSkipUncovered_WarnTranscribesAnyway(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -116,7 +117,7 @@ func TestSTTSkipUncovered_WarnTranscribesAnyway(t *testing.T) {
 func TestSTTSkipUncovered_CoveredLanguageTranscribesUnderSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -143,7 +144,7 @@ func TestSTTSkipUncovered_CoveredLanguageTranscribesUnderSkip(t *testing.T) {
 func TestSTTSkipUncovered_UnknownCoverageTranscribesUnderSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 

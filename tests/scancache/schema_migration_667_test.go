@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/scancache"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 
 	_ "modernc.org/sqlite" // same pure-Go driver the cache itself uses.
 )
@@ -20,7 +21,7 @@ import (
 // directory), but an operator upgrading with a warm cache would carry one dead row
 // per directory forever. The cache holds no authoritative state, so it is dropped.
 func TestSQLiteCache667_LegacySecondsTableIsDropped(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "scan.sqlite")
+	path := filepath.Join(testutil.TempDir(t), "scan.sqlite")
 	seedLegacyCache667(t, path)
 
 	// Open through the cache: the legacy row must not be served.

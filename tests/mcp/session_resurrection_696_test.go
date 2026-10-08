@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #696: session state transitions were ordered only in memory. Every mutation
@@ -44,7 +45,7 @@ import (
 // exists both before and after the fix, so this test compiles and runs against
 // the unfixed source.
 func TestTerminatedSessionIsNotResurrectedByARacingTouch_696(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(dir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -132,7 +133,7 @@ func TestTerminatedSessionIsNotResurrectedByARacingTouch_696(t *testing.T) {
 // load and a restart-based assertion would pass vacuously against broken code.
 // The durable defect is the row surviving the expiry at all.
 func TestExpiredSessionIsNotResurrectedByARacingTouch_696(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(dir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -207,7 +208,7 @@ func TestExpiredSessionIsNotResurrectedByARacingTouch_696(t *testing.T) {
 // stream handling, unrelated to #696, and it stalls this test on unfixed and
 // fixed code alike.
 func TestConcurrentSessionTouchesStayConsistent_696(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	st := store.NewSQLiteStore(filepath.Join(dir, "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)

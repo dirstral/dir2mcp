@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // fakeTranslator is a deterministic model.Generator stand-in for transcript
@@ -83,7 +84,7 @@ func (f *fakeTranslator) callCount() int {
 // produced — behaviour is identical to before the feature existed.
 func TestTranscriptTranslation_Disabled_NoExtraReps(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
@@ -108,7 +109,7 @@ func TestTranscriptTranslation_Disabled_NoExtraReps(t *testing.T) {
 // derivation metadata.
 func TestTranscriptTranslation_ProducesPerLanguageRep(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one\n[00:05] chapter two"})
@@ -170,7 +171,7 @@ func TestTranscriptTranslation_ProducesPerLanguageRep(t *testing.T) {
 // the cached translation instead of re-calling the chat provider.
 func TestTranscriptTranslation_CacheReused(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	content := []byte("audio-bytes")
 
 	run := func(tr *fakeTranslator) {
@@ -207,13 +208,13 @@ func TestTranscriptTranslation_CacheReused(t *testing.T) {
 // transcript when persisted to a real sqlite store.
 func TestTranscriptTranslation_RealStoreSearchable(t *testing.T) {
 	t.Parallel()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, st)
+	svc := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello\n[00:02] world"})
 	svc.SetTranscriptLanguage("de")
 	svc.SetTranslator(&fakeTranslator{}, "mistral", "m", []string{"en"})
@@ -264,7 +265,7 @@ func (failingTranslator) Generate(_ context.Context, _ string) (string, error) {
 // GenerateTranscriptRepresentation returns nil with the single source rep intact.
 func TestTranscriptTranslation_FailureIsNonFatal(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
@@ -299,7 +300,7 @@ func (degenerateTranslator) Generate(_ context.Context, _ string) (string, error
 // while the clean source transcript's chunks remain pending.
 func TestTranscriptTranslation_RoutesThroughQualityGate(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] a clean source line\n[00:02] another clean line"})
@@ -433,7 +434,7 @@ func TestTranscriptTranslation_UsesTightPerCallCap(t *testing.T) {
 	t.Run("windowed batch scales the cap", func(t *testing.T) {
 		t.Parallel()
 		st := &fakeIngestStore{}
-		svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, st)
+		svc := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, st)
 		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro\n[00:02] chapter one"})
 		tr := &boundedFakeTranslator{}
 		svc.SetTranscriptLanguage("de")
@@ -458,7 +459,7 @@ func TestTranscriptTranslation_UsesTightPerCallCap(t *testing.T) {
 		t.Parallel()
 		st := &fakeIngestStore{}
 		svc := mustNewIngestService(t, config.Config{
-			StateDir:                   t.TempDir(),
+			StateDir:                   testutil.TempDir(t),
 			MediaTranslateWindowLines:  1,
 			MediaTranslateContextLines: 0,
 		}, st)

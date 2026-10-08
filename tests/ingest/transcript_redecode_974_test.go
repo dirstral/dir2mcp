@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // A partial transcript is otherwise permanent (#974).
@@ -73,7 +74,7 @@ func processMedia(t *testing.T, svc *ingest.Service, relPath string) {
 }
 
 func TestRedecode_AnOrdinaryRunStillTrustsTheCache(t *testing.T) {
-	root, stateDir := t.TempDir(), t.TempDir()
+	root, stateDir := testutil.TempDir(t), testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "a.mp3"), "fake-audio")
 	tr := &countingTranscriber{}
 	st := newRealStore(t)
@@ -93,7 +94,7 @@ func TestRedecode_AnOrdinaryRunStillTrustsTheCache(t *testing.T) {
 }
 
 func TestRedecode_AMarkedPathReachesTheProviderAndRewritesTheCache(t *testing.T) {
-	root, stateDir := t.TempDir(), t.TempDir()
+	root, stateDir := testutil.TempDir(t), testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "a.mp3"), "fake-audio")
 	tr := &countingTranscriber{}
 	st := newRealStore(t)
@@ -128,7 +129,7 @@ func TestRedecode_AMarkedPathReachesTheProviderAndRewritesTheCache(t *testing.T)
 }
 
 func TestRedecode_OnlyTheMarkedPathsAreDecodedAgain(t *testing.T) {
-	root, stateDir := t.TempDir(), t.TempDir()
+	root, stateDir := testutil.TempDir(t), testutil.TempDir(t)
 	// Different bytes, so the two recordings land on different cache keys.
 	writeFile(t, filepath.Join(root, "partial.mp3"), "fake-audio-one")
 	writeFile(t, filepath.Join(root, "fine.mp3"), "fake-audio-two")
@@ -152,7 +153,7 @@ func TestRedecode_OnlyTheMarkedPathsAreDecodedAgain(t *testing.T) {
 
 func TestRedecode_AnEmptySetRestoresOrdinaryCaching(t *testing.T) {
 	// A Service must not be left permanently bypassing its own cache.
-	root, stateDir := t.TempDir(), t.TempDir()
+	root, stateDir := testutil.TempDir(t), testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "a.mp3"), "fake-audio")
 	tr := &countingTranscriber{}
 
@@ -207,7 +208,7 @@ func TestRedecode_ReachesAnAdditionalAudioTrack(t *testing.T) {
 	// lookup has to use the ORIGINAL path and not the synthetic one. Matching on
 	// the synthetic path would miss every additional track, and on a multilingual
 	// archive that is the original on track 0 and the interpreted feed on track 1.
-	root, stateDir := t.TempDir(), t.TempDir()
+	root, stateDir := testutil.TempDir(t), testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "dual.m4a"), "fake-audio-bytes")
 	tr := &countingTranscriber{}
 

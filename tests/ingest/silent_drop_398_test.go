@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // noRepStore implements model.Store but deliberately NOT
@@ -51,7 +52,7 @@ func TestNewService_RepresentationStoreSeam_WarnsLoudly(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	cfg := config.Default()
-	cfg.RootDir = t.TempDir()
+	cfg.RootDir = testutil.TempDir(t)
 	// Keep transcriber construction credential-free so the test isolates the
 	// RepresentationStore seam, not STT provider setup.
 	cfg.STTProvider = "off"
@@ -147,11 +148,11 @@ func TestArchiveIngest_UnsupportedFormatMarkedError(t *testing.T) {
 func runArchiveIngestSnapshot(t *testing.T, archiveName string, archiveData []byte) appstate.IndexingSnapshot {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, archiveName), archiveData, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
 	}
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestExtractableExtensionCounts drives the store query that feeds the doctor
@@ -15,7 +16,7 @@ import (
 // buckets, keyed by lowercased extension, and ignore code/text/deleted/errored
 // rows.
 func TestExtractableExtensionCounts(t *testing.T) {
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	ctx := context.Background()
 	if err := st.Init(ctx); err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // These tests lock the END-TO-END wiring for issue #488. #517 gave the retriever
@@ -27,7 +28,7 @@ import (
 // is sourced straight from ingest's ActiveOCRIdentity getter (the daemon path's
 // wiring), and MISSED with the pre-wiring bytes-only key.
 func TestOpenFile_DerivationIdentityWiring_OCR(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	pdfBytes := []byte("%PDF-1.4 wiring body")
@@ -92,7 +93,7 @@ func TestOpenFile_DerivationIdentityWiring_OCR(t *testing.T) {
 // a transcript ingest wrote at its STT identity-folded key is FOUND by open_file
 // when the identity is sourced from ingest's ActiveTranscriptIdentity getter.
 func TestOpenFile_DerivationIdentityWiring_Transcript(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 
 	audioBytes := []byte("fake-audio-bytes")
@@ -149,7 +150,7 @@ func TestOpenFile_DerivationIdentityWiring_Transcript(t *testing.T) {
 // The ask CLI has no ingest Service, so it relies on this helper being a faithful
 // stand-in — a drift here would silently reintroduce the #488 miss on `ask`.
 func TestActiveDerivationIdentities_MatchesServiceGetters(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	stateDir := filepath.Join(root, ".dir2mcp")
 	cfg := config.Config{RootDir: root, StateDir: stateDir, STTProvider: "off"}
 

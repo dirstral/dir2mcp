@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Ingest secret-scanning coverage (dir2mcp #681).
@@ -96,8 +97,8 @@ func assertWithheld681(t *testing.T, st *store.SQLiteStore, relPath string) {
 // it.
 func TestSecretScan_PastTheHeadSample_IsWithheld(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	// 200 KiB of prose, then the key: more than three times the old sample.
 	writeFile(t, filepath.Join(root, "runbook.md"), filler681(200*1024)+"\naws_key = "+secret681+"\n")
 	st := newRealStore(t)
@@ -114,8 +115,8 @@ func TestSecretScan_PastTheHeadSample_IsWithheld(t *testing.T) {
 // NOT change: a credential in the first 64 KiB was already excluded and still is.
 func TestSecretScan_WithinTheHeadSample_StaysWithheld(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "creds.txt"), "aws_key = "+secret681+"\n"+filler681(4*1024))
 	st := newRealStore(t)
 
@@ -132,8 +133,8 @@ func TestSecretScan_WithinTheHeadSample_StaysWithheld(t *testing.T) {
 // ordinary text.
 func TestSecretScan_CleanLargeFile_StaysIndexed(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "handbook.md"), filler681(300*1024))
 	st := newRealStore(t)
 
@@ -160,8 +161,8 @@ func TestSecretScan_CleanLargeFile_StaysIndexed(t *testing.T) {
 // searchable text either way.
 func TestSecretScan_BinaryPayloadInATextDocType_IsNotIndexed(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	// A NUL byte in the head is the #398 binary signal; the credential sits far
 	// past the head sample.
 	writeFile(t, filepath.Join(root, "export.parquet"),
@@ -189,8 +190,8 @@ func TestSecretScan_BinaryPayloadInATextDocType_IsNotIndexed(t *testing.T) {
 // `main` nothing is scanned and the extracted text is indexed.
 func TestSecretScan_OnlyInExtractedText_WithholdsTheDocument(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "contract.pdf"), "%PDF-1.7 opaque page image bytes")
 	st := newRealStore(t)
 
@@ -207,8 +208,8 @@ func TestSecretScan_OnlyInExtractedText_WithholdsTheDocument(t *testing.T) {
 // credential is audio in the source and text only after transcription.
 func TestSecretScan_OnlyInTranscript_WithholdsTheDocument(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "standup.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -229,8 +230,8 @@ func TestSecretScan_OnlyInTranscript_WithholdsTheDocument(t *testing.T) {
 // credential stays searchable and the document reports as healthy.
 func TestSecretScan_OnlyInTranslation_RetiresTheCleanTranscript(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "briefing.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -284,8 +285,8 @@ func countNumberedSourceLines681(prompt string) int {
 // that has to be withheld.
 func TestSecretScan_OnlyInSubtitleSidecar_WithholdsTheMedia(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nthe key is aws_key = "+secret681+"\n")
@@ -310,8 +311,8 @@ func TestSecretScan_OnlyInSubtitleSidecar_WithholdsTheMedia(t *testing.T) {
 // document keeps its representations.
 func TestSecretScan_AnnotationIsRefusedWithoutTouchingTheDocument(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "notes.md"), "a clean note about the deployment\n")
 	st := newRealStore(t)
 	ctx := context.Background()
@@ -351,8 +352,8 @@ func TestSecretScan_AnnotationIsRefusedWithoutTouchingTheDocument(t *testing.T) 
 // by design, not by failure.
 func TestSecretScan_WithheldVideoIsNotAlsoBrandedAnError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "briefing.mp4"), "fake-video")
 	// The sidecar is the video's only text source, and it carries the credential.
 	// It also keeps the fixture off ffmpeg, which a synthetic video cannot satisfy.
@@ -393,8 +394,8 @@ func TestSecretScan_WithheldVideoIsNotAlsoBrandedAnError(t *testing.T) {
 // representations are gone.
 func TestSecretScan_DerivedVerdictSurvivesTheNextScan(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "standup.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -415,8 +416,8 @@ func TestSecretScan_DerivedVerdictSurvivesTheNextScan(t *testing.T) {
 // re-derived and decided again. A withheld document must not be withheld forever.
 func TestSecretScan_RemovingTheSecretLetsTheDocumentBackIn(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	path := filepath.Join(root, "runbook.md")
 	writeFile(t, path, filler681(100*1024)+"\naws_key = "+secret681+"\n")
 	st := newRealStore(t)
@@ -448,8 +449,8 @@ func TestSecretScan_RemovingTheSecretLetsTheDocumentBackIn(t *testing.T) {
 // indexed, so scanned = indexed + skipped + errors still holds.
 func TestSecretScan_DerivedExclusionCountsAsSkipNotIndexed(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "standup.mp3"), "fake-audio")
 	st := newRealStore(t)
 
@@ -474,8 +475,8 @@ func TestSecretScan_DerivedExclusionCountsAsSkipNotIndexed(t *testing.T) {
 // reason so the honest-coverage aggregate names the right cause.
 func TestSecretScan_DerivedExclusionEmitsOneFileSkip(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "standup.mp3"), "fake-audio")
 	st := newRealStore(t)
 

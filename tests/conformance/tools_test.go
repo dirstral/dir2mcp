@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"testing"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestTools_ListContainsExpectedTools verifies that tools/list returns a list
@@ -69,7 +71,7 @@ func TestTools_CallListFilesSuccess(t *testing.T) {
 	srv := newServer(t, cfg)
 	defer srv.Close()
 
-	corpusDir := t.TempDir()
+	corpusDir := testutil.TempDir(t)
 	if err := os.WriteFile(corpusDir+"/hello.txt", []byte("hello world"), 0o644); err != nil {
 		t.Fatalf("write test file: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestMultiTrackAudio_SurfacedNotSilent is the honest-coverage guard for issue
@@ -25,11 +26,11 @@ import (
 // CI stays hermetic.
 func TestMultiTrackAudio_SurfacedNotSilent(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "proxy.mp4"), "fake-multitrack-video-bytes")
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
 	tr := &capturingTranscriber{text: "[00:00] hello\n[00:03] world"}
 	svc.SetTranscriber(tr)
 	svc.SetSTTIdentity("whisper", "whisper-large-v3")
@@ -95,11 +96,11 @@ func TestMultiTrackAudio_SurfacedNotSilent(t *testing.T) {
 // early return).
 func TestMultiTrackAudio_EmptyFirstTrackStillWarns(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "me_first.mp4"), "fake-multitrack-video-bytes")
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
 	svc.SetTranscriber(&capturingTranscriber{text: ""}) // M&E track 0 → empty transcript
 	svc.SetSTTIdentity("whisper", "whisper-large-v3")
 
@@ -132,11 +133,11 @@ func TestMultiTrackAudio_EmptyFirstTrackStillWarns(t *testing.T) {
 // no multi-track diagnostic, so #567's warning never becomes noise.
 func TestSingleTrackAudio_NoMultiTrackWarning(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "single.mp4"), "fake-single-track-video-bytes")
 	st := newRealStore(t)
 
-	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
 	tr := &capturingTranscriber{text: "[00:00] only one track here"}
 	svc.SetTranscriber(tr)
 	svc.SetSTTIdentity("whisper", "whisper-large-v3")

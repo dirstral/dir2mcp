@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // loadStatsModelsConfig writes a .dir2mcp.yaml, loads it, and returns a config
@@ -16,7 +17,7 @@ import (
 // config.LoadFile, so a models-provenance test has to go through a file.
 func loadStatsModelsConfig(t *testing.T, body string) config.Config {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	path := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

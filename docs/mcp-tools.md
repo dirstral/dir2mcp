@@ -33,3 +33,21 @@ client can show all of it:
 span RECORDS or DESCRIBES. `sources` says WHICH component produced it, which
 matters when two recognizers both observed and disagree. Both are optional and
 omitted when absent, never served as `null` or `[]`.
+
+### Inline citation tags in an answer
+
+An `ask` answer cites inline with the bracketed tag of the context block the
+statement comes from, for example `[notes.md:L25-L33]` or
+`[interview.mp4@t=02:13-02:41]`. The server checks every tag against the blocks
+the model was shown (SPEC §9.4.1):
+
+- A tag that names a document the model was not shown is removed.
+- A tag that names a shown document with a span outside the shown span is
+  rewritten to the part of the shown span it overlaps, or to the whole shown span
+  when it overlaps none of it. A span inside the shown span stays as the model
+  wrote it.
+- A tag with no span (`[notes.md]`) stays.
+
+An inline tag therefore names only a span that was in the model's context. The
+`citations` array is not affected by this; it always carries the real span of
+each shown block.

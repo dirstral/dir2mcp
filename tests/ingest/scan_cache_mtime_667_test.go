@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Regression suite for #667, end to end through a real scan with the sqlite scan
@@ -45,7 +47,7 @@ func setMTime667(t *testing.T, path string, ts time.Time) {
 // reported a clean, complete scan. It stayed that way until something else changed
 // that directory or the cache file was deleted.
 func TestServiceRun667_SameSecondAddIsIndexed(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	dir := filepath.Join(root, "dir")
 	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("alpha text"))
 	setMTime667(t, dir, anchor667)
@@ -104,7 +106,7 @@ func unsettledStamp667() time.Time {
 // controlled: the stamp does not move across the add, and it is not settled when
 // the first scan reads it. See unsettledStamp667 for why the stamp is not "now".
 func TestServiceRun667_CoarseTimestampAddIsIndexed(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	dir := filepath.Join(root, "dir")
 	mustWriteFile(t, filepath.Join(dir, "a.txt"), []byte("alpha text"))
 
@@ -142,7 +144,7 @@ func TestServiceRun667_CoarseTimestampAddIsIndexed(t *testing.T) {
 // that true, and to record that the same root cause is only a correctness defect
 // where a cached child LIST is served, not where a cached child stamp is compared.
 func TestServiceRun667_SameSizeSameSecondEditUpdatesContentHash(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	dir := filepath.Join(root, "dir")
 	target := filepath.Join(dir, "a.txt")
 	mustWriteFile(t, target, []byte("AAAAAAAAAA"))

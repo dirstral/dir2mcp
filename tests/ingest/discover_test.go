@@ -9,10 +9,11 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestDiscoverFiles_SkipsDefaultExcludedDirsSymlinksAndLargeFiles(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hello"))
 	mustWriteFile(t, filepath.Join(root, "src", "main.go"), []byte("package main\n"))
@@ -50,7 +51,7 @@ func TestDiscoverFiles_SkipsDefaultExcludedDirsSymlinksAndLargeFiles(t *testing.
 // OnOversize hook (issue #497) instead of vanishing silently — the operator must
 // have a signal that files were dropped, not just an unexplained skipped=0.
 func TestDiscoverFilesWithOptions_OnOversize_SurfacesSizeCapDrops(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hi"))
 	// 32 bytes, well over the 16-byte (rounded-down) cap below.
@@ -96,7 +97,7 @@ func TestDiscoverFilesWithOptions_OnOversize_SurfacesSizeCapDrops(t *testing.T) 
 // false positive: the hook must fire only for genuine size-cap exclusions, not
 // for every discovered file.
 func TestDiscoverFilesWithOptions_OnOversize_NotCalledWhenAllFit(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("x"))
 	mustWriteFile(t, filepath.Join(root, "b.txt"), []byte("y"))
 
@@ -118,10 +119,10 @@ func TestDiscoverFilesWithOptions_OnOversize_NotCalledWhenAllFit(t *testing.T) {
 // a dropped field in corpusfsOptions would silently restore the old
 // scanned=0/skipped=0 blindness with every corpusfs test still passing.
 func TestDiscoverFilesWithOptions_OnSkippedSymlink_IsPluggedThrough(t *testing.T) {
-	library := t.TempDir()
+	library := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(library, "clip.mp4"), []byte("frames"))
 
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hi"))
 	if err := os.Symlink(filepath.Join(library, "clip.mp4"), filepath.Join(root, "clip.mp4")); err != nil {
 		t.Skipf("filesystem cannot create symlinks (%v); nothing to observe", err)
@@ -149,7 +150,7 @@ func TestDiscoverFilesWithOptions_OnSkippedSymlink_IsPluggedThrough(t *testing.T
 }
 
 func TestDiscoverFiles_ContextCancelled(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "a.txt"), []byte("x"))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,7 +162,7 @@ func TestDiscoverFiles_ContextCancelled(t *testing.T) {
 }
 
 func TestDiscoverFilesWithOptions_GitIgnore(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "keep.txt"), []byte("hello"))
 	mustWriteFile(t, filepath.Join(root, "ignore.tmp"), []byte("tmp"))
 	mustWriteFile(t, filepath.Join(root, "secret.env"), []byte("env"))
@@ -189,7 +190,7 @@ func TestDiscoverFilesWithOptions_FollowSymlinks_RespectsRootAndPreventsCycles(t
 		t.Skip("symlink behavior requires elevated privileges on windows")
 	}
 
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(root, "target.txt"), []byte("in-root"))
 	mustWriteFile(t, filepath.Join(root, "loop", "inside.txt"), []byte("loop"))
 	mustWriteFile(t, filepath.Join(root, "..cache", "inner.txt"), []byte("dotdot"))
@@ -204,7 +205,7 @@ func TestDiscoverFilesWithOptions_FollowSymlinks_RespectsRootAndPreventsCycles(t
 		t.Fatalf("create cycle symlink: %v", err)
 	}
 
-	outsideRoot := t.TempDir()
+	outsideRoot := testutil.TempDir(t)
 	mustWriteFile(t, filepath.Join(outsideRoot, "outside.txt"), []byte("outside"))
 	if err := os.Symlink(filepath.Join(outsideRoot, "outside.txt"), filepath.Join(root, "outside-link.txt")); err != nil {
 		t.Fatalf("create outside symlink: %v", err)

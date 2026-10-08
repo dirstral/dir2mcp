@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_SkipReasonRoundtrip pins the persistence of the additive
@@ -16,7 +17,7 @@ import (
 // migration is idempotent.
 func TestSQLiteStore_SkipReasonRoundtrip(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 
 	st := store.NewSQLiteStore(dbPath)
 	if err := st.Init(ctx); err != nil {

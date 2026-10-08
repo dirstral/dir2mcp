@@ -17,6 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // archiveMemberCapBytes683 mirrors internal/ingest.archiveMemberMaxBytes, the
@@ -214,7 +215,7 @@ func TestArchiveOversizeMember683_ContainerStaysFinalized(t *testing.T) {
 // coverage.
 func TestArchiveOversizeMember683_SkipRowSurvivesSecondScan(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	data := buildZipSized683(t, []sizedMember683{
 		{name: "small.txt", body: []byte("a small member")},
 		{name: "huge.txt", body: oversizePayload683()},
@@ -223,7 +224,7 @@ func TestArchiveOversizeMember683_SkipRowSurvivesSecondScan(t *testing.T) {
 		t.Fatalf("write archive: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -325,7 +326,7 @@ func (s *failingSkipRowStore683) UpsertDocument(ctx context.Context, doc model.D
 // an empty content_hash and re-extract on the next scan.
 func TestArchiveOversizeMember683_UnpersistedSkipRowBlocksFinalize(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	data := buildZipSized683(t, []sizedMember683{
 		{name: "small.txt", body: []byte("a small member")},
 		{name: "huge.txt", body: oversizePayload683()},

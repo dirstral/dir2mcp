@@ -179,8 +179,18 @@ type transcriptMeta struct {
 	LanguageScope  string `json:"language_scope,omitempty"`
 	LanguageRoutes string `json:"language_routes,omitempty"`
 	// LanguageIdentifier names the §8.2.3 identifier profile that resolved the
-	// window languages, when one was bound (SPEC §8.2.3).
+	// window languages, when one was bound (SPEC §8.2.3). Under item scope it
+	// is recorded whenever an identifier is bound (SPEC §8.2.4).
 	LanguageIdentifier string `json:"language_identifier,omitempty"`
+	// Route names the STT provider profile that decoded an item-scoped
+	// transcript when the §8.2.4 identifier resolved its language: the
+	// language_providers candidate, or the default profile when no route
+	// matched. RouteFallbackFrom names the candidate that failed before the
+	// default profile decoded the item under media.stt.on_route_error: default.
+	// Both are absent under window scope (coverage.languages carries the route
+	// per range) and on a transcript the identifier gave no signal for.
+	Route             string `json:"route,omitempty"`
+	RouteFallbackFrom string `json:"route_fallback_from,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json
@@ -214,23 +224,48 @@ func distinctSpeakers(segments []chunkSegment) []Speaker {
 	return out
 }
 
-// setSidecarIndex records the mtime of every discovered file by rel_path so the
-// transcript path can detect media siblings (sidecars) and gate ingestion on
-// their freshness without an extra filesystem stat. It is set once per scan from
-// the same walk that drives discovery, so it works for any CorpusFS backend.
-// PathExcludes are honoured here so an operator who excludes e.g. "**/*.vtt"
-// never has those files read or persisted as transcripts (the exclude contract).
+// setSidecarIndex records the stat of every discovered subtitle file, grouped by
+// directory, so the transcript path can detect media siblings (sidecars) and
+// gate ingestion on their freshness without an extra filesystem stat. It is set
+// once per scan from the same walk that drives discovery, so it works for any
+// CorpusFS backend. PathExcludes are honoured here so an operator who excludes
+// e.g. "**/*.vtt" never has those files read or persisted as transcripts (the
+// exclude contract).
+//
+// Grouping by directory is what keeps a lookup cheap on a large archive: both
+// §8.6.4 binding shapes keep the media's directory (only the stem changes), so a
+// sidecar can only ever sit in the media's own directory, and findSidecars
+// walks that directory's entries instead of every file in the corpus. On an
+// archive of 145k videos in 1.4M files the whole-corpus walk per video was
+// hours of pure map iteration before the first transcription.
 func (s *Service) setSidecarIndex(files []DiscoveredFile) {
-	idx := make(map[string]int64, len(files))
-	for _, f := range files {
-		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
-			continue
-		}
-		idx[f.RelPath] = f.MTimeUnix
-	}
+	idx := buildSidecarIndex(files, s.cfg.PathExcludes)
 	s.sidecarMu.Lock()
 	s.sidecarIndex = idx
 	s.sidecarMu.Unlock()
+}
+
+// buildSidecarIndex groups the subtitle files among files by directory
+// (path.Dir of the rel_path; "." for the corpus root). Non-subtitle files are
+// not indexed: nothing ever looks them up here.
+func buildSidecarIndex(files []DiscoveredFile, excludes []string) map[string]map[string]sidecarStat {
+	idx := make(map[string]map[string]sidecarStat)
+	for _, f := range files {
+		if !isSidecarExt(strings.ToLower(path.Ext(f.RelPath))) {
+			continue
+		}
+		if matchesAnyPathExclude(f.RelPath, excludes) {
+			continue
+		}
+		dir := path.Dir(f.RelPath)
+		byDir, ok := idx[dir]
+		if !ok {
+			byDir = make(map[string]sidecarStat)
+			idx[dir] = byDir
+		}
+		byDir[f.RelPath] = sidecarStat{MTimeUnix: f.MTimeUnix, SizeBytes: f.SizeBytes}
+	}
+	return idx
 }
 
 // sidecarsEnabled reports whether subtitle sidecar ingestion is active. It
@@ -277,7 +312,7 @@ func (s *Service) mediaVariantsGrouped() bool {
 // unavailable (e.g. a direct GenerateTranscriptRepresentation call in tests), it
 // falls back to walking the corpus once.
 func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidecarFile {
-	index := s.sidecarIndexOrWalk(ctx)
+	index := s.sidecarCandidates(ctx, mediaRelPath)
 	if len(index) == 0 {
 		return nil
 	}
@@ -295,15 +330,21 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 		variantBase = variantSidecarBase(mediaRelPath, base)
 	}
 	var exact, variant []sidecarFile
-	for relPath, mtime := range index {
+	for relPath, st := range index {
 		ext := strings.ToLower(path.Ext(relPath))
 		if !isSidecarExt(ext) {
+			continue
+		}
+		// §8.6.14: a subtitle file this pipeline wrote, unchanged since, is an
+		// OWNED output, not an authored sidecar. Excluding it here is what keeps
+		// write-back from changing the document's identity or suppressing STT.
+		if s.isOwnedSidecar(ctx, relPath, st) {
 			continue
 		}
 		// stem is the sidecar path without its subtitle extension.
 		stem := strings.TrimSuffix(relPath, ext)
 		if lang, ok := sidecarLangForBase(stem, base, mediaExt); ok {
-			exact = append(exact, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
+			exact = append(exact, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: st.MTimeUnix})
 			continue
 		}
 		if variantBase == "" {
@@ -313,7 +354,7 @@ func (s *Service) findSidecars(ctx context.Context, mediaRelPath string) []sidec
 		// stem is lower-cased for this comparison only. The recorded language token
 		// is therefore lower-case too, which §9.5 matches case-insensitively.
 		if lang, ok := sidecarLangForBase(strings.ToLower(stem), variantBase, mediaExt); ok {
-			variant = append(variant, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: mtime})
+			variant = append(variant, sidecarFile{RelPath: relPath, Lang: lang, Ext: ext, MTimeUnix: st.MTimeUnix})
 		}
 	}
 	out := mergeSidecarCandidates(exact, variant)
@@ -456,7 +497,7 @@ func mergeSidecarCandidates(exact, variant []sidecarFile) []sidecarFile {
 // sidecarIndexOrWalk returns the scan-built sidecar index, falling back to a
 // one-shot corpus walk when none was set (direct/standalone calls). The walk
 // result is not cached so a standalone call always sees current mtimes.
-func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]int64 {
+func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]map[string]sidecarStat {
 	s.sidecarMu.RLock()
 	idx := s.sidecarIndex
 	s.sidecarMu.RUnlock()
@@ -468,16 +509,15 @@ func (s *Service) sidecarIndexOrWalk(ctx context.Context) map[string]int64 {
 		s.getLogger().Printf("sidecar walk for %s failed: %v", s.cfg.RootDir, err)
 		return nil
 	}
-	out := make(map[string]int64, len(files))
-	for _, f := range files {
-		// Honour PathExcludes here too so excluded files (e.g. "**/*.vtt") are
-		// never used as sidecars on the standalone fallback path.
-		if matchesAnyPathExclude(f.RelPath, s.cfg.PathExcludes) {
-			continue
-		}
-		out[f.RelPath] = f.MTimeUnix
-	}
-	return out
+	// Honour PathExcludes here too so excluded files (e.g. "**/*.vtt") are
+	// never used as sidecars on the standalone fallback path.
+	return buildSidecarIndex(files, s.cfg.PathExcludes)
+}
+
+// sidecarCandidates returns the subtitle files in the media document's own
+// directory — the only place a §8.6.4 sidecar can bind from — keyed by rel_path.
+func (s *Service) sidecarCandidates(ctx context.Context, mediaRelPath string) map[string]sidecarStat {
+	return s.sidecarIndexOrWalk(ctx)[path.Dir(mediaRelPath)]
 }
 
 // sidecarFingerprint returns a stable fingerprint of the media document's

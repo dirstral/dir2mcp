@@ -6,6 +6,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Issue #888: the hierarchical summary prompt sent the document to a model as
@@ -21,7 +22,7 @@ func summaryPrompt(t *testing.T, cfg config.Config, source string) string {
 // same shape every other summary test does.
 func fencedCfg(t *testing.T) config.Config {
 	t.Helper()
-	return hierarchicalConfig(t.TempDir())
+	return hierarchicalConfig(testutil.TempDir(t))
 }
 
 func TestSummary888_V2FencesTheDocumentAndExplainsTheFence(t *testing.T) {

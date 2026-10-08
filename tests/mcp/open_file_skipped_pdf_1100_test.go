@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // asciiPDF1100 is a small, valid PDF with uncompressed ASCII streams and no
@@ -61,7 +62,7 @@ type openFile1100Env struct {
 // configured, so no OCR identity is folded into the cache key.
 func newOpenFile1100Env(t *testing.T) *openFile1100Env {
 	t.Helper()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	state := filepath.Join(root, ".dir2mcp")
 	if err := os.MkdirAll(state, 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)

@@ -12,15 +12,16 @@ import (
 
 // Issue #1105: ingest.docling.timeout_sec (env DIR2MCP_DOCLING_TIMEOUT_SEC)
 // sets the time limit for one docling CLI call on one document. The default is
-// 900 seconds, the fixed limit from before. The value must be greater than 0.
+// 3600 seconds (spec 0.77.0). The first default, 900, failed a 195-page PDF on
+// a loaded CPU host. The value must be greater than 0.
 
-func TestDoclingTimeout_DefaultIs900(t *testing.T) {
+func TestDoclingTimeout_DefaultIs3600(t *testing.T) {
 	cfg := config.Default()
-	if cfg.IngestDoclingTimeoutSec != 900 {
-		t.Fatalf("default IngestDoclingTimeoutSec = %d, want 900", cfg.IngestDoclingTimeoutSec)
+	if cfg.IngestDoclingTimeoutSec != 3600 {
+		t.Fatalf("default IngestDoclingTimeoutSec = %d, want 3600", cfg.IngestDoclingTimeoutSec)
 	}
-	if config.DefaultDoclingTimeoutSec != 900 {
-		t.Fatalf("DefaultDoclingTimeoutSec = %d, want 900", config.DefaultDoclingTimeoutSec)
+	if config.DefaultDoclingTimeoutSec != 3600 {
+		t.Fatalf("DefaultDoclingTimeoutSec = %d, want 3600", config.DefaultDoclingTimeoutSec)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default config must validate: %v", err)

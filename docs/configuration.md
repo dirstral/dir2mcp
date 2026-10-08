@@ -238,7 +238,7 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
 | `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output {output} {input}`). dir2mcp replaces `{input}` with the document path and `{output}` with a new temporary directory for each call, then reads the output file from that directory (JSON with the default template). Do not use `--output -`: docling writes a file named `-` and dir2mcp reads no output. When set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
 | `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
-| `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `900`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
+| `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `3600`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
 | `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
 | _(Mistral endpoint)_ | — | The Mistral base URL is **not** configurable via an environment variable. To proxy Mistral or point at a private/custom endpoint, add a `providers:` entry with a `base_url` (see [Self-hosted / GPU-VPS provider endpoints](#self-hosted--gpu-vps-provider-endpoints-embed--ocr--stt)) |
@@ -430,19 +430,20 @@ spec defines none of those today, so that decision belongs in `dirstral-spec` fi
 ### docling time limit per document
 
 The docling CLI runs once for each document. Each run has a time limit, so one
-slow document cannot stop indexing. The default limit is 900 seconds (15
-minutes).
+slow document cannot stop indexing. The default limit is 3600 seconds (1
+hour).
 
 ```yaml
 ingest:
   docling:
-    timeout_sec: 1800   # default: 900; must be greater than 0
+    timeout_sec: 7200   # default: 3600; must be greater than 0
 ```
 
-- Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=1800`. The env value wins over the file.
+- Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=7200`. The env value wins over the file.
 - A value of `0` or less stops startup with a config error. An env value that is not an integer is ignored, and startup shows a warning.
-- When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 15m0s (limit set by ingest.docling.timeout_sec)`.
-- Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of this type took about 13 minutes with docling on CPU. On a slower or busy host, set a higher limit.
+- When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 1h0m0s (limit set by ingest.docling.timeout_sec)`.
+- At the same moment, the daemon log gets one line for the timeout, for example `docling: timed out on reports/annual.pdf after 1h0m0s (ingest.docling.timeout_sec=3600); the document is recorded as failed`. Other extraction failures (docling, docling-serve, Mistral OCR, pandoc) also get one log line each, with the engine, the document path and a short reason. The line never carries document text.
+- Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of about 195 pages took about 13 minutes with docling on CPU on an idle 16-core host, and about 20 minutes on the same host under load. The first default of 900 seconds failed that document. On a slower or busier host, set a higher limit.
 - The limit applies to the docling CLI only. `docling-serve` uses its own request limit.
 
 ### docling extraction over HTTP (docling-serve)
@@ -623,6 +624,85 @@ back into the authored cues (or the STT segments). With
 `transcript_chunk_sec: 0`, a sidecar chunk is a block of cues packed to 1200
 characters with no recorded boundaries, so export renders that block as one cue.
 
+### Subtitle write-back: subtitles beside the media as it is indexed (SPEC §8.6.14)
+
+`dir2mcp export` renders one document on demand. An archive whose editors,
+players or downstream tools read subtitle files from the media's own folder
+wants every document's subtitles **on disk**, kept current as the corpus grows,
+without an operator exporting 140,000 documents one at a time. Write-back does
+that. It is **off by default**.
+
+```yaml
+media:
+  subtitles:
+    ttml:
+      enabled: true         # only needed when `ttml` is listed below
+    emit:
+      enabled: true         # default false
+      formats: [vtt, ttml]  # subset of vtt|srt|ttml; default [vtt]
+      languages: []         # [] => every language the document has a transcript for
+      policy: if_missing    # if_missing (default) | refresh
+      dir: ""               # "" => beside the media; else mirror the corpus tree under this root
+```
+
+Once a media document's transcripts exist (STT, sidecar, translation), dir2mcp
+writes:
+
+| Artifact | Name | When |
+|---|---|---|
+| VTT / SRT | `<stem>.<lang>.vtt` (the [sidecar shape](#subtitle-sidecars-which-file-becomes-a-transcript-spec-864)) | once per transcript language |
+| TTML | `<stem>.ttml`, bilingual (source + first `media.translate.target_langs` entry the document has) | once per document |
+
+With `media.variants.group: true` the stem is the **group** stem
+(`episode_1080p.mp4` → `episode.ru.vtt`), so one set of files serves every
+rendition. The cues are **identical to `dir2mcp export`** for the same document,
+language and format: one renderer, one cue pipeline (`filter_words`, the
+`media.subtitles.*` cleaning, `segmentation`). A written VTT or TTML also
+carries a one-line provenance comment that export does not (see below). **SMIL is never written** by
+write-back: an archive's packaging manifests belong to whatever produced the
+media, and stay an on-demand `export --format ttml --out` concern.
+
+**A written file is dir2mcp's output, not a human's.** Every file written is
+recorded in the state database (path, size, mtime, content hash). While it is
+unchanged on disk it is **owned**: sidecar discovery skips it, so writing a VTT
+beside a video never changes the video's identity, never re-ingests the VTT as
+an "authored" transcript, never bypasses the quality gate, and never stops a
+better STT model from re-transcribing the video later. Ownership belongs to the
+record, not to the setting: turning write-back off later does not turn the files
+it wrote into authored transcripts. A written file someone **edits** stops being
+owned and becomes an authored sidecar from then on, with the usual precedence
+over STT. Discovery decides that by size and mtime (a stat, since it runs over
+every file on every scan); before a `refresh` rewrite dir2mcp also checks the
+file's bytes against the recorded hash, so an edit that kept the same size and
+timestamp is never overwritten either. Files dir2mcp did not write are **never
+overwritten**: under `if_missing` an existing sidecar of that format and
+language simply counts as present, and under `refresh` only owned files whose
+render changed are rewritten (so a re-derived transcript reaches disk). Files
+written under a separate `dir` are outputs only; discovery never looks there, so
+they neither bind as sidecars nor need excluding. That root must lie outside the
+corpus, and each ownership record remembers the root it was written under, so
+changing `dir` later never lets an old record claim an in-corpus file.
+
+**Ownership survives losing the state folder.** The ownership records live in
+the state database, which can be deleted, reset for a fresh index, or lost with
+a disk. So every written VTT and TTML also proves itself: right after the header
+it carries a comment such as `NOTE dir2mcp-emitted v1 sha256=…`, holding the hash
+of the rest of the file. When a scan finds a subtitle file with no record, it
+checks that comment: an intact one means dir2mcp's own unedited output, which is
+treated as owned and re-recorded; a mismatch means someone edited it, so it is
+authored. Players ignore the comment. SRT has no comment syntax, so an SRT that
+outlives its record reads as authored; still back up the state folder before
+resetting it.
+
+Each write is atomic. A failed write is a non-fatal per-document outcome,
+recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)
+as `SUBTITLE_WRITE_FAILED`; the transcript stays indexed. Written artifacts
+appear in the manifest's `outputs` as `vtt:ru`, `srt:en`, `ttml`. Under
+`media.batch.two_phase` the files are written in the derivation pass and are the
+same files single-pass writes. Enabling write-back on an already-indexed corpus
+fills the files in on the next scan without a reindex. A `source.kind: s3`
+corpus has no filesystem to write beside the media and requires `dir`.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition
@@ -741,6 +821,21 @@ stt_provider: whisper        # STT uses the legacy selector
 - No shipped self-hosted defaults — you must declare the profile and bind it explicitly; nothing silently auto-selects a self-hosted endpoint.
 - **Long recordings are transcribed in windows.** A recording that fits goes to STT in ONE request. When its extracted audio is over the provider's per-request payload cap, or the recording runs longer than 10 minutes, dir2mcp cuts the audio into overlapping ~10-minute windows with ffmpeg, transcribes each window, and merges them back into one transcript with absolute timestamps (a window is shortened further when a 10-minute slice would not fit the cap). A window that fails is skipped with a warning, so a 3-hour file loses a window instead of the whole document; the document fails only when every window fails. **A windowed transcript records what it covers.** Its representation carries a `coverage` object in `meta_json` (windows attempted, windows decoded, and the decoded millisecond ranges), so a recording that decoded one window of eight is no longer indistinguishable from a complete transcript, and a partial one is announced in the log rather than indexed in silence. `media.stt.min_coverage` (default `0`, the floor off) plus `media.stt.on_partial_transcript` (`warn|skip`, default `warn`) let an operator refuse a transcript that covers too little: under `skip` the transcript is dropped instead of answering "nothing found" for audio it never heard, and an item with no other searchable representation is recorded as `status=skipped` with `skip_reason=transcript_partial` (one that still has direct media chunks stays indexed through those). The cap is the client's: `media.stt.max_payload_mb` for a `kind: whisper` endpoint (default 50 MB), 20 MB for Voxtral on a `kind: mistral` endpoint. Each request gets a timeout sized to the audio it carries: 10x the audio duration, never below 120 s, so a 10-minute window is waited out for 100 minutes rather than cut off at a constant. A cut-off request is NOT retried, because the server keeps decoding after the client hangs up and a retry would only queue a second decode of the same audio. `media.stt.request_timeout_sec` overrides that rule outright, up or down. Windowing needs `ffmpeg` and `ffprobe` on PATH; without them a long file is still sent in one request, and a provider that refuses it says so in the log. **The corpus says how much it never heard.** `dir2mcp up` prints a Speech coverage section once the server reports ready (on the daemon path too, which is the default on a terminal; a run that returns while the daemon is still starting prints no coverage, because the record it would report on is not built yet), and `dir2mcp doctor` answers a `transcript_coverage` check, when the record holds transcripts whose coverage does not state completeness: how many, and how much audio of how much was decoded. The default matters here. `on_partial_transcript` defaults to `warn`, which keeps the partial transcript and leaves the document `status=ok`, so the shortfall reaches no other report: skip reasons see only the `skip` path, and the extraction verdict is about formats. A corpus can be 100% indexed, report no skips and no errors, and still be missing hours of speech. `doctor` states a clean corpus positively, because an omitted line and a clean corpus read the same. `doctor` also names how many transcripts say NOTHING about their coverage. A single-request decode records none, and neither does any transcript indexed before dir2mcp recorded coverage, so without that number a corpus with no records at all would read exactly like one that is whole. It stays an `ok`, because an unknown is not a known defect. That count is a `doctor` line only: the `up` banner prints a Speech coverage section when a transcript records an INCOMPLETE decode, and stays silent otherwise, so a corpus whose transcripts merely assert nothing produces no banner section. A permanent line on every start is one an operator learns to skip; `doctor` is the surface that is asked. The report names the STT provider and model recorded on the transcript, never an endpoint, because the record does not hold which endpoint served a window. It also names the action that repairs them: `dir2mcp reindex --redecode-partial-transcripts` ignores the cached transcript of exactly those recordings, so they reach the provider again. A plain reindex re-decodes nothing here, because the transcript cache is keyed on the media bytes and the provider/model and repairing an endpoint changes neither. The flag is scoped on purpose: clearing the whole cache would re-decode a corpus that is mostly fine, which on an archive is hours of GPU time.
 - **A recording that changes language inside itself can be decoded per window.** By default the source language is resolved ONCE per recording and the whole recording is routed on it (`media.stt.language_scope: item`, spec 8.2.1). A decoder committed to the wrong language does not fail: it emits the nearest language it knows, so the minority passages of an interview conducted in Russian and answered in Ukrainian come out in the wrong script, and the coverage floor cannot see it because the recording's language IS covered. `media.stt.language_scope: window` (spec 8.2.2) applies the same three steps per decode window instead: the language the decoder reports for the window identifies it (falling back to the text detector when the provider reports none), `media.stt.language_providers` routes the window, and a window whose language moves to another profile is decoded again on that profile, so the extra request is paid only for windows that actually move. A window whose report is below the confidence floor inherits the preceding window's language, so one misread window cannot flap the route. The honest-coverage floor runs per window too: under `on_uncovered_language: warn` an uncovered window is indexed and recorded `covered: false`; under `skip` only that window is refused, and the recording is a `language_uncovered` skip only when every window was refused. The transcript records the result in `coverage.languages` (which stretch resolved to which language, how, on which profile, covered or not) and `coverage.refused`, its representation language is the largest covered language by duration, a segment in another language records `language` on its span and its chunk, a segment from a window whose language could not be resolved records `und` so it is never filtered or answered as the recording's language, and a retrieval chunk never spans a language change. The §8.6.6 quality checks run per window too: a window that decodes to a repetition loop, gibberish or text off the script of its own resolved language is refused as `quality_gate` instead of reaching the transcript, and a recording whose every window fails that way is `TRANSCRIBE_FAILED` as a failed document-level gate is (silence is not a defect: the empty and density checks stay document-level). The scope and route table join the transcript's derivation identity, so switching a corpus to `window` re-decodes it on the next run. A decoder's own language report is not calibrated for a language it covers badly (a Whisper-class decoder has reported Kyrgyz as Macedonian at full confidence), so `media.stt.language_identifier` (spec 8.2.3) can name an STT-capable profile used only for the language it reports; its answer outranks the decoder's, and a failed or unsure answer changes nothing. A `language_providers` value may also be an ordered list of candidates: a window one candidate decodes into a repetition loop (with the quality gate on), or into a language outside its declared coverage (under `on_uncovered_language: skip`), is decoded again by the next. A profile may carry `stt_validation` records of the operator's own measurements, and `media.stt.require_validation: true` keeps a candidate without one for the language out of the route. No model is trained or shipped: which model covers which language stays the operator's `stt_languages` declaration and `language_providers` route.
+- **A checkpoint per language, chosen before the recording is decoded.** A local whisper server selects its checkpoint by the `model` field of the request, so a per-language fine-tune is one `kind: whisper` profile per checkpoint (`stt_model` names it) and one `language_providers` entry per language; the default profile decodes every other language. Under the default `language_scope: item` the route needs the recording's language before transcription, which `media.stt.language_identifier` now gives it (spec 8.2.4): the identifier hears a centred probe of at most `language_probe_sec`, its answer selects the first eligible candidate for that language, and an answer that is empty, below the confidence floor, or an error leaves the recording on the default profile exactly as before. The transcript records `language_identifier`, `language_scope`, `language_routes` and, when the identifier answered, the language it heard (`language_source: detected`) and `route`, the profile that decoded; `provider`/`model` keep naming the default profile, and `language_routes` carries the model each route binds. `media.stt.on_route_error` (`fail|default`, default `fail`) says what a failing checkpoint does: `fail` keeps the failed window or recording; `default` decodes the same audio once more on the default profile and records the failed candidate (`route_fallback_from` on the transcript, `fallback_from` on the window's `coverage.languages` entry), never silently. A pinned corpus keeps the failed recording: the pin asserts the route. A `language_providers` key must be a BCP-47 language tag (`fa`, `pt-BR`): a primary subtag of 2 to 8 letters, so `fa_IR` or `f` is `CONFIG_INVALID`. `dir2mcp doctor` lists the resolved table as `stt_routes`: the identifier, each language's candidates with the model each binds and whether `require_validation` keeps it eligible, and the `on_route_error` policy; a language whose candidates are all ineligible is a warning naming the default profile that decodes it. Example:
+
+  ```yaml
+  stt_provider: whisper               # the default checkpoint
+  providers:
+    whisper: {kind: whisper, base_url: http://gpu:9001, stt_model: large-v3}
+    lid:     {kind: whisper, base_url: http://gpu:9001, stt_model: large-v3}   # identifier: only its language report is used
+    ckpt-fa: {kind: whisper, base_url: http://gpu:9001, stt_model: my-org/whisper-fa, stt_languages: [fa],
+              stt_validation: [{language: fa, method: wer, sample: 100 read sentences, score: "13.3", date: 2026-10-06}]}
+  media:
+    stt:
+      language_identifier: lid
+      language_providers: {fa: ckpt-fa}
+      on_route_error: default         # a failing checkpoint falls back once to large-v3, recorded
+  ```
 
 ### Late chunking with a self-hosted TEI server (`kind: tei`)
 
@@ -789,6 +884,13 @@ Notes:
 - A file that **stops** being eligible is retired at once. If it grows past `ingest.max_file_mb` it keeps a visible `skipped` row with the reason, and its chunks leave retrieval. If it becomes gitignored it is tombstoned, exactly as a full rescan would tombstone it. An edit to a `.gitignore` file triggers a reconcile of the tree, because one rule can change the eligibility of many paths at once.
 - **The watcher needs a filesystem.** `source.kind: local` and `source.kind: nfs` are ordinary directory trees, so both use it. A remote corpus (`source.kind: s3`) has no filesystem to watch, so the watcher does not start for it. The index reconciles on a periodic rescan of the remote source instead, and `dir2mcp up` prints a warning at startup. `watch_debounce` and the `watch_overflows` stat apply only to the filesystem watcher; a remote corpus reports neither.
 - Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
+- **What a rescan reads.** A text document is confirmed by its content hash on
+  every scan (an in-place edit that keeps size and timestamp is still caught). A
+  local or NFS **media** file whose size and mtime match the recorded document is
+  skipped without being read (SPEC §7.8's cheap pre-check), and so is an S3 object
+  whose ETag and size match. On a large video archive this is the difference
+  between a rescan that stats files and one that reads terabytes; the first scan
+  still reads each selected rendition once.
 
 ### Gemini embeddings (`gemini-embedding-001`)
 

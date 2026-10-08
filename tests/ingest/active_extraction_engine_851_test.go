@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // ActiveExtractionEngine is the source of truth dir2mcp_stats reports through
@@ -20,7 +21,7 @@ import (
 // extractionEngineService builds a Service with no extractor wired.
 func extractionEngineService(t *testing.T) *ingest.Service {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}

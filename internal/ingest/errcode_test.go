@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestManifestErrorCode pins the §14.4 classification: translation, OCR, and
@@ -141,7 +142,7 @@ func (failingExtractor) Extract(_ context.Context, _ string, _ []byte) (string, 
 // EXTRACT_FAILED.
 func TestReadOrComputeOCR_ProviderFailureTaggedOCRFailed(t *testing.T) {
 	s := &Service{
-		cfg:       config.Config{StateDir: t.TempDir()},
+		cfg:       config.Config{StateDir: testutil.TempDir(t)},
 		extractor: failingExtractor{},
 	}
 	_, err := s.readOrComputeOCR(context.Background(), model.Document{RelPath: "scan.pdf"}, []byte("bytes"))
@@ -170,7 +171,7 @@ func (failingGenerator) Generate(_ context.Context, _ string) (string, error) {
 // (§14.4) — distinct from the transcript's TRANSCRIBE_FAILED.
 func TestTranslateOneTranscript_ProviderFailureTaggedTranslateFailed(t *testing.T) {
 	s := &Service{
-		cfg:        config.Config{StateDir: t.TempDir()},
+		cfg:        config.Config{StateDir: testutil.TempDir(t)},
 		translator: failingGenerator{},
 	}
 	doc := model.Document{RelPath: "audio/talk.mp3", DocType: "audio"}
