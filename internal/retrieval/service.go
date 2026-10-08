@@ -295,7 +295,7 @@ type Service struct {
 	tombstonedRelPaths map[string]struct{}
 	// evidenceThreshold is the operator's rag.evidence_threshold choice and
 	// evidenceBaseline the null-baseline cache behind the calibrated cosine
-	// threshold (SPEC §9.4.3, spec 0.76.0; evidence_baseline.go). The zero
+	// threshold (SPEC §9.4.3, spec 0.80.0; evidence_baseline.go). The zero
 	// settings keep the fixed floors. evidenceThreshold is guarded by metaMu;
 	// the cache carries its own mutex.
 	evidenceThreshold evidenceThresholdSettings
@@ -1672,7 +1672,7 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// Name each hit's absolute evidence verdict (SPEC §9.4.3, spec 0.55.0) as
 	// the last step, so the verdict describes the hit the caller actually
 	// receives, after every re-scoring stage above. The thresholds are the ones
-	// in effect now (calibrated or pinned, spec 0.76.0); under auto the first
+	// in effect now (calibrated or pinned, spec 0.80.0); under auto the first
 	// call computes the null baseline.
 	stampEvidenceVerdicts(s.effectiveEvidenceThresholds(ctx), hits)
 	return hits, nil

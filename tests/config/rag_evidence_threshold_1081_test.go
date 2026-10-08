@@ -9,7 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Issue #1081, SPEC §9.4.3 (spec 0.76.0): rag.evidence_threshold is "auto"
+// Issue #1081, SPEC §9.4.3 (spec 0.80.0): rag.evidence_threshold is "auto"
 // (default) or a number in (0,1]; env DIR2MCP_RAG_EVIDENCE_THRESHOLD.
 
 func TestEvidenceThreshold_DefaultIsAuto(t *testing.T) {

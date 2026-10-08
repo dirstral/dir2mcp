@@ -888,7 +888,7 @@ func stuckPendingCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 }
 
 // evidenceThresholdCheck reports the absolute evidence threshold in effect on
-// the cosine scale and the null baseline behind it (SPEC §9.4.3, spec 0.76.0;
+// the cosine scale and the null baseline behind it (SPEC §9.4.3, spec 0.80.0;
 // #1081). It reads the baseline the daemon cached in the state dir, so it
 // touches no provider and needs no daemon. The row is informational: a
 // baseline that is not computed yet is the normal state before the first

@@ -533,7 +533,7 @@ func TestStatsOutputSchemaConformance(t *testing.T) {
 			"chat":         "mistral-large-latest",
 		},
 		// Optional additive evidence object (SPEC §9.4.3 and §15.6, spec
-		// 0.76.0, #1081), rendered by evidenceForStats.
+		// 0.80.0, #1081), rendered by evidenceForStats.
 		"evidence": evidenceForStats(model.EvidenceReport{
 			CosineThreshold:       0.519,
 			CosineThresholdSource: model.EvidenceThresholdSourceAuto,
@@ -549,7 +549,7 @@ func TestStatsOutputSchemaConformance(t *testing.T) {
 			{"rel_path": "docs/bad.pdf", "doc_type": "pdf", "mtime_unix": int64(1700000050), "error_message": "ocr failed"},
 		},
 	}
-	assertConforms(t, "stats", statsOutputSchema(true), structured)
+	assertConforms(t, "stats", statsOutputSchema(), structured)
 }
 
 // TestSpanVariantsConformToSpanSchema asserts buildOpenFileSpan output for each

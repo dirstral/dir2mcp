@@ -12,7 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Issue #1081, SPEC §9.4.3 (spec 0.76.0): `dir2mcp doctor` reports the cosine
+// Issue #1081, SPEC §9.4.3 (spec 0.80.0): `dir2mcp doctor` reports the cosine
 // evidence threshold in effect and the null baseline the daemon cached in the
 // state dir, without a daemon and without touching a provider.
 

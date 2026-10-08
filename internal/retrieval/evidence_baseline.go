@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
-// Calibrated evidence threshold (SPEC §9.4.3, spec 0.76.0; issue #1081).
+// Calibrated evidence threshold (SPEC §9.4.3, spec 0.80.0; issue #1081).
 //
 // The fixed cosine floor in evidenceThresholds fits every embedding family
 // only because it rejects near-orthogonal text and nothing else. With a local
@@ -98,7 +98,7 @@ type evidenceThresholdSettings struct {
 	pinned float64
 }
 
-// SetEvidenceThreshold wires rag.evidence_threshold (SPEC §9.4.3, spec 0.76.0).
+// SetEvidenceThreshold wires rag.evidence_threshold (SPEC §9.4.3, spec 0.80.0).
 // auto selects the calibrated rule; otherwise pinned, when positive, is the
 // cosine threshold applied as-is; both false/zero keeps the fixed floors.
 func (s *Service) SetEvidenceThreshold(auto bool, pinned float64) {

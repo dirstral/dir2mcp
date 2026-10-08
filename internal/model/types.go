@@ -1431,7 +1431,7 @@ func (s Stats) MarshalJSON() ([]byte, error) {
 	return json.Marshal(a)
 }
 
-// EvidenceBaseline is the null baseline of SPEC §9.4.3 (spec 0.76.0): the
+// EvidenceBaseline is the null baseline of SPEC §9.4.3 (spec 0.80.0): the
 // distribution of the top cosine that each shipped probe question reached
 // against the indexed corpus. It is a property of the embedder and the corpus
 // together, which is what makes it comparable across embedding families where
@@ -1472,7 +1472,7 @@ const (
 )
 
 // EvidenceReport is the dir2mcp_stats `evidence` object (SPEC §15.6, spec
-// 0.76.0): the absolute thresholds in effect and the null baseline they were
+// 0.80.0): the absolute thresholds in effect and the null baseline they were
 // derived from, so a caller can reproduce an abstention from published numbers.
 type EvidenceReport struct {
 	// CosineThreshold is the abstention threshold in effect on the cosine scale.

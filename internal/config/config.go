@@ -533,7 +533,7 @@ type Config struct {
 	RAGVerifyFaithfulness bool
 	// RAGEvidenceThreshold is the operator's choice for the absolute evidence
 	// threshold on the cosine scale (config `rag.evidence_threshold`, env
-	// DIR2MCP_RAG_EVIDENCE_THRESHOLD; SPEC §9.4.3, spec 0.76.0, issue #1081).
+	// DIR2MCP_RAG_EVIDENCE_THRESHOLD; SPEC §9.4.3, spec 0.80.0, issue #1081).
 	// "auto" (the default) derives it per embedder and corpus from the null
 	// baseline, never below the fixed floor; a number in (0,1] pins it. Any
 	// other value fails validation. ParseEvidenceThreshold is the one parser.
@@ -6396,7 +6396,7 @@ func applyEvidenceThresholdFileParsed(cfg *Config, fc fileConfig) {
 }
 
 // EvidenceThresholdAuto is the rag.evidence_threshold value that selects the
-// calibrated rule (SPEC §9.4.3, spec 0.76.0).
+// calibrated rule (SPEC §9.4.3, spec 0.80.0).
 const EvidenceThresholdAuto = "auto"
 
 // ParseEvidenceThreshold parses rag.evidence_threshold. It returns auto=true

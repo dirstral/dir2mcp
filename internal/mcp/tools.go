@@ -201,7 +201,7 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 			Name:         protocol.ToolNameStats,
 			Description:  "Status/progress/health for indexing and models.",
 			InputSchema:  statsInputSchema(),
-			OutputSchema: statsOutputSchema(s.calibratesEvidence()),
+			OutputSchema: statsOutputSchema(),
 			handler:      s.handleStatsTool,
 		},
 	}
@@ -470,7 +470,7 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	if reasons := skipReasonsForStats(retrievedStats.SkipSummary); len(reasons) > 0 {
 		structured["skip_reasons"] = reasons
 	}
-	// Optional additive `evidence` object (SPEC §9.4.3 and §15.6, spec 0.76.0,
+	// Optional additive `evidence` object (SPEC §9.4.3 and §15.6, spec 0.80.0,
 	// #1081): the absolute thresholds in effect and the null baseline behind
 	// them, so a caller can reproduce an abstention from published numbers.
 	// Emitted only by a retriever that calibrates; absence reads as "not
@@ -504,15 +504,6 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 	}, nil
 }
 
-// calibratesEvidence reports whether this server's retriever calibrates its
-// evidence threshold, which is when dir2mcp_stats declares and emits the
-// `evidence` object (SPEC §9.4.3: a calibrating server MUST emit it, and
-// MUST NOT emit a field its advertised schema does not declare).
-func (s *Server) calibratesEvidence() bool {
-	reporter, ok := s.retriever.(model.EvidenceReporter)
-	return ok && reporter.CalibratesEvidence()
-}
-
 // evidenceForStats renders the dir2mcp_stats `evidence` object from the
 // retriever's report. The baseline is included only once computed, with
 // exactly the stats.json field names.
@@ -541,7 +532,7 @@ func evidenceForStats(report model.EvidenceReport) map[string]interface{} {
 }
 
 // statsEvidenceSchema is the dir2mcp_stats `evidence` object, with exactly the
-// stats.json field names of spec 0.76.0.
+// stats.json field names of spec 0.80.0.
 func statsEvidenceSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type":                 "object",
@@ -4980,7 +4971,7 @@ func statsInputSchema() map[string]interface{} {
 // only its own session, through headers. It defines no roster. On the stdio
 // transport a session id does not exist at all, so a required roster field
 // cannot mean anything for a stdio implementation.
-func statsOutputSchema(declareEvidence bool) map[string]interface{} {
+func statsOutputSchema() map[string]interface{} {
 	schema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -5130,14 +5121,11 @@ func statsOutputSchema(declareEvidence bool) map[string]interface{} {
 		},
 		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"},
 	}
-	if declareEvidence {
-		// Optional additive object (SPEC §9.4.3 and §15.6, spec 0.76.0, #1081):
-		// the thresholds in effect and the null baseline behind them. The output
-		// object closes with additionalProperties:false, so it is declared
-		// exactly when the retriever calibrates and emits it, and left out of
-		// the advertised contract otherwise.
-		schema["properties"].(map[string]interface{})["evidence"] = statsEvidenceSchema()
-	}
+	// Optional additive object (SPEC §9.4.3 and §15.6, spec 0.80.0, #1081):
+	// the thresholds in effect and the null baseline behind them. The canonical
+	// stats.json declares it, so the served schema always declares it too; it
+	// is not required, and a server whose retriever does not calibrate omits it.
+	schema["properties"].(map[string]interface{})["evidence"] = statsEvidenceSchema()
 	return schema
 
 }

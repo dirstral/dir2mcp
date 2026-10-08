@@ -41,7 +41,7 @@ import (
 // SCALE AND SHIPPED VALUES. See evidenceThresholds below for the fixed floors.
 // The cosine threshold in effect is the floor OR a value calibrated from the
 // null baseline of this embedder and corpus (evidence_baseline.go, spec
-// 0.76.0), and an operator may pin it with `rag.evidence_threshold`;
+// 0.80.0), and an operator may pin it with `rag.evidence_threshold`;
 // `retrieval.min_score` configures the pruning floor only (§9.4.3,
 // "Configuration"). Every verdict function below takes the thresholds in
 // effect as its first argument, so a verdict and the number it was measured

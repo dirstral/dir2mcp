@@ -1,6 +1,6 @@
 package retrieval
 
-// The null probe set (SPEC §9.4.3, spec 0.76.0; issue #1081).
+// The null probe set (SPEC §9.4.3, spec 0.80.0; issue #1081).
 //
 // These questions are about everyday subjects that no knowledge corpus is
 // expected to answer. Embedded against the corpus, the top cosine each one

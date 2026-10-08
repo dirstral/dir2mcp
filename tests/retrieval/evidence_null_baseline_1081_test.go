@@ -14,7 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 )
 
-// Issue #1081, SPEC §9.4.3 (spec 0.76.0): the cosine evidence threshold is
+// Issue #1081, SPEC §9.4.3 (spec 0.80.0): the cosine evidence threshold is
 // max(fixed floor, null baseline p90), where the baseline is the top cosine of
 // the shipped probe questions against the corpus. These tests pin the pure
 // rule on synthetic distributions, the guard firing under a high baseline and

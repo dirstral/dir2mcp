@@ -13,7 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
-// Issue #1081, SPEC §15.6 (spec 0.76.0): dir2mcp_stats carries the optional
+// Issue #1081, SPEC §15.6 (spec 0.80.0): dir2mcp_stats carries the optional
 // `evidence` object when the retriever calibrates its threshold, with exactly
 // the stats.json field names, and omits it otherwise.
 
