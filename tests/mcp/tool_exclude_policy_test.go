@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // exampleAWSKey is a well-formed but non-live AWS access-key ID that matches the
@@ -23,7 +24,7 @@ const exampleAWSKey = "AKIAIOSFODNN7EXAMPLE"
 // live sqlite store, returning the config and root so callers can drop files.
 func newExcludeTestServer(t *testing.T) (config.Config, *store.SQLiteStore, string) {
 	t.Helper()
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	stateDir := filepath.Join(rootDir, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

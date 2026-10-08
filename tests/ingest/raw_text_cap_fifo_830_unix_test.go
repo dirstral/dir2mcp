@@ -14,6 +14,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The FIFO case lives in a unix-only file. syscall.Mkfifo is not declared on
@@ -35,7 +36,7 @@ import (
 // the read bounded the pipe delivers at most cap+1 bytes and the document is
 // refused.
 func TestGenerateRawText_BoundsTheReadOnASourceAStatCannotMeasure(t *testing.T) {
-	fifo := filepath.Join(t.TempDir(), "grows.txt")
+	fifo := filepath.Join(testutil.TempDir(t), "grows.txt")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}

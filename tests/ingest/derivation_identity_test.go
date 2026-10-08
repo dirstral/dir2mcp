@@ -15,6 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // newRealStore returns an initialized on-disk SQLiteStore (it persists documents
@@ -22,7 +23,7 @@ import (
 // the derivation-identity gate is exercised end to end, spec §8.6.7).
 func newRealStore(t *testing.T) *store.SQLiteStore {
 	t.Helper()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
@@ -55,11 +56,11 @@ func transcriptMetaFor(t *testing.T, st *store.SQLiteStore, relPath string) stri
 // STT provider/model were never recorded (spec §5.2/§8.6.7).
 func TestSTTIdentity_PersistedOnBareTranscriptRep(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
 
-	svc := sttService(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "en",
+	svc := sttService(t, root, testutil.TempDir(t), st, "whisper", "whisper-large-v3", "en",
 		&fakeTranscriber{text: "[00:00] hello world"})
 
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -94,10 +95,10 @@ func TestSTTIdentity_PersistedOnBareTranscriptRep(t *testing.T) {
 // unchanged (spec §8.6.7).
 func TestSTTModelSwap_InvalidatesAndRederives(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	// Scan 1: Voxtral.
@@ -129,10 +130,10 @@ func TestSTTModelSwap_InvalidatesAndRederives(t *testing.T) {
 // unchanged content does NOT re-transcribe (no needless churn).
 func TestSTTNoSwap_NoChurn(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	tr1 := &fakeTranscriber{text: "[00:00] hello"}
@@ -157,10 +158,10 @@ func TestSTTNoSwap_NoChurn(t *testing.T) {
 // VerifyEmbedIdentity's fresh-index rule).
 func TestEmptyRecordedIdentity_Passes(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	// Scan 1 simulates a pre-upgrade run: NO STT identity recorded (empty meta).
@@ -186,10 +187,10 @@ func TestEmptyRecordedIdentity_Passes(t *testing.T) {
 // matching identity.
 func TestForceReindex_StillWins(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	tr1 := &fakeTranscriber{text: "[00:00] hello"}
@@ -203,7 +204,7 @@ func TestForceReindex_StillWins(t *testing.T) {
 	// being served by the transcript cache. With --force the identity gate is
 	// irrelevant: reprocessing must happen regardless.
 	tr2 := &fakeTranscriber{text: "[00:00] hello"}
-	svc2 := sttService(t, root, t.TempDir(), st, "whisper", "whisper-large-v3", "en", tr2)
+	svc2 := sttService(t, root, testutil.TempDir(t), st, "whisper", "whisper-large-v3", "en", tr2)
 	if err := svc2.ProcessDocument(context.Background(), f, nil, true); err != nil {
 		t.Fatalf("scan2 (force): %v", err)
 	}
@@ -218,12 +219,12 @@ func TestForceReindex_StillWins(t *testing.T) {
 // be called because the authored sidecar stands in for STT.
 func TestSidecarExemption_STTSwapDoesNotInvalidate(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	writeFile(t, filepath.Join(root, "talk.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nauthored caption\n")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	// Scan 1: sidecar is ingested; STT must not run.
@@ -259,10 +260,10 @@ func TestSidecarExemption_STTSwapDoesNotInvalidate(t *testing.T) {
 // rather than left stale (spec §8.6.2/§8.6.7).
 func TestTranslationCascade_RefreshesOnSTTSwap(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
 
 	// Scan 1: Voxtral source transcript + an en translation.
@@ -308,10 +309,10 @@ func TestTranslationCascade_RefreshesOnSTTSwap(t *testing.T) {
 // real extraction identity, with a counter to confirm re-extraction.
 func TestOCRModelSwap_InvalidatesAndRederives(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "doc.pdf"), "fake-pdf-bytes")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "doc.pdf", SizeBytes: 14, MTimeUnix: time.Now().Unix()}
 
 	var calls int
@@ -362,10 +363,10 @@ func TestOCRModelSwap_InvalidatesAndRederives(t *testing.T) {
 // unchanged bytes does NOT re-extract.
 func TestOCRNoSwap_NoChurn(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "doc.pdf"), "fake-pdf-bytes")
 	st := newRealStore(t)
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	f := ingest.DiscoveredFile{RelPath: "doc.pdf", SizeBytes: 14, MTimeUnix: time.Now().Unix()}
 
 	var calls int
@@ -420,7 +421,7 @@ func TestOCRCacheKey_ProviderOnlySwapDiffersKey(t *testing.T) {
 	t.Parallel()
 	content := []byte("identical-pdf-bytes")
 	st := newRealStore(t)
-	cfg := config.Config{RootDir: t.TempDir(), StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: testutil.TempDir(t), StateDir: testutil.TempDir(t), STTProvider: "off"}
 
 	newSvc := func(ex model.DocumentExtractor) *ingest.Service {
 		s := mustNewIngestService(t, cfg, st)

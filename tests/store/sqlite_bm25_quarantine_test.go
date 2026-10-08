@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_SearchBM25_ExcludesQuarantined is a regression guard for #439
@@ -15,7 +16,7 @@ import (
 // contains their terms. An 'ok' chunk matching the same term must still surface.
 func TestSQLiteStore_SearchBM25_ExcludesQuarantined(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
@@ -89,7 +90,7 @@ func TestSQLiteStore_SearchBM25_ExcludesQuarantined(t *testing.T) {
 // ever embedded.)
 func TestSQLiteStore_SearchBM25_ExcludesQuarantinedAfterEmbedding(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {

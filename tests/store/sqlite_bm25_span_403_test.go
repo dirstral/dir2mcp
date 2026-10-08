@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestSQLiteStore_SearchBM25_ResolvesRealLineSpan pins issue #403 F6: a BM25 hit
@@ -18,7 +19,7 @@ import (
 // the query boundary makes it correct regardless of cache warmth.
 func TestSQLiteStore_SearchBM25_ResolvesRealLineSpan(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -74,7 +75,7 @@ func TestSQLiteStore_SearchBM25_ResolvesRealLineSpan(t *testing.T) {
 // citation no client can resolve.
 func TestSQLiteStore_SearchBM25_OmitsSpanWhenNoneStored(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)

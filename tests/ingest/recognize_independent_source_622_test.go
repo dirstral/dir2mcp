@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Regression guard for #622: recognition is an INDEPENDENT representation source
@@ -30,13 +31,13 @@ import (
 func runVideoIngestWithRecognizer(t *testing.T, rec model.Recognizer) *store.SQLiteStore {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	if err := os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("fake-video-bytes"), 0o600); err != nil {
 		t.Fatalf("write video: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -125,11 +126,11 @@ func TestRecognition_NoBackend_StillReportsUnsearchableVideo(t *testing.T) {
 // own status="error" must be preserved so it is retried next run.
 func TestRecognition_RunsWhenTranscriptProviderFails(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "clip.mp4"), []byte("fake-video-bytes"), 0o600); err != nil {
 		t.Fatalf("write video: %v", err)
 	}
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

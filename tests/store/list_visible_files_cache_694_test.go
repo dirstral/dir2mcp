@@ -7,6 +7,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #694 pushed the list_files hidden-path policy into the ListFiles query so the
@@ -27,7 +28,7 @@ import (
 
 func TestListVisibleFilesTotalIsNotCrossedBetweenVisibilityPolicies_694(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestListVisibleFilesTotalIsNotCrossedBetweenVisibilityPolicies_694(t *testi
 // returning dot-prefixed rows.
 func TestListFilesStaysHiddenInclusive_694(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

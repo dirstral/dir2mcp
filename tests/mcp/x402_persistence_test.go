@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/mcp"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestX402PaymentOutcomePersistsAcrossServerRestart pins issue #124's payment
@@ -29,7 +30,7 @@ func TestX402PaymentOutcomePersistsAcrossServerRestart(t *testing.T) {
 	cfg.AuthMode = "none"
 	cfg.X402.FacilitatorURL = facServer.URL
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(t.Context()); err != nil {
 		t.Fatalf("Init store: %v", err)
 	}

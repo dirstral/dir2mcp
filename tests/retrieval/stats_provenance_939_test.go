@@ -8,6 +8,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // model.Stats.CorpusStatsAvailable is PROVENANCE, set at the one place that
@@ -64,7 +65,7 @@ func TestStatsProvenance_FallbackIsNotAvailable_939(t *testing.T) {
 
 func TestStatsProvenance_RealAggregateIsAvailable_939(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("init: %v", err)
 	}

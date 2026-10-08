@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // writePandocStub writes an executable script named exactly `name` and returns its
@@ -15,7 +16,7 @@ import (
 func writePandocStub(t *testing.T, name, body string) string {
 	t.Helper()
 	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
-	p := filepath.Join(t.TempDir(), name)
+	p := filepath.Join(testutil.TempDir(t), name)
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatalf("write stub: %v", err)
 	}

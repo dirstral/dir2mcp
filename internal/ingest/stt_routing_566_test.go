@@ -8,6 +8,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/whisperapi"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // routingConfig loads a config whose DEFAULT whisper STT profile is pinned to
@@ -32,7 +33,7 @@ func routingConfig(t *testing.T, routeKey string) config.Config {
 	if routeKey != "" {
 		yaml += "media:\n  stt:\n    language_providers:\n      " + routeKey + ": whisper-ru\n"
 	}
-	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	path := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

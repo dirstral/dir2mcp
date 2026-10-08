@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // processMediaForWindows ingests a single media file under the given multimodal
@@ -24,13 +25,13 @@ func processMediaForWindows(t *testing.T, mode, name string, dur time.Duration) 
 } {
 	t.Helper()
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, name), []byte("MEDIADATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := loadMultimodalConfig(t, root, mode)
 	cfg.STTProvider = "off" // no transcript path in these unit tests
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -134,13 +135,13 @@ func TestProcessDocument_AudioUnsupportedFormatNoMedia(t *testing.T) {
 // media chunk is produced and the ingest still succeeds.
 func TestProcessDocument_UndecodableDurationSkipsMedia(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "broken.mp4"), []byte("MEDIADATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := loadMultimodalConfig(t, root, "replace")
 	cfg.STTProvider = "off"
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

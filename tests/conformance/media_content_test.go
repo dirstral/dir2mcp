@@ -16,6 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // clipBytes is the canned payload the stub extractor returns. It stands in for
@@ -30,7 +31,7 @@ func seedMediaClipCorpus(t *testing.T, relPath, docType string) (config.Config, 
 	t.Helper()
 	ctx := context.Background()
 
-	rootDir := t.TempDir()
+	rootDir := testutil.TempDir(t)
 	stateDir := filepath.Join(rootDir, ".dir2mcp")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)

@@ -31,6 +31,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	"github.com/dirstral/dir2mcp/internal/x402"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ func defaultConfig() config.Config {
 func x402Config(t *testing.T, facilitatorURL string) config.Config {
 	t.Helper()
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.AuthMode = "none"
 	cfg.X402.ToolsCallEnabled = true
 	cfg.X402.FacilitatorURL = facilitatorURL

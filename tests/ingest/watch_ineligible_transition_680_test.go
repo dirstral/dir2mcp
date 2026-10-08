@@ -10,6 +10,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // waitForNoActiveReps polls until relPath has no searchable representation
@@ -38,7 +39,7 @@ func TestWatch_EvictsChunksWhenFileGrowsPastSizeCap(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	target := filepath.Join(root, "notes.txt")
 	if err := os.WriteFile(target, []byte("small and indexable"), 0o600); err != nil {
@@ -48,7 +49,7 @@ func TestWatch_EvictsChunksWhenFileGrowsPastSizeCap(t *testing.T) {
 		t.Fatalf("write keep: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -118,7 +119,7 @@ func TestWatch_EvictsChunksWhenPathBecomesGitignored(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	if err := os.Mkdir(filepath.Join(root, "private"), 0o755); err != nil {
 		t.Fatalf("mkdir private: %v", err)
@@ -130,7 +131,7 @@ func TestWatch_EvictsChunksWhenPathBecomesGitignored(t *testing.T) {
 		t.Fatalf("write keep: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

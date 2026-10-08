@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // The whisper translation engine (media.translate.engine=whisper) sources the
@@ -28,7 +29,7 @@ import (
 // translation derivation identity.
 func TestWhisperTranslate_ProducesEnRepWithOwnTimings(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	// Source: three Russian segments. Translate pass: TWO English segments with
@@ -92,7 +93,7 @@ func TestWhisperTranslate_ProducesEnRepWithOwnTimings(t *testing.T) {
 // broadcast-segmented, not just chunk-segmented like the source track.
 func TestWhisperTranslate_CarriesWordTimings(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	// Source: one Russian segment (1 span). Translate pass: two English segments
@@ -141,7 +142,7 @@ func TestWhisperTranslate_CarriesWordTimings(t *testing.T) {
 // same source bytes does NOT re-invoke the translate pass.
 func TestWhisperTranslate_CacheReused(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	content := []byte("audio-bytes")
 
 	run := func(tr *fakeTranscriber) {
@@ -177,7 +178,7 @@ func TestWhisperTranslate_CacheReused(t *testing.T) {
 // engine's failure semantics.
 func TestWhisperTranslate_FailureIsNonFatal(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет\n[00:02] пока"})
@@ -205,7 +206,7 @@ func TestWhisperTranslate_FailureIsNonFatal(t *testing.T) {
 // clean source transcript's chunks remain pending.
 func TestWhisperTranslate_RoutesThroughQualityGate(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, QualityGatesEnabled: true}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] чистая строка текста\n[00:02] ещё одна чистая строка"})
@@ -259,7 +260,7 @@ func TestWhisperTranslate_RoutesThroughQualityGate(t *testing.T) {
 // source transcript path, so a fully-spam translation leaves no dangling rep.
 func TestWhisperTranslate_FullyScrubbedCreatesNoDanglingRep(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{
 		StateDir:                  stateDir,
@@ -295,7 +296,7 @@ func TestWhisperTranslate_FullyScrubbedCreatesNoDanglingRep(t *testing.T) {
 // input lines — before #538 the unfiltered chunker would have kept all three.
 func TestWhisperTranslate_AppliesFilterWords(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir, MediaFilterWords: []string{"credits roll"}}, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет"})
@@ -326,7 +327,7 @@ func TestWhisperTranslate_AppliesFilterWords(t *testing.T) {
 // actually written.
 func TestWhisperTranslate_PurgeRemovesTranslateCache(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	content := []byte("audio-bytes-to-purge")
 	st := &fakeIngestStore{}
 	svc := mustNewIngestService(t, config.Config{StateDir: stateDir}, st)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // makeDoclingStub writes an executable named "docling" (so it is treated as a
@@ -18,7 +19,7 @@ import (
 // functional-check cache never collides across tests.
 func makeDoclingStub(t *testing.T, exitCode int) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	path := filepath.Join(dir, "docling")
 	script := "#!/bin/sh\nexit " + strconv.Itoa(exitCode) + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

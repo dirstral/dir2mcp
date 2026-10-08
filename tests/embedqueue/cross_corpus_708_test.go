@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/embedqueue"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // #708: two corpora pointed at ONE broker collided. Jobs carried `corpus_id`,
@@ -25,7 +26,7 @@ import (
 func sharedBroker(t *testing.T, maxAttempts int) *embedqueue.SQLiteBroker {
 	t.Helper()
 	broker, err := embedqueue.NewSQLiteBroker(context.Background(),
-		filepath.Join(t.TempDir(), "embed-queue.db"), maxAttempts)
+		filepath.Join(testutil.TempDir(t), "embed-queue.db"), maxAttempts)
 	if err != nil {
 		t.Fatalf("open shared broker: %v", err)
 	}

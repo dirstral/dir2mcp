@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // repSnapshot is a deterministic, store-independent fingerprint of one
@@ -122,8 +123,8 @@ type twoPhaseHarness struct {
 // A fresh translator instance is returned so callers can assert call counts.
 func newTwoPhaseHarness(t *testing.T, twoPhase bool) (*twoPhaseHarness, *fakeTranslator) {
 	t.Helper()
-	root := t.TempDir()
-	stateDir := t.TempDir()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
 
 	rel := []string{"notes/a.txt", "notes/b.txt", "audio/one.mp3", "audio/two.mp3"}
 	mustWriteFile(t, filepath.Join(root, "notes", "a.txt"), []byte("alpha text body"))

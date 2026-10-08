@@ -9,6 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestMCPPaymentOutcomeRoundTripsExpiry pins the store half of issue #697. The
@@ -18,7 +19,7 @@ import (
 // time, which is what an existing database holds after the migration.
 func TestMCPPaymentOutcomeRoundTripsExpiry(t *testing.T) {
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestMCPPaymentOutcomeRoundTripsExpiry(t *testing.T) {
 // column, and the rows it already held read back with a zero expiry.
 func TestMCPPaymentOutcomeMigratesLegacyRow(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
 
 	legacy := store.NewSQLiteStore(dbPath)
 	if err := legacy.Init(ctx); err != nil {

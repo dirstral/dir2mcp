@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/mcp"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // writeStubPandoc writes an executable shell script that echoes fixed Markdown to
@@ -21,7 +22,7 @@ import (
 func writeStubPandoc(t *testing.T, markdown string) string {
 	t.Helper()
 	skipOnWindows(t, "shell-script stub needs a POSIX sh; Windows cannot run it")
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	script := filepath.Join(dir, "stubpandoc.sh")
 	// The extractor invokes `<script> <tmpfile> -t gfm`; ignore the args and emit
 	// the fixed Markdown so the on-demand annotation source is deterministic.

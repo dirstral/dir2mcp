@@ -10,10 +10,11 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 func TestOpenFile_SecretsBlocked(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "docs", "secret.txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -35,7 +36,7 @@ func TestOpenFile_SecretsBlocked(t *testing.T) {
 // TestOpenFile_SecretsBlocked but writes a benign file and asserts the
 // retrieval succeeds and returns the expected data.
 func TestOpenFile_NonSecretsAllowed(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "docs", "readme.txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -57,7 +58,7 @@ func TestOpenFile_NonSecretsAllowed(t *testing.T) {
 }
 
 func TestOpenFile_PathExcludeOverrides(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "private", "secret.txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -76,7 +77,7 @@ func TestOpenFile_PathExcludeOverrides(t *testing.T) {
 }
 
 func TestOpenFile_ContentPatternOverride(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	path := filepath.Join(root, "docs", "data.txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)

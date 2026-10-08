@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestEmbeddedChunkWalkPerf_732 measures the cost of a full keyset walk of
@@ -43,7 +44,7 @@ func TestEmbeddedChunkWalkPerf_732(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "perf.sqlite")
+	dbPath := filepath.Join(testutil.TempDir(t), "perf.sqlite")
 	st := store.NewSQLiteStore(dbPath)
 	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil {

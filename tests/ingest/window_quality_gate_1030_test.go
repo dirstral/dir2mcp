@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/quality"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // SPEC §8.2.2 "quality gate per window" (dirstral-spec 0.71.0), dir2mcp #1030.
@@ -117,10 +118,10 @@ func TestWindowQuality_ScriptMismatchUsesTheWindowLanguage(t *testing.T) {
 func TestWindowQuality_AllWindowsRefusedIsTranscribeFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
 	svc.SetTranscriber(&langWindowTranscriber{def: langReply{lang: "ru", conf: 0.9, text: loopText}})
@@ -150,10 +151,10 @@ func TestWindowQuality_AllWindowsRefusedIsTranscribeFailed(t *testing.T) {
 func TestWindowQuality_MixedRefusalsAreALanguageSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
 	st := newRealStore(t)
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
 	svc.SetTranscriber(&langWindowTranscriber{
@@ -230,10 +231,10 @@ func TestWindowQuality_GateOffRefusesNothing(t *testing.T) {
 func TestWindowQuality_MixedTracksAreALanguageSkip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "dub.m4a"), "fake-audio")
 	st := newRealStore(t)
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off", MediaSTTTracks: []string{"0", "1"}}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off", MediaSTTTracks: []string{"0", "1"}}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
 	svc.SetTranscriber(&langWindowTranscriber{
@@ -318,11 +319,11 @@ func TestWindowQuality_PassingWindowsDoNotFailTheMergedTranscript(t *testing.T) 
 func TestWindowQuality_ARefusedTrackRetiresItsOldTranscript(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	body := "fake-audio"
 	writeFile(t, filepath.Join(root, "dub.m4a"), body)
 	st := newRealStore(t)
-	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off", MediaSTTTracks: []string{"0", "1"}}
+	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off", MediaSTTTracks: []string{"0", "1"}}
 	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
 	tr := &langWindowTranscriber{def: langReply{lang: "ru", conf: 0.9, text: ruText}}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // requireWatchIntegration gates the watcher tests behind RUN_INTEGRATION_TESTS:
@@ -70,13 +71,13 @@ func TestWatch_IndexesNewFile(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	if err := os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed"), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -103,14 +104,14 @@ func TestWatch_TombstonesDeletedFile(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	target := filepath.Join(root, "doomed.txt")
 	if err := os.WriteFile(target, []byte("here today"), 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -140,9 +141,9 @@ func TestWatch_IndexesFileInNewSubdir(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -188,7 +189,7 @@ func TestWatch_FollowsSymlinkedDir(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	// A real directory inside the watched root, plus a symlink (sorting first)
 	// pointing at it. Symlink targets must stay within root to be followed,
@@ -204,7 +205,7 @@ func TestWatch_FollowsSymlinkedDir(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -240,9 +241,9 @@ func TestWatch_IndexesFilesInMovedInTree(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -261,7 +262,7 @@ func TestWatch_IndexesFilesInMovedInTree(t *testing.T) {
 
 	// Build a nested tree with a file already inside, then create its top dir
 	// under the watched root in one shot.
-	staging := filepath.Join(t.TempDir(), "tree")
+	staging := filepath.Join(testutil.TempDir(t), "tree")
 	if err := os.MkdirAll(filepath.Join(staging, "a", "b"), 0o755); err != nil {
 		t.Fatalf("mkdirall: %v", err)
 	}
@@ -281,13 +282,13 @@ func TestWatch_RespectsGitignoreAndSizeCap(t *testing.T) {
 	requireWatchIntegration(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("ignored.txt\n"), 0o600); err != nil {
 		t.Fatalf("write gitignore: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)

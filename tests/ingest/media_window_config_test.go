@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // processMediaWithWindowCfg ingests a single media file under augment mode with
@@ -19,7 +20,7 @@ import (
 func processMediaWithWindowCfg(t *testing.T, name, modality string, dur time.Duration, audioSec, videoSec int) (windows, lastEndMS int) {
 	t.Helper()
 	t.Setenv("GEMINI_API_KEY", "gk")
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, name), []byte("MEDIADATA"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +29,7 @@ func processMediaWithWindowCfg(t *testing.T, name, modality string, dur time.Dur
 	cfg.MediaAudioWindowSec = audioSec
 	cfg.MediaVideoWindowSec = videoSec
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	if err := st.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

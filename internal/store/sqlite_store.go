@@ -794,6 +794,12 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// result it had already paid for. Existing rows default to 0, which
 		// reads back as a zero time and keeps the old TTL fallback.
 		`ALTER TABLE mcp_payment_outcomes ADD COLUMN expires_unix INTEGER NOT NULL DEFAULT 0`,
+		// output_root scopes a subtitle write-back ownership row to the root it
+		// was written under (SPEC §8.6.14, df-003 §5.6). The column came after
+		// the table, so a state database made by a build with the table but
+		// without the column gets it here; its rows were all written beside the
+		// media, which is the '' default.
+		`ALTER TABLE emitted_artifacts ADD COLUMN output_root TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -908,6 +914,20 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS emitted_artifacts (
+  rel_path TEXT PRIMARY KEY,
+  doc_id INTEGER NOT NULL,
+  output_root TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL,
+  lang TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  mtime_unix INTEGER NOT NULL DEFAULT 0,
+  content_sha256 TEXT NOT NULL DEFAULT '',
+  emitted_unix INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS emitted_artifacts_doc_idx ON emitted_artifacts(doc_id);
 
 CREATE TABLE IF NOT EXISTS mcp_sessions (
   session_id TEXT PRIMARY KEY,
@@ -2314,6 +2334,18 @@ func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) e
 			SELECT rep_id FROM representations
 			WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = ?)
 		 )`,
+		normalizedPath,
+	); err != nil {
+		return err
+	}
+	// A tombstoned document owns no subtitle write-back artifacts any more (SPEC
+	// §8.6.14 / df-003 §5.6): its records go with it. The files on disk are left
+	// alone, so if the media comes back they are seen as authored sidecars rather
+	// than silently re-adopted as outputs of a document that no longer exists.
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM emitted_artifacts
+		 WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = ?)`,
 		normalizedPath,
 	); err != nil {
 		return err

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // Regression guards for #950, measured on a live pilot: a periodic re-scan retried
@@ -43,14 +44,14 @@ func (r *brokenThenHealthyRecognizer) Recognize(_ context.Context, _ string) (mo
 func newRecognitionFailureService(t *testing.T, root string, rec *brokenThenHealthyRecognizer) (*store.SQLiteStore, func() error) {
 	t.Helper()
 	ctx := context.Background()
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 	cfg := config.Default()
 	cfg.RootDir = root
-	cfg.StateDir = t.TempDir()
+	cfg.StateDir = testutil.TempDir(t)
 	cfg.RecognizeProvider = "serve"
 	cfg.RecognizeTimeout = time.Second
 	cfg.RecognizeTimeoutPerMediaSecond = 0
@@ -69,7 +70,7 @@ func newRecognitionFailureService(t *testing.T, root string, rec *brokenThenHeal
 func TestRecognitionFailure_DoesNotEmptyTheCorpus(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "broadcast.mp4"), "fake-video-bytes")
 	writeFile(t, filepath.Join(root, "broadcast.vtt"),
 		"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nWebb delivers the pitch\n\n"+
@@ -128,7 +129,7 @@ func TestRecognitionFailure_DoesNotEmptyTheCorpus(t *testing.T) {
 // shows in recent_failures after a restart) exactly as before #950.
 func TestRecognitionFailure_EmptyDocumentStillFailsLoudly(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video-bytes")
 
 	rec := &brokenThenHealthyRecognizer{healAfter: 1 << 30}

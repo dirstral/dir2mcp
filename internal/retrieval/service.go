@@ -2386,6 +2386,15 @@ func (s *Service) generateGroundedAnswer(
 			// in that set (F3).
 			citations = citationsForIndices(hits, usedIdx)
 			answer = stripHallucinatedCitations(answer, citations)
+			// A surviving tag names a shown document; its span must also be
+			// one the model was shown (#1082, SPEC §9.4.1). Rewrite the span
+			// into the shown block's, never the other way round. The wire
+			// shape is unchanged, so the count goes to the log only.
+			var clamped int
+			answer, clamped = clampCitationTagSpans(answer, citations)
+			if clamped > 0 {
+				s.logf("rag: clamped %d inline citation tag(s) to the span the model was shown", clamped)
+			}
 		} else {
 			// An empty or whitespace-only reply. The call succeeded and
 			// produced nothing usable, so the fallback stands and says so.

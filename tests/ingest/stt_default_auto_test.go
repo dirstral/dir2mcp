@@ -5,6 +5,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // A fully local configuration binds embedding and chat to a local endpoint and
@@ -21,8 +22,8 @@ func TestDefaultSTTIsAutoAndStartsWithoutAKey(t *testing.T) {
 	if cfg.STTProvider != "auto" {
 		t.Fatalf("default stt provider = %q, want auto", cfg.STTProvider)
 	}
-	cfg.RootDir = t.TempDir()
-	cfg.StateDir = t.TempDir()
+	cfg.RootDir = testutil.TempDir(t)
+	cfg.StateDir = testutil.TempDir(t)
 	if _, err := ingest.NewService(cfg, &fakeIngestStore{}); err != nil {
 		t.Fatalf("NewService with the default config and no keys: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // TestProcessDocument_WithholdsContentHashUntilRepsCommit pins the #402 A1 fix:
@@ -20,7 +21,7 @@ import (
 // off content_hash, so a document that never reached the finalize step is
 // reprocessed on restart instead of being silently skipped with zero chunks.
 func TestProcessDocument_WithholdsContentHashUntilRepsCommit(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	absPath := filepath.Join(root, "note.txt")
 	content := "hello world, this is indexable text"
 	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
@@ -62,7 +63,7 @@ func TestProcessDocument_WithholdsContentHashUntilRepsCommit(t *testing.T) {
 // leaves the content_hash done marker set. The document must end up
 // reprocessable (empty hash, error status), not falsely "indexed" (#402 A1).
 func TestProcessDocument_CrashDuringRepsNeverMarksDone(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	absPath := filepath.Join(root, "note.txt")
 	content := "content that would produce at least one chunk"
 	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
@@ -102,7 +103,7 @@ func TestProcessDocument_CrashDuringRepsNeverMarksDone(t *testing.T) {
 // — otherwise the freshly-written title is reverted. This asserts the terminal row
 // carries BOTH the extracted title AND the finalized content_hash.
 func TestProcessDocument_FinalizePreservesOutOfBandTitle(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	absPath := filepath.Join(root, "note.txt")
 	// A markdown H1 makes ExtractTitle yield a title, so persistTitleIfFound writes
 	// documents.title out-of-band during representation generation.
@@ -155,7 +156,7 @@ func TestProcessDocument_FinalizePreservesOutOfBandTitle(t *testing.T) {
 // blank and force re-extraction, not skip on a premature marker (the archive-path
 // analogue of the #402/#485 representation-commit crash window).
 func TestProcessDocument_ArchiveWithholdsContentHashUntilMembersExtracted(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	archiveData := buildZip(t, map[string]string{"notes.txt": "hello from zip archive"})
 	if err := os.WriteFile(filepath.Join(root, "docs.zip"), archiveData, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
@@ -224,7 +225,7 @@ func TestProcessDocument_ArchiveWithholdsContentHashUntilMembersExtracted(t *tes
 // (.7z — classified as an archive but unsupported by the stdlib extractor) stands
 // in for "extraction did not finish".
 func TestProcessDocument_ArchiveExtractionFailureLeavesContentHashUnstamped(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	archiveData := []byte("this is not a real 7z archive; extraction will fail")
 	if err := os.WriteFile(filepath.Join(root, "data.7z"), archiveData, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
@@ -274,7 +275,7 @@ func TestProcessDocument_ArchiveExtractionFailureLeavesContentHashUnstamped(t *t
 // TestProcessDocument_ArchiveWithholdsContentHashUntilMembersExtracted) DOES stamp
 // the marker; this asserts the failing-member counterpart withholds it.
 func TestProcessDocument_ArchiveMemberFailureLeavesContentHashUnstamped(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	archiveData := buildZip(t, map[string]string{"notes.txt": "hello from a zip member whose commit will fail"})
 	if err := os.WriteFile(filepath.Join(root, "docs.zip"), archiveData, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)

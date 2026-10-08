@@ -9,6 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // translation cache tests (issue #267 item 2): the content-addressed artifact
@@ -29,7 +30,7 @@ func TestTranslateCacheKey_SameIdentityStable(t *testing.T) {
 
 	newSvc := func() *ingest.Service {
 		st := &fakeIngestStore{}
-		s := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, st)
+		s := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, st)
 		s.SetTranslator(&fakeTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
 		return s
 	}
@@ -55,7 +56,7 @@ func TestTranslateCacheKey_IdentityChangeMisses(t *testing.T) {
 
 	newSvc := func(prov, modelName string) *ingest.Service {
 		st := &fakeIngestStore{}
-		s := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, st)
+		s := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, st)
 		s.SetTranslator(&fakeTranslator{}, prov, modelName, []string{"en", "fr"})
 		return s
 	}
@@ -97,7 +98,7 @@ func TestTranslateCacheKey_NoIdentityPathSeparatesTargets(t *testing.T) {
 	sourceText := "[00:00] one line"
 
 	// No SetTranslator -> empty translate identity -> bytes+text(+target) key.
-	none := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
+	none := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, &fakeIngestStore{})
 
 	kEn := none.TranslateCacheKey(content, sourceText, "ru", "en")
 	kFr := none.TranslateCacheKey(content, sourceText, "ru", "fr")
@@ -107,7 +108,7 @@ func TestTranslateCacheKey_NoIdentityPathSeparatesTargets(t *testing.T) {
 
 	// An identity-folded key for the same source+target must differ from the
 	// no-identity key (the identity is folded in).
-	with := mustNewIngestService(t, config.Config{StateDir: t.TempDir()}, &fakeIngestStore{})
+	with := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, &fakeIngestStore{})
 	with.SetTranslator(&fakeTranslator{}, "mistral", "m1", []string{"en"})
 	if k := with.TranslateCacheKey(content, sourceText, "ru", "en"); k == kEn {
 		t.Fatalf("identity-folded key must differ from no-identity key (got %q for both)", k)
@@ -120,7 +121,7 @@ func TestTranslateCacheKey_NoIdentityPathSeparatesTargets(t *testing.T) {
 // translate identity — the cross-corpus "derive once" guarantee of #267 item 2.
 func TestTranslation_CrossCorpusReuse(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := testutil.TempDir(t)
 	content := []byte("audio-bytes")
 
 	run := func(tr *fakeTranslator) {
@@ -179,7 +180,7 @@ func TestTranslateCacheKey_NameHintModeMisses(t *testing.T) {
 
 	newSvc := func(nameHints bool) *ingest.Service {
 		s := mustNewIngestService(t, config.Config{
-			StateDir:                t.TempDir(),
+			StateDir:                testutil.TempDir(t),
 			MediaTranslateNameHints: nameHints,
 		}, &fakeIngestStore{})
 		s.SetTranslator(&fakeTranslator{}, "mistral", "m1", []string{"en", "fr"})

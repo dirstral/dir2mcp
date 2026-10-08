@@ -229,7 +229,7 @@ vary by deployment. The commonly used variables are:
 | `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
 | `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output {output} {input}`). dir2mcp replaces `{input}` with the document path and `{output}` with a new temporary directory for each call, then reads the output file from that directory (JSON with the default template). Do not use `--output -`: docling writes a file named `-` and dir2mcp reads no output. When set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
 | `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
-| `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `900`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
+| `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `3600`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
 | `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
 | _(Mistral endpoint)_ | — | The Mistral base URL is **not** configurable via an environment variable. To proxy Mistral or point at a private/custom endpoint, add a `providers:` entry with a `base_url` (see [Self-hosted / GPU-VPS provider endpoints](#self-hosted--gpu-vps-provider-endpoints-embed--ocr--stt)) |
@@ -421,19 +421,20 @@ spec defines none of those today, so that decision belongs in `dirstral-spec` fi
 ### docling time limit per document
 
 The docling CLI runs once for each document. Each run has a time limit, so one
-slow document cannot stop indexing. The default limit is 900 seconds (15
-minutes).
+slow document cannot stop indexing. The default limit is 3600 seconds (1
+hour).
 
 ```yaml
 ingest:
   docling:
-    timeout_sec: 1800   # default: 900; must be greater than 0
+    timeout_sec: 7200   # default: 3600; must be greater than 0
 ```
 
-- Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=1800`. The env value wins over the file.
+- Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=7200`. The env value wins over the file.
 - A value of `0` or less stops startup with a config error. An env value that is not an integer is ignored, and startup shows a warning.
-- When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 15m0s (limit set by ingest.docling.timeout_sec)`.
-- Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of this type took about 13 minutes with docling on CPU. On a slower or busy host, set a higher limit.
+- When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 1h0m0s (limit set by ingest.docling.timeout_sec)`.
+- At the same moment, the daemon log gets one line for the timeout, for example `docling: timed out on reports/annual.pdf after 1h0m0s (ingest.docling.timeout_sec=3600); the document is recorded as failed`. Other extraction failures (docling, docling-serve, Mistral OCR, pandoc) also get one log line each, with the engine, the document path and a short reason. The line never carries document text.
+- Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of about 195 pages took about 13 minutes with docling on CPU on an idle 16-core host, and about 20 minutes on the same host under load. The first default of 900 seconds failed that document. On a slower or busier host, set a higher limit.
 - The limit applies to the docling CLI only. `docling-serve` uses its own request limit.
 
 ### docling extraction over HTTP (docling-serve)
@@ -613,6 +614,85 @@ merged chunk records the boundaries of its member segments, so export splits it
 back into the authored cues (or the STT segments). With
 `transcript_chunk_sec: 0`, a sidecar chunk is a block of cues packed to 1200
 characters with no recorded boundaries, so export renders that block as one cue.
+
+### Subtitle write-back: subtitles beside the media as it is indexed (SPEC §8.6.14)
+
+`dir2mcp export` renders one document on demand. An archive whose editors,
+players or downstream tools read subtitle files from the media's own folder
+wants every document's subtitles **on disk**, kept current as the corpus grows,
+without an operator exporting 140,000 documents one at a time. Write-back does
+that. It is **off by default**.
+
+```yaml
+media:
+  subtitles:
+    ttml:
+      enabled: true         # only needed when `ttml` is listed below
+    emit:
+      enabled: true         # default false
+      formats: [vtt, ttml]  # subset of vtt|srt|ttml; default [vtt]
+      languages: []         # [] => every language the document has a transcript for
+      policy: if_missing    # if_missing (default) | refresh
+      dir: ""               # "" => beside the media; else mirror the corpus tree under this root
+```
+
+Once a media document's transcripts exist (STT, sidecar, translation), dir2mcp
+writes:
+
+| Artifact | Name | When |
+|---|---|---|
+| VTT / SRT | `<stem>.<lang>.vtt` (the [sidecar shape](#subtitle-sidecars-which-file-becomes-a-transcript-spec-864)) | once per transcript language |
+| TTML | `<stem>.ttml`, bilingual (source + first `media.translate.target_langs` entry the document has) | once per document |
+
+With `media.variants.group: true` the stem is the **group** stem
+(`episode_1080p.mp4` → `episode.ru.vtt`), so one set of files serves every
+rendition. The cues are **identical to `dir2mcp export`** for the same document,
+language and format: one renderer, one cue pipeline (`filter_words`, the
+`media.subtitles.*` cleaning, `segmentation`). A written VTT or TTML also
+carries a one-line provenance comment that export does not (see below). **SMIL is never written** by
+write-back: an archive's packaging manifests belong to whatever produced the
+media, and stay an on-demand `export --format ttml --out` concern.
+
+**A written file is dir2mcp's output, not a human's.** Every file written is
+recorded in the state database (path, size, mtime, content hash). While it is
+unchanged on disk it is **owned**: sidecar discovery skips it, so writing a VTT
+beside a video never changes the video's identity, never re-ingests the VTT as
+an "authored" transcript, never bypasses the quality gate, and never stops a
+better STT model from re-transcribing the video later. Ownership belongs to the
+record, not to the setting: turning write-back off later does not turn the files
+it wrote into authored transcripts. A written file someone **edits** stops being
+owned and becomes an authored sidecar from then on, with the usual precedence
+over STT. Discovery decides that by size and mtime (a stat, since it runs over
+every file on every scan); before a `refresh` rewrite dir2mcp also checks the
+file's bytes against the recorded hash, so an edit that kept the same size and
+timestamp is never overwritten either. Files dir2mcp did not write are **never
+overwritten**: under `if_missing` an existing sidecar of that format and
+language simply counts as present, and under `refresh` only owned files whose
+render changed are rewritten (so a re-derived transcript reaches disk). Files
+written under a separate `dir` are outputs only; discovery never looks there, so
+they neither bind as sidecars nor need excluding. That root must lie outside the
+corpus, and each ownership record remembers the root it was written under, so
+changing `dir` later never lets an old record claim an in-corpus file.
+
+**Ownership survives losing the state folder.** The ownership records live in
+the state database, which can be deleted, reset for a fresh index, or lost with
+a disk. So every written VTT and TTML also proves itself: right after the header
+it carries a comment such as `NOTE dir2mcp-emitted v1 sha256=…`, holding the hash
+of the rest of the file. When a scan finds a subtitle file with no record, it
+checks that comment: an intact one means dir2mcp's own unedited output, which is
+treated as owned and re-recorded; a mismatch means someone edited it, so it is
+authored. Players ignore the comment. SRT has no comment syntax, so an SRT that
+outlives its record reads as authored; still back up the state folder before
+resetting it.
+
+Each write is atomic. A failed write is a non-fatal per-document outcome,
+recorded on the [batch manifest](#extractor-observability-which-provider-ran-and-why)
+as `SUBTITLE_WRITE_FAILED`; the transcript stays indexed. Written artifacts
+appear in the manifest's `outputs` as `vtt:ru`, `srt:en`, `ttml`. Under
+`media.batch.two_phase` the files are written in the derivation pass and are the
+same files single-pass writes. Enabling write-back on an already-indexed corpus
+fills the files in on the next scan without a reindex. A `source.kind: s3`
+corpus has no filesystem to write beside the media and requires `dir`.
 
 ### Recognition: how long one media file may take
 
@@ -795,6 +875,13 @@ Notes:
 - A file that **stops** being eligible is retired at once. If it grows past `ingest.max_file_mb` it keeps a visible `skipped` row with the reason, and its chunks leave retrieval. If it becomes gitignored it is tombstoned, exactly as a full rescan would tombstone it. An edit to a `.gitignore` file triggers a reconcile of the tree, because one rule can change the eligibility of many paths at once.
 - **The watcher needs a filesystem.** `source.kind: local` and `source.kind: nfs` are ordinary directory trees, so both use it. A remote corpus (`source.kind: s3`) has no filesystem to watch, so the watcher does not start for it. The index reconciles on a periodic rescan of the remote source instead, and `dir2mcp up` prints a warning at startup. `watch_debounce` and the `watch_overflows` stat apply only to the filesystem watcher; a remote corpus reports neither.
 - Env equivalents: `DIR2MCP_INGEST_WATCH=true`, `DIR2MCP_INGEST_WATCH_DEBOUNCE=500ms`.
+- **What a rescan reads.** A text document is confirmed by its content hash on
+  every scan (an in-place edit that keeps size and timestamp is still caught). A
+  local or NFS **media** file whose size and mtime match the recorded document is
+  skipped without being read (SPEC §7.8's cheap pre-check), and so is an S3 object
+  whose ETag and size match. On a large video archive this is the difference
+  between a rescan that stats files and one that reads terabytes; the first scan
+  still reads each selected rendition once.
 
 ### Gemini embeddings (`gemini-embedding-001`)
 

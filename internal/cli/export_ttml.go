@@ -4,25 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
-	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
-// runTTMLExport renders a document's transcript(s) as the optional broadcast
-// TTML packaging surface (SPEC §8.6.10) and, when enabled, a companion SMIL
-// document. It is reached only for --format ttml. The surface is gated by config
-// (media.subtitles.ttml.enabled) and OFF by default, so a disabled config never
-// reaches the render path. With one language it emits monolingual TTML; with a
-// --secondary-lang whose transcript exists it emits bilingual TTML aligned
-// within the configured tolerance. A requested language with no transcript is
-// reported as INVALID_FIELD. SMIL fails open: when probe metadata is
-// unavailable the SMIL is omitted but the TTML is still emitted.
+// runTTMLExport renders the optional bilingual TTML packaging surface (SPEC
+// §8.6.10) and, when enabled, its companion SMIL. Cue resolution, cleaning and
+// alignment live in internal/subexport so ingest-time write-back (§8.6.14)
+// produces the same bytes; this function owns only the CLI contract: the gate,
+// the historical error wording and exit codes, and the file emission.
 func (a *App) runTTMLExport(ctx context.Context, global globalOptions, cfg config.Config, ts transcriptStore, opts exportOptions) int {
 	if !cfg.MediaSubtitlesTTMLEnabled {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
@@ -30,119 +25,29 @@ func (a *App) runTTMLExport(ctx context.Context, global globalOptions, cfg confi
 		return exitConfigInvalid
 	}
 
-	// The same cue-preparation pipeline VTT/SRT render through (issue #729). It is
-	// built after the enabled gate so a disabled surface still reports "TTML export
-	// is disabled" rather than an unrelated config error.
-	pipe, err := newCuePipeline(cfg)
+	renderer, err := subexport.NewRenderer(cfg)
 	if err != nil {
 		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid, err.Error())
 		return exitConfigInvalid
 	}
 
-	primaryCues, primaryLang, code := a.resolveCues(ctx, global, ts, opts.relPath, opts.lang, pipe)
-	if code != exitSuccess {
+	ttml, primaryLang, err := renderer.RenderTTML(ctx, ts, opts.relPath, opts.lang, opts.secondaryLang)
+	if err != nil {
+		// A missing language is INVALID_FIELD on this surface (§8.6.3). The
+		// secondary resolution runs after the primary succeeded, so an
+		// ErrNoLanguage naming the secondary tag is attributed to it.
+		lang := opts.lang
+		if opts.secondaryLang != "" && strings.Contains(err.Error(), fmt.Sprintf("lang %q", opts.secondaryLang)) {
+			lang = opts.secondaryLang
+		}
+		code := exitGeneric
+		if errors.Is(err, subexport.ErrNoLanguage) {
+			code = exitConfigInvalid
+		}
+		writeCLIError(a.stderr, global.jsonOutput, code, exportErrorMessage(err, opts.relPath, lang, true))
 		return code
 	}
-
-	var bilingual []subtitle.BilingualCue
-	if opts.secondaryLang != "" {
-		secondaryCues, secondaryLang, scode := a.resolveCues(ctx, global, ts, opts.relPath, opts.secondaryLang, pipe)
-		if scode != exitSuccess {
-			return scode
-		}
-		// Both languages are cleaned by resolveCues BEFORE alignment, so the cue
-		// set that is aligned is exactly the cue set that is rendered. Aligning
-		// pre-clean cues would pair (and time-region-merge) cues that cleaning then
-		// drops, which is both non-deterministic w.r.t. config and breaks the
-		// §8.6.10 guarantee that both runs map back to the same segment span.
-		bilingual = subtitle.AlignBilingual(primaryCues, secondaryCues,
-			primaryLang, secondaryLang, cfg.MediaSubtitlesTTMLAlignToleranceMS)
-	} else {
-		bilingual = subtitle.MonolingualBilingualCues(primaryCues, primaryLang)
-	}
-	if len(bilingual) == 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric,
-			fmt.Sprintf("document %q transcript has no time-coded cues to export", opts.relPath))
-		return exitGeneric
-	}
-
-	ttml := subtitle.RenderTTML(bilingual, primaryLang)
 	return a.emitTTMLExport(ctx, global, cfg, opts, primaryLang, ttml)
-}
-
-// resolveCues loads the transcript representation for lang, builds its cues, and
-// runs them through the shared cue pipeline (word filter + editorial cleaning).
-// A non-empty lang with no matching transcript is reported as INVALID_FIELD
-// (SPEC §8.6.10/§8.6.3).
-//
-// It returns the cues AND the resolved language tag, or an exit code on error.
-// Returning the tag is the fix for issue #730: `--lang` is a SELECTOR, not the
-// value to emit. With `--lang` omitted the selector is empty but the selected
-// representation still knows its own language, and passing the raw flag through
-// produced `xml:lang=""` on a transcript that records `en`.
-func (a *App) resolveCues(ctx context.Context, global globalOptions, ts transcriptStore, relPath, lang string, pipe cuePipeline) ([]subtitle.Cue, string, int) {
-	reps, err := ts.TranscriptRepresentations(ctx, relPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("no document found at %q", relPath))
-			return nil, "", exitGeneric
-		}
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("load transcript representations: %v", err))
-		return nil, "", exitGeneric
-	}
-	if len(reps) == 0 {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric,
-			fmt.Sprintf("document %q has no transcript representation", relPath))
-		return nil, "", exitGeneric
-	}
-
-	rep, ok := selectTranscriptRep(reps, lang)
-	if !ok {
-		// A requested language with no transcript is a client field error, not a
-		// server failure (SPEC §8.6.10: "Requesting an export for a language with
-		// no transcript is INVALID_FIELD").
-		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
-			fmt.Sprintf("INVALID_FIELD: document %q has no transcript for language %q", relPath, lang))
-		return nil, "", exitConfigInvalid
-	}
-
-	rows, err := ts.TranscriptSpanChunks(ctx, rep.RepID)
-	if err != nil {
-		writeCLIError(a.stderr, global.jsonOutput, exitGeneric, fmt.Sprintf("load transcript chunks: %v", err))
-		return nil, "", exitGeneric
-	}
-	chunks := make([]subtitle.TranscriptChunk, 0, len(rows))
-	for _, r := range rows {
-		chunks = append(chunks, subtitle.TranscriptChunk{Text: r.Text, Span: r.Span})
-	}
-	return pipe.apply(subtitle.BuildCues(chunks)), resolvedExportLanguage(rep), exitSuccess
-}
-
-// resolvedExportLanguage reports the language tag to emit for a selected
-// transcript representation (issue #730).
-//
-// The representation's OWN recorded tag wins whenever it has one. That is the
-// authoritative record of what language the cues are actually in, and it is what
-// makes an omitted --lang work: selectTranscriptRep returns the first/source
-// transcript, and its meta_json language is the tag that describes it.
-// Preferring the record also canonicalizes the spelling, since --lang matching
-// is case-insensitive: `--lang EN` against a transcript recording `en` emits
-// `en`, not the caller's `EN`.
-//
-// When the representation records no language at all, the tag stays EMPTY, and
-// the caller's --lang is deliberately NOT echoed in its place. That case is
-// reachable only with an omitted --lang anyway (a non-empty --lang can only
-// match a representation that recorded a language, so there is nothing to echo),
-// i.e. a legacy transcript indexed before language tagging. There is no
-// fallback by design: an empty xml:lang means "no language information is
-// available" per XML 1.0 §2.12 and is what TTML1's own examples use, whereas
-// substituting a guessed or configured default would put a plausible-but-wrong
-// BCP-47 tag into a broadcast subtitle file. Players act on that tag (track
-// selection, font/shaping), so a wrong tag misroutes where an absent one merely
-// degrades. Downstream, RenderTTML omits per-run xml:lang and RenderSMIL omits
-// systemLanguage for an empty tag.
-func resolvedExportLanguage(rep store.TranscriptRepresentation) string {
-	return transcriptRepLanguage(rep.MetaJSON)
 }
 
 // emitTTMLExport writes the TTML document and, when SMIL is enabled and an --out

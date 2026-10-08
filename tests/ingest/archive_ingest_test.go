@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
 // buildZip returns the bytes of a zip archive containing the provided files.
@@ -66,13 +67,13 @@ func buildTarGz(t *testing.T, files map[string]string) []byte {
 func runArchiveIngest(t *testing.T, archiveName string, archiveData []byte) *store.SQLiteStore {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	if err := os.WriteFile(filepath.Join(root, archiveName), archiveData, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
@@ -180,7 +181,7 @@ func TestArchiveIngest_ZipSlipRejected(t *testing.T) {
 // the seen map and got deleted by markMissingAsDeleted.
 func TestArchiveIngest_MembersNotTombstonedOnRescan(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 
 	archiveData := buildZip(t, map[string]string{
 		"notes.txt": "hello from zip",
@@ -191,7 +192,7 @@ func TestArchiveIngest_MembersNotTombstonedOnRescan(t *testing.T) {
 	}
 
 	// Use a single store across both scans so tombstoning is observable.
-	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
