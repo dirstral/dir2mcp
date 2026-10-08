@@ -38,9 +38,14 @@ import (
 // query scores 1/(rrfK+1) no matter how irrelevant it is), so neither is a
 // usable absolute reading.
 //
-// SCALE AND SHIPPED VALUES. See evidenceThresholds below. The thresholds are
-// server constants, NOT operator-configurable: `retrieval.min_score` configures
-// the pruning floor only (§9.4.3, "Configuration").
+// SCALE AND SHIPPED VALUES. See evidenceThresholds below for the fixed floors.
+// The cosine threshold in effect is the floor OR a value calibrated from the
+// null baseline of this embedder and corpus (evidence_baseline.go, spec
+// 0.80.0), and an operator may pin it with `rag.evidence_threshold`;
+// `retrieval.min_score` configures the pruning floor only (§9.4.3,
+// "Configuration"). Every verdict function below takes the thresholds in
+// effect as its first argument, so a verdict and the number it was measured
+// against can never come from two different places.
 //
 // AGGREGATION. The eligible set clears the threshold when its STRONGEST hit
 // does, each hit measured against the threshold for its OWN scale. Measuring per
@@ -54,15 +59,18 @@ const (
 	evidenceScaleRerank = "rerank"
 )
 
-// evidenceThresholds maps an evidence scale to the absolute minimum signal a hit
-// must reach to count as evidence. The values are deliberately conservative:
+// evidenceThresholds maps an evidence scale to the FIXED FLOOR of the absolute
+// minimum signal a hit must reach to count as evidence. The values are
+// deliberately conservative:
 //
 //   - cosine 0.05. Embedding cosine baselines are provider-dependent (the
 //     similarity an unrelated pair scores differs by an order of magnitude
-//     between embedding families), so a threshold that generalizes across
-//     providers can only reject near-orthogonal evidence. Raising it would make
-//     the guard silently corpus- and provider-specific, which is the failure the
-//     scale-free relative floor was introduced to avoid.
+//     between embedding families), so one constant that generalizes across
+//     providers can only reject near-orthogonal evidence. With a local embedder
+//     it therefore never fires (#1081). The calibrated rule in
+//     evidence_baseline.go raises the cosine threshold to the null baseline of
+//     the embedder and corpus in use, never below this floor, so the floor is
+//     what a provider whose unrelated-text similarity is genuinely low keeps.
 //   - rerank 0.02. A cross-encoder's relevance score is calibrated for the
 //     (query, chunk) pair rather than the corpus, so a low reading is meaningful
 //     on its own; providers put clearly-irrelevant pairs well below this.
@@ -105,12 +113,12 @@ const (
 )
 
 // hitEvidenceVerdict names the absolute verdict for ONE hit: its EvidenceScore
-// measured against the shipped threshold for its own scale, or "unknown" when
+// measured against the threshold in effect for its own scale, or "unknown" when
 // the hit carries no absolute signal (empty or unrecognized scale). This is the
 // per-hit half of the §9.4.3 exposure (#785); the aggregate half reuses
 // classifyEvidence below so the two can never disagree.
-func hitEvidenceVerdict(h model.SearchHit) string {
-	threshold, ok := evidenceThresholds[h.EvidenceScale]
+func hitEvidenceVerdict(thresholds map[string]float64, h model.SearchHit) string {
+	threshold, ok := thresholds[h.EvidenceScale]
 	if !ok {
 		return verdictUnknown
 	}
@@ -124,9 +132,9 @@ func hitEvidenceVerdict(h model.SearchHit) string {
 // place, just before hits leave retrieval. Stamped here rather than in the MCP
 // layer so the verdict and the thresholds it is measured against live in one
 // package and cannot drift.
-func stampEvidenceVerdicts(hits []model.SearchHit) {
+func stampEvidenceVerdicts(thresholds map[string]float64, hits []model.SearchHit) {
 	for i := range hits {
-		hits[i].EvidenceVerdict = hitEvidenceVerdict(hits[i])
+		hits[i].EvidenceVerdict = hitEvidenceVerdict(thresholds, hits[i])
 	}
 }
 
@@ -135,8 +143,8 @@ func stampEvidenceVerdicts(hits []model.SearchHit) {
 // with "unknown" only when NO eligible hit carries an absolute signal. It is
 // classifyEvidence with a wire name, and delegates to it so the exposed
 // aggregate and the abstention decision cannot diverge.
-func aggregateEvidenceVerdict(hits []model.SearchHit) string {
-	switch classifyEvidence(hits) {
+func aggregateEvidenceVerdict(thresholds map[string]float64, hits []model.SearchHit) string {
+	switch classifyEvidence(thresholds, hits) {
 	case evidenceSufficient:
 		return verdictSufficient
 	case evidenceInsufficient:
@@ -147,12 +155,12 @@ func aggregateEvidenceVerdict(hits []model.SearchHit) string {
 }
 
 // classifyEvidence applies the absolute insufficient-evidence test (§9.4.3) to
-// the eligible hit set. See the package comment above for the signal, its scale,
-// the shipped thresholds and the aggregation rule.
-func classifyEvidence(hits []model.SearchHit) evidenceVerdict {
+// the eligible hit set against the thresholds in effect. See the package
+// comment above for the signal, its scale, the floors and the aggregation rule.
+func classifyEvidence(thresholds map[string]float64, hits []model.SearchHit) evidenceVerdict {
 	scored := false
 	for _, h := range hits {
-		threshold, ok := evidenceThresholds[h.EvidenceScale]
+		threshold, ok := thresholds[h.EvidenceScale]
 		if !ok {
 			continue
 		}

@@ -110,6 +110,15 @@ passages the model was shown, and withholds the answer when a claim is not suppo
 It is **off by default**, because it costs one extra generation call per answered
 request.
 
+It is the refusal setting for a question that is **on topic but unanswered**: such a
+question retrieves evidence as strong as an answerable one, so no similarity
+threshold (the guard below) can separate them. Measured on the end-to-end benchmark
+with local models (`bench/results/2026-09-28-local-qwen2.5-7b-verify/`, 120
+questions, `qwen2.5:7b-instruct-q4_K_M`): refusals of unanswerable questions rise
+from 25% to 75%, answers that contain a gold answer fall from 75% to 67.5%, false
+refusals of answerable questions rise from 6.2% to 22.5%, and the p50 latency goes
+from 10.9 s to 16.7 s. Turn it on when a wrong answer costs more than a missed one.
+
 The evidence verdict and this check answer different questions. The verdict says whether
 the retrieved material is relevant. It cannot say whether the answer reports what that
 material states, and the two come apart. A corpus that records `Buddy Kennedy
@@ -976,9 +985,29 @@ Two separate controls decide what counts as evidence (SPEC §9.4.3). Both are **
 **2. Abstention uses an ABSOLUTE evidence threshold.** When retrieval returns candidates but none of them is strong enough on an absolute scale, `ask` does not generate an answer from them: it returns an explicit *insufficient evidence* answer with an **empty `citations` array** (a normal result, not an error), and keeps the rejected candidates in `hits` so you can see what was turned down. Its wording differs from the empty-corpus answer, so a caller can tell "I found nothing" apart from "I found material and judged it too weak".
 
 - **Signal and scale:** the hit's own `(query, chunk)` score, tagged with the scale it is on. `cosine` is the vector index's query/chunk cosine similarity; `rerank` is the reranker's relevance score for the pair. A candidate that reached the result set only through lexical BM25 carries no absolute signal (an FTS5 `bm25()` score is corpus-relative, and an RRF score encodes rank rather than relevance).
-- **Shipped values:** `cosine ≥ 0.05`, `rerank ≥ 0.02`. They are deliberately conservative, because embedding cosine baselines are provider-dependent and a tighter default would make the guard silently corpus-specific. They are server constants and are **not** operator-configurable; `retrieval.min_score` configures the pruning floor only.
+- **Thresholds in effect:** `rerank ≥ 0.02`, a server constant. `cosine ≥ max(0.05, null baseline p90)`: the fixed floor `0.05` or, when higher, a value **calibrated for your embedder and corpus** (next paragraph). `retrieval.min_score` configures the pruning floor only.
 - **Aggregation:** the eligible set clears the threshold when its **strongest** hit does, each hit measured against the threshold for its **own** scale (one response may legitimately carry several scales at once).
 - **Blind spot:** when no eligible hit carries an absolute signal at all, the guard fails **open** and the answer is generated. Suppressing answers on a corpus whose vector index is simply unavailable would be the worse failure.
+
+**The null baseline (SPEC §9.4.3, spec 0.76.0).** One fixed cosine value cannot fit every embedding family. With `nomic-embed-text` the top cosine of a question about a subject the corpus does not hold is `0.42` to `0.62`, so a floor of `0.05` never fires and `ask` answers questions the corpus cannot answer (#1081). dir2mcp therefore measures where unrelated questions land for the embedder and corpus in use: it embeds a fixed, shipped set of 32 probe questions about everyday subjects (boiling an egg, the next bus, a flat tire), takes the top cosine of each against the index, and uses the **90th percentile** as the cosine threshold, never below the floor. The p90 is stable: a corpus that happens to cover three of the probes does not move it, while the maximum would jump to an on-topic score and refuse answerable questions.
+
+- **Measured** on the end-to-end benchmark corpus (`bench/`, 10 SQuAD 2.0 articles) with `nomic-embed-text`, on 344 questions that do not overlap the published 120:
+
+  | Rule | cosine threshold | refuses answerable / on-topic unanswerable / off-corpus |
+  | --- | --- | --- |
+  | fixed `0.05` (before) | 0.050 | 0.0% / 0.0% / 0.0% |
+  | null baseline p90 (default) | 0.519 | 1.5% / 0.0% / 26.6% |
+  | null baseline max (for comparison, not shipped) | 0.548 | 5.0% / 1.2% / 65.6% |
+
+  An on-topic unanswered question scores like an answerable one (AUC about 0.6 against about 0.9 for off-corpus questions); the grounding check above is the control for that class. Cloud embedders were not measured; for them the rule keeps the floor wherever their baseline sits below it.
+- **When it is computed:** once indexing stops (`dir2mcp up` warms it in the background) or on the first `ask`, in one embed call of the 32 probes plus one search per probe. It is cached in `<state_dir>/evidence_baseline.json`, keyed by the text embedding model, the probe set version and the indexed chunk count, so a restart reuses it and a reindex or a model change recomputes it. While it is unavailable (not computed yet, or the embedder could not be reached) the floor applies and no request is refused for that reason.
+- **Where to read it:** `dir2mcp doctor` (check `evidence_threshold`) and the `evidence` object of `dir2mcp_stats`, which carries `cosine_threshold`, `cosine_threshold_source` (`auto`, `config` or `floor`), `rerank_threshold` and `null_baseline` (`probes`, `probe_set`, `p50`, `p90`, `max`, `chunks`, `embed_model`, `computed_at`).
+- **Pinning it:** `rag.evidence_threshold` (env `DIR2MCP_RAG_EVIDENCE_THRESHOLD`) is `auto` by default. A number in `(0,1]` sets the cosine threshold directly; the baseline is still computed and reported so you can pick a value from it. `0.05` restores the behaviour of before. Any other value is rejected as invalid config.
+
+  ```yaml
+  rag:
+    evidence_threshold: auto   # auto (default) or a number in (0,1], e.g. 0.55
+  ```
 
 An optional **recency time-decay** boosts newer content for dated corpora (news, logs, changelogs, meeting notes). It is **server-side and config-only** — not an MCP tool parameter, so it changes no tool input/output schema.
 

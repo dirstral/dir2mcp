@@ -531,6 +531,13 @@ type Config struct {
 	//
 	// Off by default: it costs one extra generation call per answered ask.
 	RAGVerifyFaithfulness bool
+	// RAGEvidenceThreshold is the operator's choice for the absolute evidence
+	// threshold on the cosine scale (config `rag.evidence_threshold`, env
+	// DIR2MCP_RAG_EVIDENCE_THRESHOLD; SPEC §9.4.3, spec 0.80.0, issue #1081).
+	// "auto" (the default) derives it per embedder and corpus from the null
+	// baseline, never below the fixed floor; a number in (0,1] pins it. Any
+	// other value fails validation. ParseEvidenceThreshold is the one parser.
+	RAGEvidenceThreshold string
 	// RetrievalHyDESuperlative additionally enables the HyDE transform for
 	// SUPERLATIVE questions only (config `retrieval.hyde.superlative`, issue
 	// #897), independently of RetrievalHyDEEnabled. The #897 measurement found
@@ -1504,6 +1511,7 @@ type fileConfig struct {
 	RetrievalHyDEMode                  *string
 	RetrievalHyDESuperlative           *bool
 	RAGVerifyFaithfulness              *bool
+	RAGEvidenceThreshold               *string
 	RetrievalContextualEnabled         *bool
 	RetrievalContextualProvider        *string
 	RetrievalContextualModel           *string
@@ -1687,6 +1695,7 @@ type persistedConfig struct {
 	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
 	RetrievalHyDESuperlative           bool          `yaml:"retrieval_hyde_superlative"`
 	RAGVerifyFaithfulness              bool          `yaml:"rag_verify_faithfulness"`
+	RAGEvidenceThreshold               string        `yaml:"rag_evidence_threshold"`
 	RetrievalContextualEnabled         bool          `yaml:"retrieval_contextual_enabled"`
 	RetrievalContextualProvider        string        `yaml:"retrieval_contextual_provider"`
 	RetrievalContextualModel           string        `yaml:"retrieval_contextual_model"`
@@ -1955,6 +1964,9 @@ func Default() Config {
 		// RAGVerifyFaithfulness defaults to false: the grounding check costs a
 		// second generation call per answered ask (#336).
 		RAGVerifyFaithfulness: false,
+		// RAGEvidenceThreshold defaults to auto: the calibrated rule of SPEC
+		// §9.4.3, which keeps the fixed floor wherever the baseline sits below it.
+		RAGEvidenceThreshold: EvidenceThresholdAuto,
 		// Contextual retrieval (SPEC §8.1.8, #330) defaults to OFF: chunks embed
 		// raw and the embed identity's terminal component stays "off", so an
 		// existing corpus is byte-identical to before the feature existed. The
@@ -2168,6 +2180,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
 		RetrievalHyDESuperlative:           cfg.RetrievalHyDESuperlative,
 		RAGVerifyFaithfulness:              cfg.RAGVerifyFaithfulness,
+		RAGEvidenceThreshold:               cfg.RAGEvidenceThreshold,
 		RetrievalContextualEnabled:         cfg.RetrievalContextualEnabled,
 		RetrievalContextualProvider:        cfg.RetrievalContextualProvider,
 		RetrievalContextualModel:           cfg.RetrievalContextualModel,
@@ -2987,6 +3000,7 @@ func applyRetrievalTuningFileParsed(cfg *Config, fc fileConfig) {
 	if fc.RAGVerifyFaithfulness != nil {
 		cfg.RAGVerifyFaithfulness = *fc.RAGVerifyFaithfulness
 	}
+	applyEvidenceThresholdFileParsed(cfg, fc)
 	if fc.CrossLingualEnabled != nil {
 		cfg.CrossLingualEnabled = *fc.CrossLingualEnabled
 	}
@@ -3771,6 +3785,8 @@ var configKeyAliases = map[string]string{
 	"hyde_superlative":                        "retrieval.hyde.superlative",
 	"rag_verify_faithfulness":                 "rag.verify_faithfulness",
 	"verify_faithfulness":                     "rag.verify_faithfulness",
+	"rag_evidence_threshold":                  "rag.evidence_threshold",
+	"evidence_threshold":                      "rag.evidence_threshold",
 	"retrieval_contextual_enabled":            "retrieval.contextual.enabled",
 	"contextual_enabled":                      "retrieval.contextual.enabled",
 	"retrieval_contextual_provider":           "retrieval.contextual.provider",
@@ -4351,6 +4367,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestPandocCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
+	case "rag.evidence_threshold":
+		cfg.RAGEvidenceThreshold = strPtr(value)
 	case "retrieval.hyde.mode":
 		cfg.RetrievalHyDEMode = strPtr(value)
 	}
@@ -4669,6 +4687,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("retrieval_hyde_mode", cfg.RetrievalHyDEMode)
 	writeBool("retrieval_hyde_superlative", cfg.RetrievalHyDESuperlative)
 	writeBool("rag_verify_faithfulness", cfg.RAGVerifyFaithfulness)
+	writeScalar("rag_evidence_threshold", cfg.RAGEvidenceThreshold)
 	writeBool("retrieval_contextual_enabled", cfg.RetrievalContextualEnabled)
 	writeScalar("retrieval_contextual_provider", cfg.RetrievalContextualProvider)
 	writeScalar("retrieval_contextual_model", cfg.RetrievalContextualModel)
@@ -5047,6 +5066,9 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	}
 	applyDoclingTimeoutEnv(cfg, env)
 	applyRetrievalAdaptiveKEnv(cfg, env)
+	// rag.evidence_threshold (#1081): applied as text; Validate parses it, so
+	// a bad override fails loudly as CONFIG_INVALID rather than being ignored.
+	setTrimmedEnv(env, "DIR2MCP_RAG_EVIDENCE_THRESHOLD", &cfg.RAGEvidenceThreshold)
 }
 
 // applyDoclingTimeoutEnv applies DIR2MCP_DOCLING_TIMEOUT_SEC onto
@@ -6358,7 +6380,54 @@ func (c *Config) validateRAGNumericBounds() error {
 	if c.RAGOversampleFactor < 0 {
 		return fmt.Errorf("rag.oversample_factor must be non-negative: %d", c.RAGOversampleFactor)
 	}
+	if _, _, err := ParseEvidenceThreshold(c.RAGEvidenceThreshold); err != nil {
+		return err
+	}
 	return nil
+}
+
+// applyEvidenceThresholdFileParsed applies rag.evidence_threshold from the
+// parsed file (#1081). Split out of applyRetrievalTuningFileParsed to keep
+// that function within the cyclomatic budget.
+func applyEvidenceThresholdFileParsed(cfg *Config, fc fileConfig) {
+	if fc.RAGEvidenceThreshold != nil {
+		cfg.RAGEvidenceThreshold = *fc.RAGEvidenceThreshold
+	}
+}
+
+// EvidenceThresholdAuto is the rag.evidence_threshold value that selects the
+// calibrated rule (SPEC §9.4.3, spec 0.80.0).
+const EvidenceThresholdAuto = "auto"
+
+// ParseEvidenceThreshold parses rag.evidence_threshold. It returns auto=true
+// for "auto" (and for an empty value, which keeps the default), or auto=false
+// with the pinned cosine threshold for a number in (0,1]. Anything else is an
+// error: a threshold of 0 would disable the guard, which SPEC §9.4.3 lets a
+// server refuse, and a value above 1 can never be reached on the cosine scale.
+func ParseEvidenceThreshold(raw string) (auto bool, pinned float64, err error) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" || trimmed == EvidenceThresholdAuto {
+		return true, 0, nil
+	}
+	value, parseErr := strconv.ParseFloat(trimmed, 64)
+	if parseErr != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return false, 0, fmt.Errorf("rag.evidence_threshold must be \"auto\" or a number in (0,1]: %q", raw)
+	}
+	if value <= 0 || value > 1 {
+		return false, 0, fmt.Errorf("rag.evidence_threshold must be \"auto\" or a number in (0,1]: %v", value)
+	}
+	return false, value, nil
+}
+
+// EvidenceThreshold is the parsed rag.evidence_threshold for the retrieval
+// wiring: auto, or the pinned cosine threshold. An invalid value, which
+// Validate rejects before any wiring runs, reads as auto here.
+func (c Config) EvidenceThreshold() (auto bool, pinned float64) {
+	auto, pinned, err := ParseEvidenceThreshold(c.RAGEvidenceThreshold)
+	if err != nil {
+		return true, 0
+	}
+	return auto, pinned
 }
 
 // validateRetrievalNumericBounds validates the retrieval-tuning numeric knobs —
