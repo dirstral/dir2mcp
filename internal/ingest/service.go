@@ -154,8 +154,14 @@ type Service struct {
 	// primary subtag, so a recording that alternates between two languages
 	// builds each once. Resolved once from config in NewService.
 	languageScope string
-	routeMu       sync.Mutex
-	routes        map[string]routedSTT
+	// routeErrorFallback is the resolved media.stt.on_route_error policy (SPEC
+	// §8.2.4, #1059): true under "default", when a language_providers candidate
+	// that fails with a transport or provider error is replaced once by the
+	// default profile for that window or item; false under "fail", today's
+	// failed window or item.
+	routeErrorFallback bool
+	routeMu            sync.Mutex
+	routes             map[string]routedSTT
 	// languageRouteIDs is media.stt.language_providers resolved to route
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
@@ -1032,6 +1038,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		minTranscriptCoverage:           normalizeMinCoverage(cfg.MediaSTTMinCoverage),
 		onPartialTranscript:             normalizeOnPartialTranscript(cfg.MediaSTTOnPartialTranscript),
 		languageScope:                   normalizeLanguageScope(cfg.MediaSTTLanguageScope),
+		routeErrorFallback:              cfg.RouteErrorFallsBack(),
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -3014,7 +3021,7 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 // means the track produced no source transcript (empty/failed in the transcription
 // pass), which is a legitimate no-op — never a re-transcription.
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
-	transcriptText, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, _, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return err
 	}
@@ -5783,7 +5790,7 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 // single-track path; each additional track N ≥ 1 is persisted under
 // `transcript@t<N>` with its container-declared track/language/label in meta_json.
 func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, string, error) {
-	transcriptText, words, coverage, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, words, coverage, route, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -5881,6 +5888,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// short recording is unchanged (#961).
 	meta.Coverage = coverage
 	s.applyWindowLanguageMeta(&meta, coverage)
+	s.applyItemRouteMeta(&meta, route)
 	s.warnPartialTranscript(doc, tc, coverage)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -6159,7 +6167,7 @@ func (s *Service) warnPartialTranscript(doc model.Document, tc trackContext, cov
 // track N ≥ 1 is first demuxed to a compact per-track audio clip and transcribed as
 // a standalone audio document, keying the transcribe cache on the extracted bytes so
 // each track caches independently.
-func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, error) {
+func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	if tc.audioIndex <= 0 {
 		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "", doc.RelPath)
 	}
@@ -6170,9 +6178,9 @@ func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, c
 			// transcript" (handled by the caller as an empty, non-fatal outcome), not
 			// a provider failure.
 			s.getLogger().Printf("media.stt.tracks: %s has no audio track %d to transcribe; skipping it (§8.6.12)", doc.RelPath, tc.audioIndex)
-			return "", nil, nil, nil
+			return "", nil, nil, nil, nil
 		}
-		return "", nil, nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
+		return "", nil, nil, nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
 	}
 	// Transcribe the extracted clip as a standalone audio document: DocType audio so
 	// transcribe() does not re-demux, and an audio-suffixed rel_path so the provider
@@ -6938,7 +6946,7 @@ func TranscriptLangSuffix(language string) string {
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
-	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
+	text, _, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
 	return text, err
 }
 
@@ -6951,14 +6959,14 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // originRelPath is the rel_path of the DOCUMENT this transcript belongs to,
 // which is doc.RelPath for an ordinary decode and the real document's path for a
 // per-track decode whose doc is synthetic. Only the #974 redecode mark reads it.
-func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, error) {
+func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	if s.transcriber == nil {
-		return "", nil, nil, errors.New("transcriber not configured")
+		return "", nil, nil, nil, errors.New("transcriber not configured")
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", nil, nil, fmt.Errorf("create transcript cache dir: %w", err)
+		return "", nil, nil, nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
 	// Key the cache on the media bytes AND the active STT derivation identity
@@ -6973,6 +6981,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
 	screenedPath := filepath.Join(cacheDir, base+".screened")
+	routePath := filepath.Join(cacheDir, base+".route.json")
 	// #974: an operator asked for this document to be decoded again, so the cache
 	// is not consulted. The entry is rewritten below, so this costs one decode
 	// rather than leaving the document uncached forever.
@@ -6988,13 +6997,17 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
 			// text. A cache hit that dropped it would re-index the same PARTIAL
 			// transcript as a complete one on the next run, which is the whole defect.
-			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), nil
+			// SPEC §8.2.4: the item-level route record is restored with the text
+			// for the same reason the coverage is: a cache hit that dropped it
+			// would record the next run's transcript under the text detector's
+			// language and no route, so the record would differ run to run.
+			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), readCachedItemRoute(routePath), nil
 		}
 	}
 
-	transcript, words, coverage, err := s.transcribe(ctx, doc, content)
+	transcript, words, coverage, route, err := s.transcribe(ctx, doc, content)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		return "", nil, nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
@@ -7006,11 +7019,14 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	// costs an archive that lies. Word timing keeps its best-effort treatment
 	// (missing timing degrades gracefully; missing coverage asserts completeness).
 	if !s.publishCachedCoverage(coveragePath, coverage) {
-		return string(transcriptBytes), words, coverage, nil
+		return string(transcriptBytes), words, coverage, route, nil
+	}
+	if !s.publishCachedItemRoute(routePath, route) {
+		return string(transcriptBytes), words, coverage, route, nil
 	}
 	s.publishScreenedMarker(screenedPath, coverage)
 	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
-		return "", nil, nil, fmt.Errorf("write transcript cache: %w", err)
+		return "", nil, nil, nil, fmt.Errorf("write transcript cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
@@ -7030,7 +7046,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
-	return string(transcriptBytes), words, coverage, nil
+	return string(transcriptBytes), words, coverage, route, nil
 }
 
 // readOrComputeWhisperTranslation produces the English transcript for
@@ -7147,21 +7163,27 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // request when it fits and decodes it in overlapping windows when it does not
 // (issue #954): a 3-hour recording used to be refused whole on the provider's
 // payload cap and left the document at status=error with no transcript.
-func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, error) {
+func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	relPath := doc.RelPath
 	if doc.DocType == "video" {
 		audio, err := s.extractVideoAudioTrack(ctx, doc, content)
 		if err != nil {
 			if errors.Is(err, avutil.ErrNoAudioStream) {
 				s.getLogger().Printf("no audio track to transcribe in video %s; skipping STT", doc.RelPath)
-				return "", nil, nil, nil
+				return "", nil, nil, nil, nil
 			}
-			return "", nil, nil, err
+			return "", nil, nil, nil, err
 		}
 		content = audio
 		relPath = videoAudioRelPath(doc.RelPath)
 	}
-	return s.transcribeStructuredWindowed(ctx, relPath, content)
+	// SPEC §8.2.4: under item scope with an identifier bound, the item's
+	// language is resolved before transcription and selects the route.
+	if s.itemIdentifierActive() {
+		return s.transcribeItemRouted(ctx, relPath, content)
+	}
+	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber)
+	return text, words, coverage, nil, err
 }
 
 // extractVideoAudioTrack demuxes a video's audio track to a compact STT-ready

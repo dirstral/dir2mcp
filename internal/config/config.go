@@ -1273,6 +1273,13 @@ type Config struct {
 	// only when its profile declares stt_validation for the language (config
 	// `media.stt.require_validation`, SPEC §8.2.3). Default false.
 	MediaSTTRequireValidation bool
+	// MediaSTTOnRouteError is what happens when a language_providers route
+	// candidate fails with a transport or provider error (config
+	// `media.stt.on_route_error`, SPEC §8.2.4, dir2mcp #1059): "fail" (default)
+	// keeps the failed window or item; "default" decodes the same audio once on
+	// the default STT profile and records the failed candidate on the
+	// transcript. Any other value is CONFIG_INVALID.
+	MediaSTTOnRouteError string
 	// MediaSTTLanguageCandidates is media.stt.language_providers with each value
 	// as the ordered candidate list SPEC §8.2.3 allows (a single name is a
 	// one-element list). MediaSTTLanguageProviders keeps the FIRST candidate, so
@@ -1592,6 +1599,7 @@ type fileConfig struct {
 	MediaSTTLanguageIdentifier         *string
 	MediaSTTLanguageProbeSec           *int
 	MediaSTTRequireValidation          *bool
+	MediaSTTOnRouteError               *string
 	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
@@ -1773,6 +1781,7 @@ type persistedConfig struct {
 	MediaSTTLanguageIdentifier         string        `yaml:"media_stt_language_identifier"`
 	MediaSTTLanguageProbeSec           int           `yaml:"media_stt_language_probe_sec"`
 	MediaSTTRequireValidation          bool          `yaml:"media_stt_require_validation"`
+	MediaSTTOnRouteError               string        `yaml:"media_stt_on_route_error"`
 	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
@@ -2034,6 +2043,7 @@ func Default() Config {
 		MediaSTTOnPartialTranscript: onPartialTranscriptWarn,
 		MediaSTTLanguageScope:       languageScopeItem,
 		MediaSTTLanguageProbeSec:    30,
+		MediaSTTOnRouteError:        routeErrorFail,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2253,6 +2263,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTLanguageIdentifier:         cfg.MediaSTTLanguageIdentifier,
 		MediaSTTLanguageProbeSec:           cfg.MediaSTTLanguageProbeSec,
 		MediaSTTRequireValidation:          cfg.MediaSTTRequireValidation,
+		MediaSTTOnRouteError:               cfg.MediaSTTOnRouteError,
 		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
@@ -3290,6 +3301,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTRequireValidation != nil {
 		cfg.MediaSTTRequireValidation = *fc.MediaSTTRequireValidation
 	}
+	if fc.MediaSTTOnRouteError != nil {
+		cfg.MediaSTTOnRouteError = *fc.MediaSTTOnRouteError
+	}
 	if fc.MediaSTTTracks != nil {
 		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
@@ -3858,6 +3872,7 @@ var configKeyAliases = map[string]string{
 	"media_stt_language_identifier":           "media.stt.language_identifier",
 	"media_stt_language_probe_sec":            "media.stt.language_probe_sec",
 	"media_stt_require_validation":            "media.stt.require_validation",
+	"media_stt_on_route_error":                "media.stt.on_route_error",
 	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
@@ -4445,6 +4460,8 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaSTTLanguageScope = strPtr(value)
 	case "media.stt.language_identifier":
 		cfg.MediaSTTLanguageIdentifier = strPtr(value)
+	case "media.stt.on_route_error":
+		cfg.MediaSTTOnRouteError = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -4765,6 +4782,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_stt_language_identifier", cfg.MediaSTTLanguageIdentifier)
 	writeInt("media_stt_language_probe_sec", cfg.MediaSTTLanguageProbeSec)
 	writeBool("media_stt_require_validation", cfg.MediaSTTRequireValidation)
+	writeScalar("media_stt_on_route_error", cfg.MediaSTTOnRouteError)
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -5293,6 +5311,7 @@ func (c *Config) Validate() error {
 		c.validateMediaSTTPartialTranscriptFloor,
 		c.validateMediaSTTLanguageScope,
 		c.validateSTTLanguageIdentifier,
+		c.validateMediaSTTOnRouteError,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -6134,6 +6153,39 @@ func (c *Config) validateSTTLanguageIdentifier() error {
 	if provider.Can(prof.Kind, provider.CapSTT) == provider.Unsupported {
 		return fmt.Errorf("CONFIG_INVALID: media.stt.language_identifier provider %q (kind %q) is not speech-to-text capable", name, prof.Kind)
 	}
+	return nil
+}
+
+// routeErrorFail / routeErrorDefault are the two values of
+// media.stt.on_route_error (SPEC §8.2.4): keep the failed window or item, or
+// decode it once more on the default STT profile.
+const (
+	routeErrorFail    = "fail"
+	routeErrorDefault = "default"
+)
+
+// RouteErrorFallsBack reports whether media.stt.on_route_error selects the
+// §8.2.4 fallback: a failed route candidate is replaced once by the default
+// STT profile. The value is normalized by validateMediaSTTOnRouteError.
+func (c Config) RouteErrorFallsBack() bool {
+	return strings.EqualFold(strings.TrimSpace(c.MediaSTTOnRouteError), routeErrorDefault)
+}
+
+// validateMediaSTTOnRouteError normalizes media.stt.on_route_error: fail or
+// default, case-insensitive, with empty defaulting to fail. Anything else is
+// CONFIG_INVALID, so a misspelt policy cannot silently keep every failed
+// window failing while the operator believes a fallback is in place.
+func (c *Config) validateMediaSTTOnRouteError() error {
+	v := strings.ToLower(strings.TrimSpace(c.MediaSTTOnRouteError))
+	if v == "" {
+		v = routeErrorFail
+	}
+	switch v {
+	case routeErrorFail, routeErrorDefault:
+	default:
+		return fmt.Errorf("CONFIG_INVALID: media.stt.on_route_error must be one of fail, default: %q", c.MediaSTTOnRouteError)
+	}
+	c.MediaSTTOnRouteError = v
 	return nil
 }
 
