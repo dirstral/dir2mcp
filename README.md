@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml"><img src="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml/badge.svg" alt="CI"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25.13+-00ADD8?logo=go" alt="Go 1.25.13+"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.26.9+-00ADD8?logo=go" alt="Go 1.26.9+"></a>
   <a href="https://golangci-lint.run/"><img src="https://img.shields.io/badge/lint-golangci--lint-brightgreen?logo=go&logoColor=white" alt="golangci-lint"></a>
   <a href="https://pkg.go.dev/github.com/dirstral/dir2mcp"><img src="https://pkg.go.dev/badge/github.com/dirstral/dir2mcp.svg" alt="Go Reference"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -145,7 +145,7 @@ removes it. Details: [connect an MCP client](docs/cli.md#connect-an-mcp-client).
 | Docker | `docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD:/corpus:ro" -v dir2mcp-state:/state ghcr.io/dirstral/dir2mcp` |
 | Nix | `nix run github:dirstral/dir2mcp -- version` |
 | Windows | zip from [Releases](https://github.com/dirstral/dir2mcp/releases); read the [Windows limits](docs/install.md#windows) |
-| From source | `git clone --recurse-submodules https://github.com/dirstral/dir2mcp && cd dir2mcp && make build` (Go 1.25.13+) |
+| From source | `git clone --recurse-submodules https://github.com/dirstral/dir2mcp && cd dir2mcp && make build` (Go 1.26.9+) |
 
 [docs/install.md](docs/install.md) has the lean and full tracks, the Nix
 service modules and the Windows details.

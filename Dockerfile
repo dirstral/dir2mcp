@@ -16,7 +16,7 @@
 # its tools when that Ollama is not reachable; indexing then waits for it.
 
 # --- build: static binary, no cgo (modernc sqlite is pure Go) -----------------
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
