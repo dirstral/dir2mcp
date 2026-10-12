@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -337,5 +338,176 @@ func TestEvidence1081_UnreachableBaselineFailsOpen(t *testing.T) {
 	report := svc.EvidenceReport(context.Background())
 	if report.CosineThresholdSource != model.EvidenceThresholdSourceFloor || report.Baseline != nil {
 		t.Fatalf("report = %+v, want the floor and no baseline", report)
+	}
+}
+
+// The documented probe set: 32 distinct, non-empty questions. The count is
+// part of the §9.4.3 contract the docs state, so it is pinned here.
+func TestEvidence1081_ProbeSetHas32DistinctQuestions(t *testing.T) {
+	probes := retrieval.NullProbes()
+	if len(probes) != 32 {
+		t.Fatalf("probe set has %d questions, want 32", len(probes))
+	}
+	seen := map[string]bool{}
+	for _, p := range probes {
+		if strings.TrimSpace(p) == "" {
+			t.Fatal("probe set holds an empty question")
+		}
+		if seen[p] {
+			t.Fatalf("probe set repeats %q", p)
+		}
+		seen[p] = true
+	}
+	if retrieval.NullProbeSetVersion != "v1" {
+		t.Fatalf("probe set version = %q, want v1 (the set did not change)", retrieval.NullProbeSetVersion)
+	}
+}
+
+// gatedEmbedder blocks the probe batch until release is closed, and signals
+// started when the batch arrives, so a test can hold a computation open.
+type gatedEmbedder struct {
+	inner   *textEmbedder
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (e *gatedEmbedder) Embed(ctx context.Context, m string, role model.EmbedRole, texts []string) ([][]float32, error) {
+	if len(texts) > 1 {
+		e.once.Do(func() { close(e.started) })
+		select {
+		case <-e.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return e.inner.Embed(ctx, m, role, texts)
+}
+
+// While one request computes the baseline, another request must not wait on
+// it: it applies the fixed floor and returns at once.
+func TestEvidence1081_ConcurrentRequestDoesNotWaitForTheComputation(t *testing.T) {
+	gen := &fakeGenerator{out: "grounded answer [docs/a.md]"}
+	emb := &gatedEmbedder{
+		inner:   &textEmbedder{query: "q", queryVec: unitVec(0.5), probeVec: unitVec(0.6)},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	svc := retrieval.NewService(nil, idx, emb, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "docs/a.md", Snippet: "text", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2}})
+	svc.SetEvidenceThreshold(true, 0)
+
+	first := make(chan model.AskResult, 1)
+	go func() {
+		got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+		if err != nil {
+			t.Errorf("first Ask: %v", err)
+		}
+		first <- got
+	}()
+	select {
+	case <-emb.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first request never started the computation")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	begin := time.Now()
+	second, err := svc.Ask(ctx, "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("second Ask: %v", err)
+	}
+	if second.EvidenceVerdict != "sufficient" {
+		t.Fatalf("second request verdict = %q, want sufficient against the floor while the computation runs", second.EvidenceVerdict)
+	}
+	if time.Since(begin) > time.Second {
+		t.Fatalf("second request waited %s on the computation", time.Since(begin))
+	}
+	close(emb.release)
+	select {
+	case got := <-first:
+		if got.EvidenceVerdict != "insufficient" {
+			t.Fatalf("first request verdict = %q, want insufficient under the 0.6 baseline it computed", got.EvidenceVerdict)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first request did not finish after the release")
+	}
+}
+
+// A cancelled request cancels its own computation and does not put the
+// cache into the retry backoff: the next request computes again.
+func TestEvidence1081_CancelledRequestDoesNotBackOffTheCache(t *testing.T) {
+	gen := &fakeGenerator{out: "grounded answer [docs/a.md]"}
+	emb := &gatedEmbedder{
+		inner:   &textEmbedder{query: "q", queryVec: unitVec(0.5), probeVec: unitVec(0.6)},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	svc := retrieval.NewService(nil, idx, emb, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "docs/a.md", Snippet: "text", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2}})
+	svc.SetEvidenceThreshold(true, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_, _ = svc.Ask(ctx, "q", model.SearchQuery{K: 1})
+		close(done)
+	}()
+	<-emb.started
+	cancel()
+	<-done
+	close(emb.release)
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask after cancel: %v", err)
+	}
+	if got.EvidenceVerdict != "insufficient" {
+		t.Fatalf("verdict after a cancelled computation = %q, want insufficient from a fresh computation, not the floor of a backoff", got.EvidenceVerdict)
+	}
+}
+
+// While indexing runs, a lazy request does not compute (the chunk count
+// changes with every batch); the warmer computes once the run stops.
+func TestEvidence1081_LazyComputationSkippedWhileIndexingRuns(t *testing.T) {
+	gen := &fakeGenerator{out: "grounded answer [docs/a.md]"}
+	emb := &textEmbedder{query: "q", queryVec: unitVec(0.5), probeVec: unitVec(0.6)}
+	svc, _ := baselineService(t, gen, emb, 1)
+	svc.SetEvidenceThreshold(true, 0)
+	running := true
+	svc.SetIndexingCompleteProvider(func() bool { return !running })
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if got.EvidenceVerdict != "sufficient" || emb.probeBatches() != 0 {
+		t.Fatalf("while indexing: verdict %q probe batches %d, want sufficient (floor) and 0", got.EvidenceVerdict, emb.probeBatches())
+	}
+	report := svc.EvidenceReport(context.Background())
+	if report.CosineThresholdSource != model.EvidenceThresholdSourceFloor || report.Baseline != nil {
+		t.Fatalf("report while indexing = %+v, want the floor and no baseline", report)
+	}
+
+	// The warmer is the one caller that computes regardless of the indexing
+	// state: `up` calls it after it has seen the run stop.
+	if err := svc.WarmEvidenceBaseline(context.Background()); err != nil {
+		t.Fatalf("WarmEvidenceBaseline: %v", err)
+	}
+	if emb.probeBatches() != 1 {
+		t.Fatalf("probe batches after the warmer = %d, want 1", emb.probeBatches())
+	}
+	running = false
+	got, err = svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask after indexing: %v", err)
+	}
+	if got.EvidenceVerdict != "insufficient" {
+		t.Fatalf("after indexing: verdict %q, want insufficient under the warmed 0.6 baseline", got.EvidenceVerdict)
 	}
 }

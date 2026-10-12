@@ -70,6 +70,11 @@ const evidenceBaselineFileName = "evidence_baseline.json"
 // attempted again.
 const evidenceBaselineRetryAfter = time.Minute
 
+// evidenceBaselineComputeTimeout bounds one computation: one embed call for
+// the probe set plus one k=1 search per probe. The bound is a child of the
+// request context, so a cancelled request also cancels the computation.
+const evidenceBaselineComputeTimeout = 60 * time.Second
+
 // evidenceBaselineFile is the on-disk shape of the cache: the baseline plus
 // the key it was computed under, so a reader can tell a stale file from a
 // current one without recomputing anything.
@@ -88,6 +93,10 @@ type evidenceBaselineCache struct {
 	// loadedFile is set once the state-dir file has been consulted, so a
 	// stale file is read at most once per process.
 	loadedFile bool
+	// computing is true while one request runs the computation OUTSIDE the
+	// mutex. Every other request sees it and applies the fixed floor at
+	// once, so no request waits on a lock that ignores its context.
+	computing bool
 }
 
 // evidenceThresholdSettings is the operator's rag.evidence_threshold choice.
@@ -218,9 +227,11 @@ func (s *Service) EvidenceReport(ctx context.Context) model.EvidenceReport {
 
 // WarmEvidenceBaseline computes and caches the null baseline when the
 // calibrated rule is on. `up` calls it once indexing stops, so the first ask
-// and `doctor` find it ready. It returns the error of a failed computation
-// for the caller's log; the service itself has already fallen back to the
-// fixed floor.
+// and `doctor` find it ready. It is the one caller that computes while the
+// indexing state is not complete: the warmer has already waited for the run
+// to stop, and a lazy request must not (see ensureNullBaseline). It returns
+// the error of a failed computation for the caller's log; the service itself
+// has already fallen back to the fixed floor.
 func (s *Service) WarmEvidenceBaseline(ctx context.Context) error {
 	s.metaMu.RLock()
 	settings := s.evidenceThreshold
@@ -228,7 +239,7 @@ func (s *Service) WarmEvidenceBaseline(ctx context.Context) error {
 	if !settings.auto && settings.pinned <= 0 {
 		return nil
 	}
-	_, err := s.ensureNullBaseline(ctx)
+	_, err := s.ensureNullBaseline(ctx, true)
 	return err
 }
 
@@ -237,39 +248,63 @@ func (s *Service) WarmEvidenceBaseline(ctx context.Context) error {
 // nil when it is unavailable. Never returns an error: unavailability is the
 // fail-open case.
 func (s *Service) nullBaseline(ctx context.Context) *model.EvidenceBaseline {
-	baseline, _ := s.ensureNullBaseline(ctx)
+	baseline, _ := s.ensureNullBaseline(ctx, false)
 	return baseline
 }
 
-func (s *Service) ensureNullBaseline(ctx context.Context) (*model.EvidenceBaseline, error) {
-	s.metaMu.RLock()
-	modelName := s.textModel
-	idx := s.textIndex
-	embedder := s.embedder
-	chunks := len(s.chunkByLabel)
-	stateDir := s.stateDir
-	s.metaMu.RUnlock()
-	if embedder == nil || idx == nil {
+// ensureNullBaseline returns the baseline for the current key, from the
+// cache or from one computation. Three rules keep a request from waiting on
+// work it did not ask for:
+//
+//   - The mutex is held only around the cache reads and writes. The
+//     computation (an embed call plus up to one search per probe) runs
+//     outside it, under a child context of the request bounded by
+//     evidenceBaselineComputeTimeout.
+//   - While one request computes, every other request returns nil at once
+//     and applies the fixed floor. It does not wait.
+//   - A lazy request skips the computation while indexing is running: the
+//     chunk count changes with every batch, so each ask would compute a
+//     baseline the next ask invalidates. The warmer in `up` computes once
+//     the run stops (warm=true bypasses this rule; the warmer has waited).
+func (s *Service) ensureNullBaseline(ctx context.Context, warm bool) (*model.EvidenceBaseline, error) {
+	in, ok := s.baselineInputs(ctx)
+	if !ok {
 		return nil, nil
 	}
-	identity, err := idx.Identity(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("read embed identity: %w", err)
-	}
-	key := evidenceBaselineKey(identity, modelName, chunks)
+	key := evidenceBaselineKey(in.identity, in.modelName, in.chunks)
 
 	c := &s.evidenceBaseline
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if cached := c.lookup(key, stateDir); cached != nil {
+	if cached := c.lookup(key, in.stateDir); cached != nil {
+		c.mu.Unlock()
 		return cached, nil
 	}
-	if !c.failedAt.IsZero() && time.Since(c.failedAt) < evidenceBaselineRetryAfter {
+	if c.computing || (!c.failedAt.IsZero() && time.Since(c.failedAt) < evidenceBaselineRetryAfter) {
+		c.mu.Unlock()
 		return nil, nil
 	}
-	baseline, err := computeNullBaseline(ctx, embedder, modelName, idx)
+	if !warm {
+		if complete, err := s.IndexingComplete(ctx); err != nil || !complete {
+			c.mu.Unlock()
+			return nil, nil
+		}
+	}
+	c.computing = true
+	c.mu.Unlock()
+
+	computeCtx, cancel := context.WithTimeout(ctx, evidenceBaselineComputeTimeout)
+	baseline, err := computeNullBaseline(computeCtx, in.embedder, in.modelName, in.idx)
+	cancel()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.computing = false
 	if err != nil {
-		c.failedAt = time.Now()
+		// A cancelled request is not a provider failure: it must not put the
+		// cache into its retry backoff.
+		if ctx.Err() == nil {
+			c.failedAt = time.Now()
+		}
 		s.logf("evidence: null baseline unavailable, the fixed cosine floor %.2f applies: %v", evidenceThresholds[evidenceScaleCosine], err)
 		return nil, err
 	}
@@ -278,18 +313,53 @@ func (s *Service) ensureNullBaseline(ctx context.Context) (*model.EvidenceBaseli
 		// not cached either, so the first ask after indexing computes it.
 		return nil, nil
 	}
-	baseline.Chunks = chunks
-	baseline.EmbedModel = modelName
+	baseline.Chunks = in.chunks
+	baseline.EmbedModel = in.modelName
 	c.value, c.key, c.failedAt = baseline, key, time.Time{}
-	if stateDir != "" {
-		if err := writeEvidenceBaseline(stateDir, evidenceBaselineFile{Key: key, Baseline: *baseline}); err != nil {
+	if in.stateDir != "" {
+		if err := writeEvidenceBaseline(in.stateDir, evidenceBaselineFile{Key: key, Baseline: *baseline}); err != nil {
 			s.logf("evidence: cache null baseline: %v", err)
 		}
 	}
 	s.logf("evidence: null baseline over %d probes p50=%.3f p90=%.3f max=%.3f (%s, %d chunks); cosine threshold %.3f",
-		baseline.Probes, baseline.P50, baseline.P90, baseline.Max, modelName, chunks,
+		baseline.Probes, baseline.P50, baseline.P90, baseline.Max, in.modelName, in.chunks,
 		math.Max(evidenceThresholds[evidenceScaleCosine], baseline.P90))
 	return baseline, nil
+}
+
+// baselineInputs is the snapshot of service state one computation runs on.
+type baselineInputs struct {
+	modelName string
+	identity  string
+	idx       model.Index
+	embedder  model.Embedder
+	chunks    int
+	stateDir  string
+}
+
+// baselineInputs reads the inputs under metaMu and the index identity. ok is
+// false when no baseline can exist (no embedder, no index, or an index whose
+// identity cannot be read), which is the fail-open case.
+func (s *Service) baselineInputs(ctx context.Context) (baselineInputs, bool) {
+	s.metaMu.RLock()
+	in := baselineInputs{
+		modelName: s.textModel,
+		idx:       s.textIndex,
+		embedder:  s.embedder,
+		chunks:    len(s.chunkByLabel),
+		stateDir:  s.stateDir,
+	}
+	s.metaMu.RUnlock()
+	if in.embedder == nil || in.idx == nil {
+		return baselineInputs{}, false
+	}
+	identity, err := in.idx.Identity(ctx)
+	if err != nil {
+		s.logf("evidence: read embed identity: %v", err)
+		return baselineInputs{}, false
+	}
+	in.identity = identity
+	return in, true
 }
 
 // lookup returns the cached baseline for key from memory or, once per
@@ -317,6 +387,14 @@ func (c *evidenceBaselineCache) lookup(key, stateDir string) *model.EvidenceBase
 // for an index that records none.
 func evidenceBaselineKey(identity, modelName string, chunks int) string {
 	return fmt.Sprintf("%s|%s|%s|%d", strings.TrimSpace(identity), strings.TrimSpace(modelName), nullProbeSetVersion, chunks)
+}
+
+// EvidenceBaselineKey is evidenceBaselineKey for `dir2mcp doctor`, which
+// builds the key the daemon would build from the configured embed identity,
+// the resolved text model and the store's embedded chunk count, and compares
+// it with the key the cache file was written under.
+func EvidenceBaselineKey(identity, modelName string, chunks int) string {
+	return evidenceBaselineKey(identity, modelName, chunks)
 }
 
 // computeNullBaseline embeds the probe set in one call and reads the top
@@ -357,12 +435,20 @@ func computeNullBaseline(ctx context.Context, embedder model.Embedder, modelName
 // returns nil, nil when no cache exists. `dir2mcp doctor` uses it to report the
 // baseline without a daemon; the service uses it to survive a restart.
 func LoadEvidenceBaseline(stateDir string) (*model.EvidenceBaseline, error) {
+	baseline, _, err := LoadEvidenceBaselineWithKey(stateDir)
+	return baseline, err
+}
+
+// LoadEvidenceBaselineWithKey is LoadEvidenceBaseline plus the key the cache
+// was written under, so `dir2mcp doctor` can tell a current cache from a
+// stale one the same way the service does.
+func LoadEvidenceBaselineWithKey(stateDir string) (*model.EvidenceBaseline, string, error) {
 	file, err := loadEvidenceBaselineFile(stateDir)
 	if err != nil || file == nil {
-		return nil, err
+		return nil, "", err
 	}
 	baseline := file.Baseline
-	return &baseline, nil
+	return &baseline, file.Key, nil
 }
 
 func loadEvidenceBaselineFile(stateDir string) (*evidenceBaselineFile, error) {

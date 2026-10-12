@@ -82,7 +82,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		indexingFailureCheck(ctx, a, cfg),
 		daemonLivenessCheck(cfg),
 		stuckPendingCheck(ctx, a, cfg),
-		evidenceThresholdCheck(cfg),
+		evidenceThresholdCheck(ctx, a, cfg),
 	)
 	return a.renderDoctorReport(global, checks)
 }
@@ -894,24 +894,24 @@ func stuckPendingCheck(ctx context.Context, a *App, cfg config.Config) doctorChe
 // baseline that is not computed yet is the normal state before the first
 // indexing run ends, and the service applies the fixed floor meanwhile, which
 // is the shipped behaviour of before.
-func evidenceThresholdCheck(cfg config.Config) doctorCheck {
+func evidenceThresholdCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
 	const name = "evidence_threshold"
 	auto, pinned := cfg.EvidenceThreshold()
-	baseline, err := retrieval.LoadEvidenceBaseline(cfg.StateDir)
+	baseline, cachedKey, err := retrieval.LoadEvidenceBaselineWithKey(cfg.StateDir)
 	if err != nil {
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
 			"cached null baseline unreadable, the daemon recomputes it: %v", err)}
 	}
-	// A baseline cached under another probe set or another text embedding
-	// model is stale: the daemon recomputes it on its next ask, and until
-	// then the fixed floor applies, so it must not be shown as the threshold.
+	// The service applies a cached baseline only under the exact key it was
+	// computed under (embed identity, text model, probe set, chunk count).
+	// A cache under any other key is stale: the daemon recomputes it on its
+	// next ask, and the fixed floor applies until then, so the cached p90
+	// must not be shown as the threshold. When the key cannot be built (no
+	// store to count chunks) the cache cannot be verified, and the floor is
+	// reported for the same reason.
 	stale := ""
 	if baseline != nil {
-		if baseline.ProbeSet != retrieval.NullProbeSetVersion {
-			stale = fmt.Sprintf("probe set %q, shipped %q", baseline.ProbeSet, retrieval.NullProbeSetVersion)
-		} else if want := resolvedTextEmbedModel(cfg); want != "" && baseline.EmbedModel != want {
-			stale = fmt.Sprintf("model %q, configured %q", baseline.EmbedModel, want)
-		}
+		stale = cachedBaselineStaleness(ctx, a, cfg, baseline, cachedKey)
 	}
 	current := baseline
 	if stale != "" {
@@ -930,7 +930,7 @@ func evidenceThresholdCheck(cfg config.Config) doctorCheck {
 	}
 	switch {
 	case stale != "":
-		fmt.Fprintf(&b, "; cached null baseline is stale (%s), the daemon recomputes it on its next ask", stale)
+		fmt.Fprintf(&b, "; cached null baseline is not applied (%s), the daemon recomputes it on its next ask", stale)
 	case baseline != nil:
 		fmt.Fprintf(&b, "; null baseline over %d probes p50=%.3f p90=%.3f max=%.3f (%s, %d chunks)",
 			baseline.Probes, baseline.P50, baseline.P90, baseline.Max, baseline.EmbedModel, baseline.Chunks)
@@ -939,6 +939,56 @@ func evidenceThresholdCheck(cfg config.Config) doctorCheck {
 	}
 	fmt.Fprintf(&b, "; rerank %.2f", retrieval.EvidenceRerankFloor)
 	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: b.String()}
+}
+
+// cachedBaselineStaleness explains why the cached baseline is not the one the
+// daemon applies, or returns "" when its key matches the key the daemon
+// builds now. The probe set and the model are named first because they are
+// the operator-visible causes; the full key then catches the chunk count and
+// the embed identity.
+func cachedBaselineStaleness(ctx context.Context, a *App, cfg config.Config, baseline *model.EvidenceBaseline, cachedKey string) string {
+	if baseline.ProbeSet != retrieval.NullProbeSetVersion {
+		return fmt.Sprintf("stale: probe set %q, shipped %q", baseline.ProbeSet, retrieval.NullProbeSetVersion)
+	}
+	want := resolvedTextEmbedModel(cfg)
+	if want != "" && baseline.EmbedModel != want {
+		return fmt.Sprintf("stale: model %q, configured %q", baseline.EmbedModel, want)
+	}
+	chunks, reason := storedEmbeddedChunkCount(ctx, a, cfg)
+	if reason != "" {
+		return "cannot verify the cache against the index: " + reason
+	}
+	if chunks != int64(baseline.Chunks) {
+		return fmt.Sprintf("stale: computed over %d chunks, the index holds %d", baseline.Chunks, chunks)
+	}
+	if expected := retrieval.EvidenceBaselineKey(cfg.Providers().EmbedIdentity(), want, int(chunks)); cachedKey != expected {
+		return "stale: the embed identity changed"
+	}
+	return ""
+}
+
+// storedEmbeddedChunkCount is the number of embedded chunks the store holds,
+// which is the chunk count the daemon registers at load and keys the
+// baseline cache by. reason is non-empty when the count is unavailable.
+func storedEmbeddedChunkCount(ctx context.Context, a *App, cfg config.Config) (int64, string) {
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		return 0, "no index store"
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return 0, "store is not SQLite-backed"
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return 0, fmt.Sprintf("initialize store: %v", err)
+	}
+	stats, err := sqliteStore.CorpusStats(ctx)
+	if err != nil {
+		return 0, err.Error()
+	}
+	return stats.EmbeddedOK, ""
 }
 
 // resolvedTextEmbedModel is the text embedding model the configuration

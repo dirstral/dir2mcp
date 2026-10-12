@@ -20,6 +20,13 @@ const nullProbeSetVersion = "v1"
 // must not present a baseline cached under another probe set as current.
 const NullProbeSetVersion = nullProbeSetVersion
 
+// NullProbes returns a copy of the shipped probe set, so a test can pin the
+// documented count of 32 distinct questions without reaching into the
+// package.
+func NullProbes() []string {
+	return append([]string(nil), nullProbes...)
+}
+
 var nullProbes = []string{
 	"What time is it right now?",
 	"How do I boil an egg?",
