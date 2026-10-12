@@ -123,6 +123,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret.SetHyDESuperlative(cfg.RetrievalHyDESuperlative)
 	// Post-generation grounding check (#336): opt-in, one extra call when on.
 	ret.SetVerifyFaithfulness(cfg.RAGVerifyFaithfulness)
+	// Calibrated evidence threshold (#1081, SPEC §9.4.3): auto derives the
+	// cosine threshold from the null baseline; a number pins it.
+	ret.SetEvidenceThreshold(cfg.EvidenceThreshold())
 	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
 	// step; summary hits are never citable regardless of this flag.
 	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)
@@ -293,6 +296,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}()
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh, &bgWG)
 	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, cfg.Source.Kind, ing, logSink, &bgWG)
+	startEvidenceBaselineWarmer(runCtx, ret, indexingState, logSink, &bgWG)
 
 	// The server is now serving. A signal-triggered shutdown from here on is
 	// a normal, successful termination (a supervisor/`down`-requested stop),
@@ -2345,4 +2349,38 @@ func writerIsTerminal(w io.Writer) bool {
 		return false
 	}
 	return isTerminal(f)
+}
+
+// evidenceBaselinePollInterval is how often the warmer looks for the end of
+// the indexing run before it computes the null baseline.
+const evidenceBaselinePollInterval = 2 * time.Second
+
+// startEvidenceBaselineWarmer computes the null baseline of SPEC §9.4.3
+// (#1081) once the indexing run stops, so the first ask and `dir2mcp doctor`
+// find it cached instead of paying for it or reporting "not computed". It is
+// one embed call plus one k=1 search per probe, and the service also computes
+// it lazily, so a warmer that never fires (shutdown during indexing) costs
+// nothing. Tracked on bgWG so shutdown waits for an in-flight computation
+// before the indexes close.
+func startEvidenceBaselineWarmer(ctx context.Context, ret *retrieval.Service, state *appstate.IndexingState, logSink io.Writer, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(evidenceBaselinePollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if state != nil && state.Snapshot().Running {
+				continue
+			}
+			if err := ret.WarmEvidenceBaseline(ctx); err != nil && ctx.Err() == nil {
+				_, _ = fmt.Fprintf(logSink, "warn: evidence baseline not computed, the fixed cosine floor applies: %v\n", err)
+			}
+			return
+		}
+	}()
 }

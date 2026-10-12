@@ -532,6 +532,17 @@ func TestStatsOutputSchemaConformance(t *testing.T) {
 			"stt_model":    "voxtral-mini-latest",
 			"chat":         "mistral-large-latest",
 		},
+		// Optional additive evidence object (SPEC §9.4.3 and §15.6, spec
+		// 0.80.0, #1081), rendered by evidenceForStats.
+		"evidence": evidenceForStats(model.EvidenceReport{
+			CosineThreshold:       0.519,
+			CosineThresholdSource: model.EvidenceThresholdSourceAuto,
+			RerankThreshold:       0.02,
+			Baseline: &model.EvidenceBaseline{
+				Probes: 32, ProbeSet: "v1", P50: 0.478, P90: 0.519, Max: 0.548,
+				Chunks: 94, EmbedModel: "nomic-embed-text:latest", ComputedAt: "2026-10-06T14:00:00Z",
+			},
+		}),
 		// No "sessions" key: the transport session roster is not part of the
 		// §15.6 output (#850), and the schema closes the object.
 		"recent_failures": []map[string]interface{}{

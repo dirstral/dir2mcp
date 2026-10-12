@@ -23,7 +23,7 @@
 | `config secrets` | Show which provider credentials are present in the keychain / environment (never prints values) |
 | `install <client>` | Install dir2mcp into a supported MCP client: `claude-code`, `cursor`, or `claude` (Claude Desktop). See [Connect an MCP client](#connect-an-mcp-client) |
 | `uninstall <client>` | Remove dir2mcp from a supported MCP client. Other servers in the client config stay as they are |
-| `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures); add `--deep` to actively probe the embedding credential |
+| `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures, and the `evidence_threshold` check: the cosine evidence threshold in effect and the null baseline behind it, see [Relevance floor and insufficient-evidence abstention](configuration.md#relevance-floor-and-insufficient-evidence-abstention)); add `--deep` to actively probe the embedding credential |
 | `print-config <client>` | Print what a client needs for a manual setup: the `claude mcp add-json` command for `claude-code`, the `mcp.json` snippet for `cursor` and `claude`. For `claude-code` and `cursor` the output never contains the token |
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
 | `version` | Print version |

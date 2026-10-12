@@ -971,6 +971,9 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetHyDESuperlative(cfg.RetrievalHyDESuperlative)
 	// Post-generation grounding check (#336): opt-in, one extra call when on.
 	ret.SetVerifyFaithfulness(cfg.RAGVerifyFaithfulness)
+	// Calibrated evidence threshold (#1081, SPEC §9.4.3): auto derives the
+	// cosine threshold from the null baseline; a number pins it.
+	ret.SetEvidenceThreshold(cfg.EvidenceThreshold())
 	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
 	// step; summary hits are never citable regardless of this flag.
 	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)
