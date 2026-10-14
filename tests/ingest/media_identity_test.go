@@ -357,4 +357,3 @@ func TestTwoPhase_DerivationNeverOverwritesAnAuthoredSidecar(t *testing.T) {
 		t.Fatalf("the authored English sidecar must be indexed")
 	}
 }
-
