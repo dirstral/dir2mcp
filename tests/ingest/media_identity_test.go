@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
@@ -290,3 +291,70 @@ func mustReadFile(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// TestTwoPhase_DerivationNeverOverwritesAnAuthoredSidecar pins SPEC §8.6.11
+// equivalence for a subtitled video under Whisper translation. Single-pass never
+// translates a sidecar-sourced transcript (the sidecar is authoritative, §8.6.4),
+// so the two-phase derivation pass must not either. Before this was fixed it did:
+// finding no STT transcript in the cache, it ran STT on the spot, translated the
+// result, and wrote it under transcript-en, overwriting the authored English
+// sidecar. In an archive pilot it attempted this on ~550 subtitled videos: 121
+// overwrote the sidecar, 408 failed translation, 20 failed STT. (Audio is used
+// here because a fake video's audio cannot be extracted, which would hide it.)
+func TestTwoPhase_DerivationNeverOverwritesAnAuthoredSidecar(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	mustWriteFile(t, filepath.Join(root, "media", "clip.mp3"), []byte("fake-audio"))
+	mustWriteFile(t, filepath.Join(root, "media", "clip.ru.vtt"),
+		[]byte("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nрепортаж\n"))
+	mustWriteFile(t, filepath.Join(root, "media", "clip.en.vtt"),
+		[]byte("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nauthored English\n"))
+	stateDir := testutil.TempDir(t)
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = stateDir
+	cfg.STTProvider = "off"
+	cfg.MediaBatchTwoPhase = true
+	svc := mustNewIngestService(t, cfg, st)
+	svcTranscriber := &fakeTranscriber{text: "[00:00] машинный текст"}
+	svc.SetTranscriber(svcTranscriber)
+	svc.SetSTTIdentity("whisper", "large-v3")
+	svc.SetTranscriptLanguage("ru")
+	whisperTranslate := &fakeTranscriber{text: "[00:00] machine English"}
+	svc.SetTranslateTranscriber(whisperTranslate, "whisper", "large-v3", []string{"en"})
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if stt := svcTranscriber.calls; stt != 0 {
+		t.Fatalf("the derivation pass must not run STT on a sidecar-sourced document, got %d STT calls", stt)
+	}
+	if whisperTranslate.calls != 0 {
+		t.Fatalf("the derivation pass must not translate a sidecar-sourced document, got %d translate calls", whisperTranslate.calls)
+	}
+	reps, err := st.TranscriptRepresentations(ctx, "media/clip.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawEN := false
+	for _, rep := range reps {
+		if subexport.RepLanguage(rep.MetaJSON) != "en" {
+			continue
+		}
+		sawEN = true
+		if !subexport.RepIsSidecar(rep.MetaJSON) {
+			t.Fatalf("the English transcript must stay the authored sidecar, got %s", rep.MetaJSON)
+		}
+	}
+	if !sawEN {
+		t.Fatalf("the authored English sidecar must be indexed")
+	}
+}
+
