@@ -216,3 +216,32 @@ func TestMediaSubtitlesEmit_DirThroughSymlinkIntoCorpusIsRejected(t *testing.T) 
 		}
 	}
 }
+
+// TestIngestMediaIdentity_DefaultsValidatesAndLoads pins SPEC §7.6's
+// `ingest.media_identity`: "full" by default (no identity change for existing
+// corpora), case-insensitive "sampled" accepted, anything else CONFIG_INVALID,
+// and the nested key loads from a config file.
+func TestIngestMediaIdentity_DefaultsValidatesAndLoads(t *testing.T) {
+	cfg := config.Default()
+	if cfg.IngestMediaIdentity != "full" {
+		t.Fatalf("ingest.media_identity default = %q, want full", cfg.IngestMediaIdentity)
+	}
+	ok := config.Default()
+	ok.IngestMediaIdentity = " Sampled "
+	if err := ok.Validate(); err != nil || ok.IngestMediaIdentity != "sampled" {
+		t.Fatalf("Sampled must normalize to sampled, got %q err=%v", ok.IngestMediaIdentity, err)
+	}
+	bad := config.Default()
+	bad.IngestMediaIdentity = "partial"
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "ingest.media_identity") {
+		t.Fatalf("unknown media identity must be rejected, got %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(path, []byte("ingest:\n  media_identity: sampled\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadFile(path)
+	if err != nil || loaded.IngestMediaIdentity != "sampled" {
+		t.Fatalf("nested key must load, got %q err=%v", loaded.IngestMediaIdentity, err)
+	}
+}

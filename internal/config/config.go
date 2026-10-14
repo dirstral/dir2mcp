@@ -745,6 +745,13 @@ type Config struct {
 	// names the gap in the honest coverage report, "strict" records a non-fatal
 	// per-document UNSUPPORTED_FORMAT error. Empty defaults to lenient.
 	IngestOnUnsupported string
+	// IngestMediaIdentity selects how an audio/video document's content_hash is
+	// computed (config `ingest.media_identity`, SPEC §7.6): "full" (default) hashes
+	// the whole file; "sampled" hashes the size plus fixed head/middle/tail slices,
+	// so a media file whose transcript comes from a sidecar is never read in full.
+	// Changing it changes every media document's identity (one re-processing pass;
+	// the transcript cache still hits).
+	IngestMediaIdentity string
 
 	// IndexBackend selects the vector index backend (issue #246): "memory"
 	// (default, the in-memory HNSW) or "disk" (the Tier-B pure-Go on-disk
@@ -1545,6 +1552,7 @@ type fileConfig struct {
 	IngestArchivesMode                 *string
 	IngestExtractor                    *string
 	IngestOnUnsupported                *string
+	IngestMediaIdentity                *string
 	IndexBackend                       *string
 	IngestScanCache                    *bool
 	IngestLateChunking                 *bool
@@ -1729,6 +1737,7 @@ type persistedConfig struct {
 	IngestArchivesMode                 string        `yaml:"ingest_archives_mode"`
 	IngestExtractor                    string        `yaml:"ingest_extractor"`
 	IngestOnUnsupported                string        `yaml:"ingest_on_unsupported"`
+	IngestMediaIdentity                string        `yaml:"ingest_media_identity"`
 	IndexBackend                       string        `yaml:"index_backend"`
 	IngestScanCache                    bool          `yaml:"ingest_scan_cache"`
 	IngestLateChunking                 bool          `yaml:"ingest_late_chunking"`
@@ -2013,6 +2022,7 @@ func Default() Config {
 		IngestArchivesMode:    "deep",
 		IngestExtractor:       "auto",
 		IngestOnUnsupported:   "lenient",
+		IngestMediaIdentity:   "full",
 		IndexBackend:          "memory",
 		IngestScanCache:       false,
 		IngestLateChunking:    false,
@@ -2214,6 +2224,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestArchivesMode:                 cfg.IngestArchivesMode,
 		IngestExtractor:                    cfg.IngestExtractor,
 		IngestOnUnsupported:                cfg.IngestOnUnsupported,
+		IngestMediaIdentity:                cfg.IngestMediaIdentity,
 		IndexBackend:                       cfg.IndexBackend,
 		IngestScanCache:                    cfg.IngestScanCache,
 		IngestLateChunking:                 cfg.IngestLateChunking,
@@ -3223,6 +3234,9 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	}
 	applyMediaSubtitlesFileParsed(cfg, fc)
 	applyMediaSubtitlesEmitFileParsed(cfg, fc)
+	if fc.IngestMediaIdentity != nil {
+		cfg.IngestMediaIdentity = *fc.IngestMediaIdentity
+	}
 	applyMediaProcessingFileParsed(cfg, fc)
 	applyMediaBatchFileParsed(cfg, fc)
 }
@@ -3839,6 +3853,7 @@ var configKeyAliases = map[string]string{
 	"ingest_extractor":                        "ingest.extractor",
 	"extractor":                               "ingest.extractor",
 	"ingest_on_unsupported":                   "ingest.on_unsupported",
+	"ingest_media_identity":                   "ingest.media_identity",
 	"on_unsupported":                          "ingest.on_unsupported",
 	"index_backend":                           "index.backend",
 	"backend":                                 "index.backend",
@@ -4460,6 +4475,10 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 	switch key {
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
+	case "ingest.media_identity":
+		// An ingest key, routed here (the ingest setter's fallback) to keep that
+		// setter inside the cyclomatic budget.
+		cfg.IngestMediaIdentity = strPtr(value)
 	case "media.subtitles.segmentation":
 		cfg.MediaSubtitlesSegmentation = strPtr(value)
 	case "media.subtitles.expect_script":
@@ -4733,6 +4752,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_archives_mode", cfg.IngestArchivesMode)
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
 	writeScalar("ingest_on_unsupported", cfg.IngestOnUnsupported)
+	writeScalar("ingest_media_identity", cfg.IngestMediaIdentity)
 	writeScalar("index_backend", cfg.IndexBackend)
 	writeBool("ingest_scan_cache", cfg.IngestScanCache)
 	writeBool("ingest_late_chunking", cfg.IngestLateChunking)
@@ -5040,6 +5060,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 		{"DIR2MCP_PANDOC_COMMAND", &cfg.IngestPandocCommand},
 		{"DIR2MCP_INGEST_EXTRACTOR", &cfg.IngestExtractor},
 		{"DIR2MCP_INGEST_ON_UNSUPPORTED", &cfg.IngestOnUnsupported},
+		{"DIR2MCP_INGEST_MEDIA_IDENTITY", &cfg.IngestMediaIdentity},
 		{"DIR2MCP_INDEX_BACKEND", &cfg.IndexBackend},
 	} {
 		if raw, ok := envLookup(o.key, env); ok && strings.TrimSpace(raw) != "" {
@@ -5311,6 +5332,7 @@ func (c *Config) Validate() error {
 	// cyclomatic-complexity budget as gates are added).
 	for _, validate := range []func() error{
 		c.validateIngestOnUnsupported,
+		c.validateIngestMediaIdentity,
 		c.validateIngestExtractor,
 		c.validateIngestFormatModes,
 		c.validateIndexBackend,
@@ -6068,6 +6090,18 @@ func (c *Config) validateIngestFormatModes() error {
 		}
 		*mode.value = normalized
 	}
+	return nil
+}
+
+// validateIngestMediaIdentity normalizes IngestMediaIdentity (defaulting empty
+// to "full") and rejects any value outside full/sampled (SPEC §7.6).
+func (c *Config) validateIngestMediaIdentity() error {
+	normalized, err := normalizeClosedEnum("ingest.media_identity", c.IngestMediaIdentity, Default().IngestMediaIdentity,
+		[]string{"full", "sampled"})
+	if err != nil {
+		return err
+	}
+	c.IngestMediaIdentity = normalized
 	return nil
 }
 
