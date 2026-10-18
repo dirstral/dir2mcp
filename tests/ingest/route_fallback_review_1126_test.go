@@ -338,6 +338,33 @@ func TestRouteFallbackReview_StampOnlyRetryKeepsTheText(t *testing.T) {
 	}
 }
 
+// TestRouteFallbackReview_DerivationPassSkipsFallbackTextUnderFail: under
+// fail the cache keeps fallback text that the transcription pass took out of
+// the index, so the derivation pass must not read (and translate) it. Under
+// default it reads the cached text as it is.
+func TestRouteFallbackReview_DerivationPassSkipsFallbackTextUnderFail(t *testing.T) {
+	ctx := context.Background()
+	w := newWindowFallbackHarness(t)
+	w.seed(t)
+	if text, err := w.svc.DeriveReadTranscriptForTest(ctx, mediaDoc("talks/mixed.m4a"), w.content); err != nil || !strings.Contains(text, "decode 2") {
+		t.Fatalf("under default the derivation read %q (%v), want the cached fallback window", text, err)
+	}
+	w.svc.SetRouteErrorFallback(false)
+	text, err := w.svc.DeriveReadTranscriptForTest(ctx, mediaDoc("talks/mixed.m4a"), w.content)
+	if err != nil || strings.Contains(text, "decode 2") || !strings.Contains(text, "candidate line 1") || !strings.Contains(text, "candidate line 4") {
+		t.Fatalf("under fail the derivation read %q (%v), want the other windows only", text, err)
+	}
+
+	h := newFallbackItemHarness(t, "default")
+	content := []byte(strings.Repeat("q", 4000))
+	h.seedFallback(t, content)
+	h.svc.SetRouteErrorFallback(false)
+	requests := h.stt.count()
+	if text, err := h.svc.DeriveReadTranscriptForTest(ctx, mediaDoc("talks/kk.m4a"), content); err != nil || text != "" || h.stt.count() != requests {
+		t.Fatalf("under fail the derivation read item text %q (%v, %d requests), want none", text, err, h.stt.count()-requests)
+	}
+}
+
 func readRouteCache(t *testing.T, state string) string {
 	t.Helper()
 	return readOneCacheFile(t, state, "*.route.json")

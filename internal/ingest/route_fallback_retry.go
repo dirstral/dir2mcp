@@ -291,8 +291,11 @@ type fallbackRetry struct {
 // never decodes a fallback result a second time in one run.
 func (s *Service) serveCachedTranscript(ctx context.Context, doc model.Document, content []byte, paths transcriptCachePaths, hit cachedTranscript, retry bool) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	at, by, ok := hit.fallbackStamp()
-	if !ok || !retry {
+	if !ok {
 		return hit.unpack()
+	}
+	if !retry {
+		return withoutFallbackUnderFail(hit, s.routeErrorFallback).unpack()
 	}
 	v := s.routeFallbackVerdict(at, by)
 	if !v.Due {
@@ -322,6 +325,35 @@ func (s *Service) serveCachedTranscript(ctx context.Context, doc model.Document,
 		return "", nil, nil, nil, r.err
 	}
 	return r.served.unpack()
+}
+
+// withoutFallbackUnderFail is a cached fallback result as the derivation pass
+// may read it. Under default it is the hit. Under fail the cache keeps the
+// fallback text that the transcription pass took out of the index, so the
+// derivation pass must not translate it: an item reads as no transcript, and
+// a window-scoped transcript loses its fallback windows, as the served
+// transcript did.
+func withoutFallbackUnderFail(hit cachedTranscript, fallsBack bool) cachedTranscript {
+	if fallsBack {
+		return hit
+	}
+	if hit.route != nil && hit.route.FallbackFrom != "" {
+		return cachedTranscript{}
+	}
+	segs := windowSegments(model.TranscriptResult{Text: hit.text, Words: hit.words}, 0, 0)
+	cov := copyCoverage(hit.coverage)
+	for _, e := range coverageLanguages(hit.coverage) {
+		if e.FallbackFrom == "" {
+			continue
+		}
+		w := fallbackWindow{startMS: e.StartMS, endMS: e.EndMS, core: CoverageRange{StartMS: e.StartMS, EndMS: e.EndMS},
+			last: cov.DurationMS > 0 && e.EndMS >= cov.DurationMS, entry: e}
+		segs = dropCoreSegments(segs, w)
+		dropCoreCoverage(cov, w.core)
+	}
+	cov.RouteFallbackAt, cov.RouteFallbackBy = "", ""
+	text, words := renderSegments(segs)
+	return cachedTranscript{text: text, words: words, coverage: cov}
 }
 
 // retryInterrupted is the error of a retry the run's context cancelled.

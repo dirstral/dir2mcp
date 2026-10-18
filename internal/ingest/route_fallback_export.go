@@ -28,6 +28,13 @@ func (s *Service) DeriveTranscriptTranslationsForTest(ctx context.Context, doc m
 	return s.deriveTranscriptTranslations(ctx, doc, content)
 }
 
+// DeriveReadTranscriptForTest is the transcript text the derivation pass reads
+// for track 0 of a document (§8.6.11).
+func (s *Service) DeriveReadTranscriptForTest(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	text, _, _, _, err := s.readTrackTranscript(ctx, doc, content, trackContext{noFallbackRetry: true})
+	return text, err
+}
+
 // RouteFallbackStaleForTest exposes the §8.2.4 re-derivation gate for one
 // document.
 func (s *Service) RouteFallbackStaleForTest(ctx context.Context, relPath string) bool {
