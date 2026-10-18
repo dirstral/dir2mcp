@@ -17,8 +17,43 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
+
+// TestRouteFallbackItem_GateSeesEveryAudioTrack: an additional audio track
+// (§8.6.12) is its own decode with its own fallback record, so a due fallback
+// on transcript@t1 makes the document stale although track 0 holds none.
+func TestRouteFallbackItem_GateSeesEveryAudioTrack(t *testing.T) {
+	ctx := context.Background()
+	st := newRealStore(t)
+	if err := st.UpsertDocument(ctx, model.Document{RelPath: "two.mp4", DocType: "video", Status: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := st.GetDocumentByPath(ctx, "two.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := func(repType, meta string) {
+		if _, err := st.UpsertRepresentation(ctx, model.Representation{DocID: doc.DocID, RepType: repType, RepHash: repType, MetaJSON: meta}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(ingest.RepTypeTranscript, `{"source":"stt","provider":"whisper","model":"large-v3"}`)
+	svc := mustNewIngestService(t, config.Config{StateDir: t.TempDir(), STTProvider: "off"}, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] x"})
+	svc.SetSTTIdentity("whisper", "large-v3")
+	svc.SetRouteErrorFallback(true)
+	svc.SetRouteRetryAfter(24 * time.Hour)
+	svc.SetClock(func() time.Time { return time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC) })
+	if svc.RouteFallbackStaleForTest(ctx, "two.mp4") {
+		t.Fatal("a document with no fallback record is stale")
+	}
+	seed(ingest.TranscriptRepTypeForTrack(1, ""), `{"source":"stt","route":"whisper","route_fallback_from":"ckpt-kk","route_fallback_at":"2026-10-17T08:00:00Z","route_fallback_by":"whisper|large-v3"}`)
+	if !svc.RouteFallbackStaleForTest(ctx, "two.mp4") {
+		t.Fatal("a due fallback on track 1 does not make the document stale")
+	}
+}
 
 // SPEC §8.2.4 (spec 0.82.0, dir2mcp #1122): a route-fallback transcript is
 // provisional. These tests cover the item scope. The fake whisper server below

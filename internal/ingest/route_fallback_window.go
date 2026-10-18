@@ -64,7 +64,14 @@ func (s *Service) retryWindowFallback(ctx context.Context, doc model.Document, c
 		if serr == nil {
 			defer cleanup()
 			rp := s.rebuildWindowPlan(ctx, tmpPath, audio, relPath, hit.coverage)
-			for _, w := range fallbackWindows(rp, hit.coverage) {
+			wins := fallbackWindows(rp, hit.coverage)
+			if len(wins) == 0 {
+				// The rebuilt schedule does not match the cached record (another
+				// duration or payload cap): no window can be retried in place, so
+				// the retry is a failure, never a silent recovery.
+				err = fmt.Errorf("the rebuilt decode schedule holds no fallback window")
+			}
+			for _, w := range wins {
 				outcomes = append(outcomes, s.retryOneWindow(ctx, rp, w, v))
 			}
 		}
@@ -176,7 +183,9 @@ func (s *Service) retryOneWindow(ctx context.Context, rp windowRetryPlan, w fall
 	}
 	def := s.defaultRoute()
 	results, derr := s.decodePieces(ctx, rp.relPath, def.stt, pieces, rp.plan)
-	if derr != nil || len(results) != len(pieces) {
+	// The default's text gets the same per-window floor and quality gate as a
+	// first decode's fallback (decodeWindowScoped judges it too).
+	if derr = s.retryDecodeError(results, pieces, derr, def, lang, w.core); derr != nil {
 		return windowRetryResult{win: w, err: fmt.Errorf("route %q: %w; default profile %q: %v", failed, err, def.route, derr)}
 	}
 	return windowRetryResult{win: w, results: results, route: def, fallbackFrom: failed}

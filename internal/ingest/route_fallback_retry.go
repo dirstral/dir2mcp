@@ -155,21 +155,52 @@ func (s *Service) RouteFallbackDue(metaJSON string) (bool, string) {
 // routeFallbackStale is the §8.2.4 half of the §8.6.7 re-derivation gate: an
 // unchanged document whose stored transcript holds a due fallback result is
 // processed again, so its route decodes it. A result that is not due costs
-// nothing.
+// nothing. Every source transcript track is checked: an additional audio track
+// (§8.6.12) is its own decode with its own fallback record.
 func (s *Service) routeFallbackStale(ctx context.Context, reader representationMetaReader, relPath string) bool {
 	if s.transcriber == nil {
 		return false
 	}
-	metaJSON, err := reader.RepresentationMetaByType(ctx, relPath, RepTypeTranscript)
-	if err != nil || strings.TrimSpace(metaJSON) == "" {
-		return false
+	for _, t := range s.sourceTranscriptMetas(ctx, reader, relPath) {
+		if due, why := s.RouteFallbackDue(t.meta); due {
+			s.getLogger().Printf("route fallback: %s (%s) holds a route-fallback transcript (%s); decoding it again on its route this scan (SPEC §8.2.4)", relPath, t.repType, why)
+			return true
+		}
 	}
-	due, why := s.RouteFallbackDue(metaJSON)
-	if !due {
-		return false
+	return false
+}
+
+// transcriptMetaRow is one stored source transcript's rep_type and meta_json.
+type transcriptMetaRow struct {
+	repType, meta string
+}
+
+// sourceTranscriptMetas returns the meta_json of every live source transcript
+// of a document: the bare transcript and each additional track's
+// transcript@t<N>, without translations. A store that cannot list its
+// representations yields the bare transcript only.
+func (s *Service) sourceTranscriptMetas(ctx context.Context, reader representationMetaReader, relPath string) []transcriptMetaRow {
+	lister, ok := s.store.(activeRepresentationLister)
+	if !ok {
+		meta, err := reader.RepresentationMetaByType(ctx, relPath, RepTypeTranscript)
+		if err != nil || strings.TrimSpace(meta) == "" {
+			return nil
+		}
+		return []transcriptMetaRow{{repType: RepTypeTranscript, meta: meta}}
 	}
-	s.getLogger().Printf("route fallback: %s holds a route-fallback transcript (%s); decoding it again on its route this scan (SPEC §8.2.4)", relPath, why)
-	return true
+	reps, err := lister.ActiveRepresentations(ctx, relPath)
+	if err != nil {
+		return nil
+	}
+	var out []transcriptMetaRow
+	for _, rep := range reps {
+		isSource := rep.RepType == RepTypeTranscript ||
+			(strings.HasPrefix(rep.RepType, RepTypeTranscript+"@") && !strings.Contains(rep.RepType, "-"))
+		if isSource && strings.TrimSpace(rep.MetaJSON) != "" {
+			out = append(out, transcriptMetaRow{repType: rep.RepType, meta: rep.MetaJSON})
+		}
+	}
+	return out
 }
 
 // fallbackRetry is the outcome of one §8.2.4 retry: the transcript the index
@@ -315,4 +346,11 @@ func (s *Service) readTrackTranscriptOrRetire(ctx context.Context, doc model.Doc
 		return "", nil, nil, nil, fmt.Errorf("retire route-fallback transcript of %s: %w (after: %w)", doc.RelPath, rerr, err)
 	}
 	return "", nil, nil, nil, err
+}
+
+// RouteFallbackStaleForTest exposes the §8.2.4 re-derivation gate for one
+// document, for tests in the tests/ tree.
+func (s *Service) RouteFallbackStaleForTest(ctx context.Context, relPath string) bool {
+	reader, ok := s.store.(representationMetaReader)
+	return ok && s.routeFallbackStale(ctx, reader, relPath)
 }
