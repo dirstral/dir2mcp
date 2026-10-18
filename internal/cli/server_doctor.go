@@ -73,7 +73,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		providerCheck(ctx, cfg, "embed", provider.CapEmbed, true, deep),
 		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
 		egressCheck(cfg),
-		sttRoutesCheck(ctx, a, cfg),
+		sttRoutesCheck(ctx, cfg),
 		extractorCheck(cfg),
 		corpusRecordCheck(ctx, a, cfg),
 		extractionCoverageCheck(ctx, a, cfg),
@@ -1033,9 +1033,9 @@ func resolvedTextEmbedModel(cfg config.Config) string {
 // check also counts the transcripts that hold a route-fallback result and names
 // when the next is due (SPEC §8.2.4, spec 0.82.0), and says so positively when
 // there is none.
-func sttRoutesCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
+func sttRoutesCheck(ctx context.Context, cfg config.Config) doctorCheck {
 	const name = "stt_routes"
-	fallbacks := routeFallbackSummary(ctx, a, cfg)
+	fallbacks := routeFallbackSummary(ctx, cfg)
 	identifier := strings.TrimSpace(cfg.MediaSTTLanguageIdentifier)
 	if identifier == "" && len(cfg.MediaSTTLanguageProviders) == 0 {
 		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no language routes configured: the default STT profile decodes every language; " + fallbacks}
@@ -1087,8 +1087,8 @@ func sttRoutesCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck 
 // when one records no valid time, its route_fallback_by is absent or is not the
 // current default profile, the interval is 0, or the policy is fail. With none
 // it says so positively.
-func routeFallbackSummary(ctx context.Context, a *App, cfg config.Config) string {
-	records, err := routeFallbackRecords(ctx, a, cfg)
+func routeFallbackSummary(ctx context.Context, cfg config.Config) string {
+	records, err := routeFallbackRecords(ctx, cfg)
 	if err != nil {
 		return "route-fallback transcripts unknown: " + err.Error()
 	}
@@ -1098,9 +1098,10 @@ func routeFallbackSummary(ctx context.Context, a *App, cfg config.Config) string
 	return fmt.Sprintf("%d route-fallback transcript(s), %s", len(records), routeFallbackNextDue(cfg, records, time.Now().UTC()))
 }
 
-// routeFallbackRecords reads the fallback records from the index. No index yet
-// is no records; a store that is not SQLite-backed cannot be asked.
-func routeFallbackRecords(ctx context.Context, a *App, cfg config.Config) ([]model.RouteFallbackRecord, error) {
+// routeFallbackRecords reads the fallback records from the index through a
+// read-only connection: a diagnostic never initialises, migrates or locks a
+// live index. No index yet is no records.
+func routeFallbackRecords(ctx context.Context, cfg config.Config) ([]model.RouteFallbackRecord, error) {
 	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
 	if _, err := os.Stat(metaPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1108,42 +1109,30 @@ func routeFallbackRecords(ctx context.Context, a *App, cfg config.Config) ([]mod
 		}
 		return nil, err
 	}
-	st := a.storeForConfig(cfg)
-	defer func() { _ = st.Close() }()
-	sqliteStore, ok := st.(*store.SQLiteStore)
-	if !ok {
-		return nil, errors.New("store is not SQLite-backed")
-	}
-	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		return nil, err
-	}
-	return sqliteStore.RouteFallbackTranscripts(ctx)
+	return store.ReadRouteFallbackTranscripts(ctx, metaPath)
 }
 
-// routeFallbackNextDue names when the next fallback result is due (SPEC §8.2.4).
+// routeFallbackNextDue names when the next fallback result is due (SPEC
+// §8.2.4), with the same decision the ingest gate makes
+// (ingest.DecideRouteFallback).
 func routeFallbackNextDue(cfg config.Config, records []model.RouteFallbackRecord, now time.Time) string {
-	const nextRun = "due on the next run"
-	interval := cfg.MediaSTTRouteRetryAfter
-	if !cfg.RouteErrorFallsBack() || interval <= 0 {
-		return nextRun
-	}
 	defName, defModel, _ := ingest.ResolveSTTProviderModel(cfg)
-	producer := strings.TrimSpace(defName) + "|" + strings.TrimSpace(defModel)
+	policy := ingest.RouteFallbackPolicy{
+		Fail:       !cfg.RouteErrorFallsBack(),
+		RetryAfter: cfg.MediaSTTRouteRetryAfter,
+		Producer:   strings.TrimSpace(defName) + "|" + strings.TrimSpace(defModel),
+	}
 	var earliest time.Time
 	for _, r := range records {
-		at, err := time.Parse(time.RFC3339, strings.TrimSpace(r.At))
-		if err != nil || strings.TrimSpace(r.By) != producer {
-			return nextRun
+		d := ingest.DecideRouteFallback(policy, r.At, r.By, r.Dropped, now)
+		if d.Due {
+			return "due on the next run"
 		}
-		if earliest.IsZero() || at.Before(earliest) {
-			earliest = at
+		if earliest.IsZero() || d.NextDue.Before(earliest) {
+			earliest = d.NextDue
 		}
 	}
-	due := earliest.Add(interval)
-	if !due.After(now) {
-		return nextRun
-	}
-	return "next due " + due.UTC().Format(time.RFC3339)
+	return "next due " + earliest.UTC().Format(time.RFC3339)
 }
 
 // sttRouteLine renders one language's candidates in order, each with the model

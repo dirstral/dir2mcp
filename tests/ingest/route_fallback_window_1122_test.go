@@ -33,6 +33,8 @@ type kkCandidate struct {
 	calls  int
 	failOn map[int]bool
 	broken bool
+	// onCall runs on each call, before the answer.
+	onCall func()
 }
 
 func (c *kkCandidate) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -43,8 +45,11 @@ func (c *kkCandidate) Transcribe(ctx context.Context, relPath string, data []byt
 func (c *kkCandidate) TranscribeStructured(context.Context, string, []byte) (model.TranscriptResult, error) {
 	c.mu.Lock()
 	c.calls++
-	n, fail := c.calls, c.broken || c.failOn[c.calls]
+	n, fail, onCall := c.calls, c.broken || c.failOn[c.calls], c.onCall
 	c.mu.Unlock()
+	if onCall != nil {
+		onCall()
+	}
 	if fail {
 		return model.TranscriptResult{}, errors.New("checkpoint not loaded")
 	}
@@ -68,9 +73,10 @@ func (c *kkCandidate) count() int {
 
 // windowFallbackMeta is the §8.2.4 part of a window-scoped meta_json.
 type windowFallbackMeta struct {
-	RouteFallbackAt string `json:"route_fallback_at"`
-	RouteFallbackBy string `json:"route_fallback_by"`
-	Coverage        *struct {
+	RouteFallbackAt      string    `json:"route_fallback_at"`
+	RouteFallbackBy      string    `json:"route_fallback_by"`
+	RouteFallbackDropped []covLang `json:"route_fallback_dropped"`
+	Coverage             *struct {
 		WindowsDecoded int `json:"windows_decoded"`
 		DecodedMS      int `json:"decoded_ms"`
 		Ranges         []struct {
@@ -96,9 +102,9 @@ func newWindowFallbackHarness(t *testing.T) *windowFallbackHarness {
 	w := &windowFallbackHarness{windowSTTHarness: h, def: def, cand: &kkCandidate{failOn: map[int]bool{2: true}}, content: content,
 		now: time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)}
 	h.svc.SetRouteErrorFallback(true)
-	h.svc.SetRouteRetryAfter(24 * time.Hour)
+	h.svc.SetRouteRetryAfterForTest(24 * time.Hour)
 	h.svc.SetRouteTranscriber("kk", w.cand, "kk-ckpt", nil)
-	h.svc.SetClock(func() time.Time { return w.now })
+	h.svc.SetClockForTest(func() time.Time { return w.now })
 	return w
 }
 
@@ -310,11 +316,22 @@ func assertWindow2Failed(t *testing.T, w *windowFallbackHarness, m windowFallbac
 			t.Errorf("entry %+v survives in the failed window", e)
 		}
 	}
-	if m.RouteFallbackAt != "" || m.RouteFallbackBy != "" {
-		t.Errorf("stamp = %q / %q, want none", m.RouteFallbackAt, m.RouteFallbackBy)
-	}
+	assertWindow2DropRecorded(t, m)
 	if text := persistedText(w.windowSTTHarness); strings.Contains(text, "decode 2") {
 		t.Errorf("the fallback text is still indexed: %q", text)
+	}
+}
+
+// assertWindow2DropRecorded checks the dropped-window record: the cached
+// fallback text is kept, so the transcript records the dropped window with the
+// cached stamp and the gate keeps processing it.
+func assertWindow2DropRecorded(t *testing.T, m windowFallbackMeta) {
+	t.Helper()
+	if m.RouteFallbackAt != "2026-10-18T09:00:00Z" || m.RouteFallbackBy != "whisper|large-v3" {
+		t.Errorf("stamp = %q / %q, want the cached stamp kept with the dropped window", m.RouteFallbackAt, m.RouteFallbackBy)
+	}
+	if len(m.RouteFallbackDropped) != 1 || m.RouteFallbackDropped[0].StartMS != win2StartMS || m.RouteFallbackDropped[0].EndMS != win3StartMS || m.RouteFallbackDropped[0].FallbackFrom != "kk-ckpt" {
+		t.Errorf("route_fallback_dropped = %+v, want window 2 from kk-ckpt", m.RouteFallbackDropped)
 	}
 }
 
@@ -367,9 +384,9 @@ func TestRouteFallbackWindow_GateReprocessesOnlyWhenDue(t *testing.T) {
 	svc.SetSTTIdentity("whisper", "large-v3")
 	svc.SetLanguageScope("window")
 	svc.SetRouteErrorFallback(true)
-	svc.SetRouteRetryAfter(24 * time.Hour)
+	svc.SetRouteRetryAfterForTest(24 * time.Hour)
 	svc.SetRouteTranscriber("kk", cand, "kk-ckpt", nil)
-	svc.SetClock(func() time.Time { return now })
+	svc.SetClockForTest(func() time.Time { return now })
 	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) {
 		return time.Duration(scopeTotalMS) * time.Millisecond, nil
 	}

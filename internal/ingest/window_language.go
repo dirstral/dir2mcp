@@ -986,9 +986,10 @@ func (s *Service) applyWindowLanguageMeta(meta *transcriptMeta, coverage *Transc
 	}
 	// SPEC §8.2.4 (spec 0.82.0): a transcript that holds a fallback window
 	// records when and by which default profile the fallback text was decoded.
-	meta.RouteFallbackAt, meta.RouteFallbackBy = "", ""
-	if coverageHasFallback(coverage) {
+	meta.RouteFallbackAt, meta.RouteFallbackBy, meta.RouteFallbackDropped = "", "", nil
+	if coverageHasFallback(coverage) || len(coverage.RouteFallbackDropped) > 0 {
 		meta.RouteFallbackAt, meta.RouteFallbackBy = coverage.RouteFallbackAt, coverage.RouteFallbackBy
+		meta.RouteFallbackDropped = coverage.RouteFallbackDropped
 	}
 	// The §8.2.1 covered fact is true only when every decoded range is covered.
 	// It is set only to false (absence is "no assertion"), as sttTranscriptMeta

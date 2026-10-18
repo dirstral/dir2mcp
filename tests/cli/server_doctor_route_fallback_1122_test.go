@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -57,25 +58,33 @@ func TestDoctorRouteFallback_NoneIsReportedPositively(t *testing.T) {
 }
 
 func TestDoctorRouteFallback_CountsAndNamesTheNextDueTime(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	older, newer := now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339)
 	_, detail := routeFallbackDoctor(t, "default",
-		seedRep{relPath: "a.mp3", metaJSON: itemFallbackMeta("2099-01-02T00:00:00Z", "whisper|base-model")},
-		seedRep{relPath: "b.mp3", metaJSON: windowFallbackMeta("2099-01-01T00:00:00Z", "whisper|base-model")},
-		seedRep{relPath: "c.mp3", metaJSON: windowFallbackMeta("2099-01-01T00:00:00Z", "whisper|base-model"), deleted: true},
+		seedRep{relPath: "a.mp3", metaJSON: itemFallbackMeta(newer, "whisper|base-model")},
+		seedRep{relPath: "b.mp3", metaJSON: windowFallbackMeta(older, "whisper|base-model")},
+		seedRep{relPath: "c.mp3", metaJSON: windowFallbackMeta(older, "whisper|base-model"), deleted: true},
 	)
-	if !strings.Contains(detail, "2 route-fallback transcript(s), next due 2099-01-02T00:00:00Z") {
-		t.Fatalf("detail %q: want 2 live fallback transcripts, next due the earliest time plus 24h", detail)
+	want := "2 route-fallback transcript(s), next due " + now.Add(22*time.Hour).Format(time.RFC3339)
+	if !strings.Contains(detail, want) {
+		t.Fatalf("detail %q: want %q: 2 live fallback transcripts, next due the earliest time plus 24h", detail, want)
 	}
 }
 
 func TestDoctorRouteFallback_DueOnTheNextRun(t *testing.T) {
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	future := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
+	dropped := `{"source":"stt","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
 	for name, c := range map[string]struct {
 		policy string
 		meta   string
 	}{
-		"no producer":    {"default", itemFallbackMeta("2099-01-02T00:00:00Z", "")},
-		"other producer": {"default", itemFallbackMeta("2099-01-02T00:00:00Z", "whisper|old-model")},
-		"no time":        {"default", itemFallbackMeta("", "whisper|base-model")},
-		"policy fail":    {"fail", itemFallbackMeta("2099-01-02T00:00:00Z", "whisper|base-model")},
+		"no producer":     {"default", itemFallbackMeta(recent, "")},
+		"other producer":  {"default", itemFallbackMeta(recent, "whisper|old-model")},
+		"no time":         {"default", itemFallbackMeta("", "whisper|base-model")},
+		"future time":     {"default", itemFallbackMeta(future, "whisper|base-model")},
+		"policy fail":     {"fail", itemFallbackMeta(recent, "whisper|base-model")},
+		"dropped windows": {"default", dropped},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, detail := routeFallbackDoctor(t, c.policy, seedRep{relPath: "a.mp3", metaJSON: c.meta})

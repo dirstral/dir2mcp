@@ -44,8 +44,8 @@ func TestRouteFallbackItem_GateSeesEveryAudioTrack(t *testing.T) {
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] x"})
 	svc.SetSTTIdentity("whisper", "large-v3")
 	svc.SetRouteErrorFallback(true)
-	svc.SetRouteRetryAfter(24 * time.Hour)
-	svc.SetClock(func() time.Time { return time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC) })
+	svc.SetRouteRetryAfterForTest(24 * time.Hour)
+	svc.SetClockForTest(func() time.Time { return time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC) })
 	if svc.RouteFallbackStaleForTest(ctx, "two.mp4") {
 		t.Fatal("a document with no fallback record is stale")
 	}
@@ -77,6 +77,8 @@ type fallbackSTTServer struct {
 	models        []string
 	kkBroken      bool
 	defaultBroken bool
+	// onKK runs on each Kazakh checkpoint request, before the answer.
+	onKK func()
 }
 
 func newFallbackSTTServer(t *testing.T) *fallbackSTTServer {
@@ -86,8 +88,11 @@ func newFallbackSTTServer(t *testing.T) *fallbackSTTServer {
 		model := formModel(r)
 		s.mu.Lock()
 		s.models = append(s.models, model)
-		kkBroken, defBroken := s.kkBroken, s.defaultBroken
+		kkBroken, defBroken, onKK := s.kkBroken, s.defaultBroken, s.onKK
 		s.mu.Unlock()
+		if model == fbModelKK && onKK != nil {
+			onKK()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case model == fbModelLID:
@@ -194,7 +199,7 @@ func newFallbackItemHarness(t *testing.T, onRouteError string) *fallbackItemHarn
 		now: time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)}
 	h.svc = mustNewIngestService(t, cfg, h.store)
 	h.svc.SetLogger(log.New(h.logs, "", 0))
-	h.svc.SetClock(func() time.Time { return h.now })
+	h.svc.SetClockForTest(func() time.Time { return h.now })
 	// One short recording: one STT request, and no probe cut is needed.
 	h.svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 10 * time.Second, nil }
 	h.svc.ExtractSegmentFunc = func(context.Context, string, int, int) ([]byte, error) { return []byte("slice"), nil }
@@ -370,7 +375,7 @@ func TestRouteFallbackItem_FailedRetryKeepsTextAndMovesTheTime(t *testing.T) {
 // makes a fallback result due on every run.
 func TestRouteFallbackItem_IntervalZeroRetriesEveryRun(t *testing.T) {
 	h := newFallbackItemHarness(t, "default")
-	h.svc.SetRouteRetryAfter(0)
+	h.svc.SetRouteRetryAfterForTest(0)
 	content := []byte(strings.Repeat("d", 4000))
 	h.seedFallback(t, content)
 	before := h.stt.count()
@@ -492,6 +497,8 @@ func TestRouteFallbackItem_DueGate(t *testing.T) {
 		{"no producer", meta("ckpt-kk", "2026-10-18T00:00:00Z", ""), false, true},
 		{"other producer", meta("ckpt-kk", "2026-10-18T00:00:00Z", "whisper|old"), false, true},
 		{"policy fail", meta("ckpt-kk", "2026-10-18T00:00:00Z", fbDefaultID), true, true},
+		{"future beyond the skew", meta("ckpt-kk", "2026-10-19T09:00:00Z", fbDefaultID), false, true},
+		{"future within the skew", meta("ckpt-kk", "2026-10-18T09:02:00Z", fbDefaultID), false, false},
 		{"window fallback", `{"coverage":{"windows_attempted":2,"languages":[{"start_ms":0,"end_ms":5,"route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]},"route_fallback_at":"2026-10-17T09:00:00Z","route_fallback_by":"` + fbDefaultID + `"}`, false, true},
 	}
 	for _, c := range cases {

@@ -166,8 +166,13 @@ type Service struct {
 	// time source for that rule; nil means time.Now (tests inject one).
 	routeRetryAfter time.Duration
 	clock           func() time.Time
-	routeMu         sync.Mutex
-	routes          map[string]routedSTT
+	// routeFallbackIndex holds the §8.2.4 fallback records of the corpus for
+	// the length of one scan (one query per scan, not one per document); nil
+	// outside a scan. Guarded by routeFallbackMu.
+	routeFallbackMu    sync.Mutex
+	routeFallbackIndex map[string][]model.RouteFallbackRecord
+	routeMu            sync.Mutex
+	routes             map[string]routedSTT
 	// languageRouteIDs is media.stt.language_providers resolved to route
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
@@ -1986,6 +1991,9 @@ func (s *Service) runScan(ctx context.Context) error {
 	if s.store == nil {
 		return errors.New("ingest store is not configured")
 	}
+	// SPEC §8.2.4: the route-fallback gate reads one index per scan.
+	s.loadRouteFallbackIndex(ctx)
+	defer s.clearRouteFallbackIndex()
 
 	// Reset the per-run progress counters so each scan reports the current corpus
 	// rather than accumulating across every scan the daemon performs (issue #426).
@@ -3030,10 +3038,13 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 }
 
 // deriveOneTrackTranslations reads a single track's cached source transcript and
-// produces its per-language translations (SPEC §8.6.2/§8.6.12). A cache miss here
-// means the track produced no source transcript (empty/failed in the transcription
-// pass), which is a legitimate no-op — never a re-transcription.
+// produces its per-language translations (SPEC §8.6.2/§8.6.12). The read goes
+// through the transcript cache the transcription pass wrote. A route-fallback
+// result is read as it is: the transcription pass already applied the §8.2.4
+// retry this run, so it is not decoded again here. A cache miss decodes the
+// track through the ordinary transcript path; an empty result is a no-op.
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
+	tc.noFallbackRetry = true
 	transcriptText, _, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return err
@@ -5622,6 +5633,10 @@ type trackContext struct {
 	stream     avutil.AudioStream
 	hasStream  bool
 	warnExtras bool
+	// noFallbackRetry reads a cached route-fallback result as it is (SPEC
+	// §8.2.4): the derivation pass reads the text the transcription pass
+	// settled, so a due result is not decoded twice in one run.
+	noFallbackRetry bool
 }
 
 // generateTranscriptRepresentation transcribes a media document (audio, or a
@@ -6201,7 +6216,7 @@ func (s *Service) warnPartialTranscript(doc model.Document, tc trackContext, cov
 // each track caches independently.
 func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	if tc.audioIndex <= 0 {
-		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "", doc.RelPath)
+		return s.readOrComputeTranscriptOpts(ctx, doc, content, "", doc.RelPath, !tc.noFallbackRetry)
 	}
 	audio, err := s.extractTrackAudio(ctx, doc, content, tc.audioIndex)
 	if err != nil {
@@ -6223,7 +6238,7 @@ func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, c
 	trackDoc.RelPath = trackAudioRelPath(doc.RelPath, tc.audioIndex)
 	// The ORIGINAL document's path, not trackDoc's synthetic one: see the mark
 	// lookup in readOrComputeTranscriptWithWords.
-	return s.readOrComputeTranscriptWithWords(ctx, trackDoc, audio, "", doc.RelPath)
+	return s.readOrComputeTranscriptOpts(ctx, trackDoc, audio, "", doc.RelPath, !tc.noFallbackRetry)
 }
 
 // extractTrackAudio demuxes a specific audio-relative track to a compact STT-ready
@@ -6992,6 +7007,13 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // which is doc.RelPath for an ordinary decode and the real document's path for a
 // per-track decode whose doc is synthetic. Only the #974 redecode mark reads it.
 func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
+	return s.readOrComputeTranscriptOpts(ctx, doc, content, language, originRelPath, true)
+}
+
+// readOrComputeTranscriptOpts is readOrComputeTranscriptWithWords with the
+// §8.2.4 retry selectable: retryFallback false serves a cached route-fallback
+// result as it is.
+func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string, retryFallback bool) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	if s.transcriber == nil {
 		return "", nil, nil, nil, errors.New("transcriber not configured")
 	}
@@ -7027,7 +7049,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 				coverage: s.restoreCachedCoverage(paths.coverage, paths.screened),
 				route:    readCachedItemRoute(paths.route),
 			}
-			return s.serveCachedTranscript(ctx, doc, content, paths, hit)
+			return s.serveCachedTranscript(ctx, doc, content, paths, hit, retryFallback)
 		}
 	}
 

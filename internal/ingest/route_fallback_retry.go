@@ -38,16 +38,11 @@ import (
 // a refused transcript, then reports the failure (TRANSCRIBE_FAILED).
 var errRouteFallbackRetired = errors.New("route-fallback transcript retired")
 
-// SetRouteRetryAfter overrides media.stt.route_retry_after, for tests.
-func (s *Service) SetRouteRetryAfter(d time.Duration) {
-	s.routeRetryAfter = d
-}
-
-// SetClock overrides the time source of the route-fallback retry rule, for
-// tests. Nil restores time.Now.
-func (s *Service) SetClock(now func() time.Time) {
-	s.clock = now
-}
+// routeFallbackClockSkew is how far in the future a route_fallback_at may be
+// before it is not trusted. A later time (a clock that moved back, or a
+// stamp from another host) would delay the retry without limit, so it is
+// treated as due.
+const routeFallbackClockSkew = 5 * time.Minute
 
 // nowUTC is the current time in UTC from the injected clock, or time.Now.
 func (s *Service) nowUTC() time.Time {
@@ -99,42 +94,75 @@ func (c cachedTranscript) fallbackStamp() (at, by string, ok bool) {
 	return "", "", false
 }
 
-// fallbackVerdict is the §8.2.4 decision on one fallback result: whether it is
-// decoded again on this run, whether the default profile that produced it
-// changed (the result is then stale under both policies), and why, for the log.
-type fallbackVerdict struct {
-	due             bool
-	producerChanged bool
-	why             string
+// RouteFallbackPolicy is the configuration a §8.2.4 due decision reads: the
+// on_route_error policy, media.stt.route_retry_after, and the
+// "<profile>|<model>" of the current default STT profile.
+type RouteFallbackPolicy struct {
+	Fail       bool
+	RetryAfter time.Duration
+	Producer   string
 }
 
-// routeFallbackVerdict applies the §8.2.4 rules to a fallback result's stamp.
-func (s *Service) routeFallbackVerdict(at, by string) fallbackVerdict {
-	if strings.TrimSpace(by) == "" || strings.TrimSpace(by) != s.defaultRouteIdentity() {
-		return fallbackVerdict{due: true, producerChanged: true, why: fmt.Sprintf("route_fallback_by %q is not the current default profile %q", by, s.defaultRouteIdentity())}
-	}
-	if !s.routeErrorFallback {
-		return fallbackVerdict{due: true, why: "media.stt.on_route_error=fail"}
+// RouteFallbackDecision is the §8.2.4 decision on one fallback result: whether
+// it is decoded again on this run, whether the default profile that produced
+// it changed (the result is then stale under both policies), why, and when a
+// result that is not due becomes due.
+type RouteFallbackDecision struct {
+	Due             bool
+	ProducerChanged bool
+	Why             string
+	NextDue         time.Time
+}
+
+// DecideRouteFallback applies the §8.2.4 rules to one fallback result. It is
+// the one due computation: the re-derivation gate, the cache read and
+// `dir2mcp doctor` all call it. dropped is set for a transcript that holds a
+// window dropped under on_route_error: fail; such a transcript is processed
+// on every run, so its route takes over once it works and a return to default
+// restores the cached fallback text.
+func DecideRouteFallback(p RouteFallbackPolicy, at, by string, dropped bool, now time.Time) RouteFallbackDecision {
+	by = strings.TrimSpace(by)
+	switch {
+	case by == "" || by != strings.TrimSpace(p.Producer):
+		return RouteFallbackDecision{Due: true, ProducerChanged: true, Why: fmt.Sprintf("route_fallback_by %q is not the current default profile %q", by, p.Producer)}
+	case dropped:
+		return RouteFallbackDecision{Due: true, Why: "a fallback window was dropped under media.stt.on_route_error=fail"}
+	case p.Fail:
+		return RouteFallbackDecision{Due: true, Why: "media.stt.on_route_error=fail"}
 	}
 	t, err := time.Parse(time.RFC3339, strings.TrimSpace(at))
-	if err != nil {
-		return fallbackVerdict{due: true, why: "no valid route_fallback_at"}
+	switch {
+	case err != nil:
+		return RouteFallbackDecision{Due: true, Why: "no valid route_fallback_at"}
+	case t.After(now.Add(routeFallbackClockSkew)):
+		return RouteFallbackDecision{Due: true, Why: "route_fallback_at is in the future"}
+	case p.RetryAfter <= 0:
+		return RouteFallbackDecision{Due: true, Why: "media.stt.route_retry_after=0"}
 	}
-	if s.routeRetryAfter <= 0 {
-		return fallbackVerdict{due: true, why: "media.stt.route_retry_after=0"}
+	next := t.Add(p.RetryAfter)
+	if now.Before(next) {
+		return RouteFallbackDecision{NextDue: next}
 	}
-	if s.nowUTC().Before(t.Add(s.routeRetryAfter)) {
-		return fallbackVerdict{}
-	}
-	return fallbackVerdict{due: true, why: "route_retry_after elapsed"}
+	return RouteFallbackDecision{Due: true, Why: "route_retry_after elapsed"}
+}
+
+// routeFallbackPolicy is the Service's current §8.2.4 configuration.
+func (s *Service) routeFallbackPolicy() RouteFallbackPolicy {
+	return RouteFallbackPolicy{Fail: !s.routeErrorFallback, RetryAfter: s.routeRetryAfter, Producer: s.defaultRouteIdentity()}
+}
+
+// routeFallbackVerdict decides a cached fallback result's stamp.
+func (s *Service) routeFallbackVerdict(at, by string) RouteFallbackDecision {
+	return DecideRouteFallback(s.routeFallbackPolicy(), at, by, false, s.nowUTC())
 }
 
 // routeFallbackMeta is the part of a transcript meta_json the §8.2.4 gate reads.
 type routeFallbackMeta struct {
-	RouteFallbackFrom string              `json:"route_fallback_from"`
-	RouteFallbackAt   string              `json:"route_fallback_at"`
-	RouteFallbackBy   string              `json:"route_fallback_by"`
-	Coverage          *TranscriptCoverage `json:"coverage"`
+	RouteFallbackFrom    string                   `json:"route_fallback_from"`
+	RouteFallbackAt      string                   `json:"route_fallback_at"`
+	RouteFallbackBy      string                   `json:"route_fallback_by"`
+	RouteFallbackDropped []model.CoverageLanguage `json:"route_fallback_dropped"`
+	Coverage             *TranscriptCoverage      `json:"coverage"`
 }
 
 // RouteFallbackDue reports whether a stored transcript meta_json holds a
@@ -145,83 +173,133 @@ func (s *Service) RouteFallbackDue(metaJSON string) (bool, string) {
 	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
 		return false, ""
 	}
-	if meta.RouteFallbackFrom == "" && !coverageHasFallback(meta.Coverage) {
+	dropped := len(meta.RouteFallbackDropped) > 0
+	if meta.RouteFallbackFrom == "" && !coverageHasFallback(meta.Coverage) && !dropped {
 		return false, ""
 	}
-	v := s.routeFallbackVerdict(meta.RouteFallbackAt, meta.RouteFallbackBy)
-	return v.due, v.why
+	d := DecideRouteFallback(s.routeFallbackPolicy(), meta.RouteFallbackAt, meta.RouteFallbackBy, dropped, s.nowUTC())
+	return d.Due, d.Why
+}
+
+// routeFallbackLister is the optional store capability behind the §8.2.4 gate:
+// the live transcripts that hold a fallback record, for the whole corpus (one
+// query per scan) or for one document.
+type routeFallbackLister interface {
+	RouteFallbackTranscripts(ctx context.Context) ([]model.RouteFallbackRecord, error)
+	RouteFallbackTranscriptsFor(ctx context.Context, relPath string) ([]model.RouteFallbackRecord, error)
+}
+
+// loadRouteFallbackIndex reads every fallback record once at the start of a
+// scan, so the gate costs one query per scan instead of one per unchanged
+// document. A store without the capability, or a failed query, leaves the
+// gate on its per-document path.
+func (s *Service) loadRouteFallbackIndex(ctx context.Context) {
+	lister, ok := s.store.(routeFallbackLister)
+	if !ok || s.transcriber == nil {
+		return
+	}
+	records, err := lister.RouteFallbackTranscripts(ctx)
+	if err != nil {
+		s.getLogger().Printf("route fallback: cannot list route-fallback transcripts (%v); checking each media document instead", err)
+		return
+	}
+	index := map[string][]model.RouteFallbackRecord{}
+	for _, r := range records {
+		index[r.RelPath] = append(index[r.RelPath], r)
+	}
+	s.routeFallbackMu.Lock()
+	s.routeFallbackIndex = index
+	s.routeFallbackMu.Unlock()
+}
+
+// clearRouteFallbackIndex drops the per-scan index when the scan ends.
+func (s *Service) clearRouteFallbackIndex() {
+	s.routeFallbackMu.Lock()
+	s.routeFallbackIndex = nil
+	s.routeFallbackMu.Unlock()
+}
+
+// routeFallbackRecordsFor returns the fallback records of one document. Only
+// audio and video hold a decoded transcript, so other documents cost nothing.
+// Every source transcript track is covered: an additional audio track
+// (§8.6.12) is its own decode with its own fallback record.
+func (s *Service) routeFallbackRecordsFor(ctx context.Context, reader representationMetaReader, relPath string) []model.RouteFallbackRecord {
+	if t := ClassifyDocType(relPath); t != "audio" && t != "video" {
+		return nil
+	}
+	s.routeFallbackMu.Lock()
+	index := s.routeFallbackIndex
+	s.routeFallbackMu.Unlock()
+	if index != nil {
+		return index[relPath]
+	}
+	if lister, ok := s.store.(routeFallbackLister); ok {
+		records, err := lister.RouteFallbackTranscriptsFor(ctx, relPath)
+		if err != nil {
+			return nil
+		}
+		return records
+	}
+	meta, err := reader.RepresentationMetaByType(ctx, relPath, RepTypeTranscript)
+	if err != nil || strings.TrimSpace(meta) == "" {
+		return nil
+	}
+	var m routeFallbackMeta
+	if json.Unmarshal([]byte(meta), &m) != nil {
+		return nil
+	}
+	dropped := len(m.RouteFallbackDropped) > 0
+	if m.RouteFallbackFrom == "" && !coverageHasFallback(m.Coverage) && !dropped {
+		return nil
+	}
+	return []model.RouteFallbackRecord{{RelPath: relPath, RepType: RepTypeTranscript, At: m.RouteFallbackAt, By: m.RouteFallbackBy, Dropped: dropped}}
 }
 
 // routeFallbackStale is the §8.2.4 half of the §8.6.7 re-derivation gate: an
 // unchanged document whose stored transcript holds a due fallback result is
 // processed again, so its route decodes it. A result that is not due costs
-// nothing. Every source transcript track is checked: an additional audio track
-// (§8.6.12) is its own decode with its own fallback record.
+// nothing.
 func (s *Service) routeFallbackStale(ctx context.Context, reader representationMetaReader, relPath string) bool {
 	if s.transcriber == nil {
 		return false
 	}
-	for _, t := range s.sourceTranscriptMetas(ctx, reader, relPath) {
-		if due, why := s.RouteFallbackDue(t.meta); due {
-			s.getLogger().Printf("route fallback: %s (%s) holds a route-fallback transcript (%s); decoding it again on its route this scan (SPEC §8.2.4)", relPath, t.repType, why)
+	policy, now := s.routeFallbackPolicy(), s.nowUTC()
+	for _, r := range s.routeFallbackRecordsFor(ctx, reader, relPath) {
+		if d := DecideRouteFallback(policy, r.At, r.By, r.Dropped, now); d.Due {
+			s.getLogger().Printf("route fallback: %s (%s) holds a route-fallback transcript (%s); decoding it again on its route this scan (SPEC §8.2.4)", relPath, r.RepType, d.Why)
 			return true
 		}
 	}
 	return false
 }
 
-// transcriptMetaRow is one stored source transcript's rep_type and meta_json.
-type transcriptMetaRow struct {
-	repType, meta string
-}
-
-// sourceTranscriptMetas returns the meta_json of every live source transcript
-// of a document: the bare transcript and each additional track's
-// transcript@t<N>, without translations. A store that cannot list its
-// representations yields the bare transcript only.
-func (s *Service) sourceTranscriptMetas(ctx context.Context, reader representationMetaReader, relPath string) []transcriptMetaRow {
-	lister, ok := s.store.(activeRepresentationLister)
-	if !ok {
-		meta, err := reader.RepresentationMetaByType(ctx, relPath, RepTypeTranscript)
-		if err != nil || strings.TrimSpace(meta) == "" {
-			return nil
-		}
-		return []transcriptMetaRow{{repType: RepTypeTranscript, meta: meta}}
-	}
-	reps, err := lister.ActiveRepresentations(ctx, relPath)
-	if err != nil {
-		return nil
-	}
-	var out []transcriptMetaRow
-	for _, rep := range reps {
-		isSource := rep.RepType == RepTypeTranscript ||
-			(strings.HasPrefix(rep.RepType, RepTypeTranscript+"@") && !strings.Contains(rep.RepType, "-"))
-		if isSource && strings.TrimSpace(rep.MetaJSON) != "" {
-			out = append(out, transcriptMetaRow{repType: rep.RepType, meta: rep.MetaJSON})
-		}
-	}
-	return out
-}
-
 // fallbackRetry is the outcome of one §8.2.4 retry: the transcript the index
-// gets, the entry the cache gets (nil leaves the cache entry as it is), and
-// the item's failure.
+// gets, the entry the cache gets (nil leaves the cache entry as it is), the
+// item's failure, and envErr when the retry could not run at all (the host
+// could not stage, probe or cut the audio). An envErr leaves the cache and
+// the index as they are: a host problem is not a route failure.
 type fallbackRetry struct {
 	served cachedTranscript
 	cache  *cachedTranscript
 	err    error
+	envErr error
 }
 
 // serveCachedTranscript returns a cached transcript, after the §8.2.4 retry
-// when it is a fallback result that is due.
-func (s *Service) serveCachedTranscript(ctx context.Context, doc model.Document, content []byte, paths transcriptCachePaths, hit cachedTranscript) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
+// when it is a fallback result that is due. retry is false on the derivation
+// pass (§8.6.11), which reads the text the transcription pass settled and
+// never decodes a fallback result a second time in one run.
+func (s *Service) serveCachedTranscript(ctx context.Context, doc model.Document, content []byte, paths transcriptCachePaths, hit cachedTranscript, retry bool) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
 	at, by, ok := hit.fallbackStamp()
-	if !ok {
+	if !ok || !retry {
 		return hit.unpack()
 	}
 	v := s.routeFallbackVerdict(at, by)
-	if !v.due {
+	if !v.Due {
 		return hit.unpack()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, nil, nil, retryInterrupted(doc, err)
 	}
 	var r fallbackRetry
 	if hit.route != nil && hit.route.FallbackFrom != "" {
@@ -229,10 +307,16 @@ func (s *Service) serveCachedTranscript(ctx context.Context, doc model.Document,
 	} else {
 		r = s.retryWindowFallback(ctx, doc, content, hit, v)
 	}
+	// A cancelled run decides nothing: the cache, the stamp and the index stay.
+	if err := ctx.Err(); err != nil {
+		return "", nil, nil, nil, retryInterrupted(doc, err)
+	}
+	if r.envErr != nil {
+		s.getLogger().Printf("route fallback retry %s: could not run (%v); the cached transcript and its stamp stay (SPEC §8.2.4)", doc.RelPath, r.envErr)
+		return "", nil, nil, nil, fmt.Errorf("%w: transcribe %s: the route-fallback retry could not run: %w", ErrTranscriptProviderFailure, doc.RelPath, r.envErr)
+	}
 	if r.cache != nil {
-		if err := s.publishTranscriptCache(paths, *r.cache); err != nil {
-			s.getLogger().Printf("route fallback retry %s: %v; the next run reads the earlier cache entry", doc.RelPath, err)
-		}
+		s.publishRetriedCache(doc, paths, hit, *r.cache)
 	}
 	if r.err != nil {
 		return "", nil, nil, nil, r.err
@@ -240,32 +324,55 @@ func (s *Service) serveCachedTranscript(ctx context.Context, doc model.Document,
 	return r.served.unpack()
 }
 
+// retryInterrupted is the error of a retry the run's context cancelled.
+func retryInterrupted(doc model.Document, err error) error {
+	return fmt.Errorf("%w: transcribe %s: route-fallback retry interrupted: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+}
+
+// publishRetriedCache writes a retry's cache entry. When the text did not
+// change (a failed retry that only moved the stamp) only the sidecars are
+// written, so the text and word timing are not rewritten for a time stamp.
+func (s *Service) publishRetriedCache(doc model.Document, paths transcriptCachePaths, hit, entry cachedTranscript) {
+	if entry.text == hit.text {
+		if s.publishCachedCoverage(paths.coverage, entry.coverage) {
+			s.publishCachedItemRoute(paths.route, entry.route)
+		}
+		return
+	}
+	if err := s.publishTranscriptCache(paths, entry); err != nil {
+		s.getLogger().Printf("route fallback retry %s: %v; the next run decodes it again", doc.RelPath, err)
+	}
+}
+
 // retryItemFallback is the §8.2.4 retry under item scope: the item is decoded
 // once on the route for its recorded language. The identifier is not asked
 // again: its binding and probe are in the identity, so they are unchanged.
-func (s *Service) retryItemFallback(ctx context.Context, doc model.Document, content []byte, hit cachedTranscript, v fallbackVerdict) fallbackRetry {
+func (s *Service) retryItemFallback(ctx context.Context, doc model.Document, content []byte, hit cachedTranscript, v RouteFallbackDecision) fallbackRetry {
 	rec := *hit.route
 	relPath, audio, ok, err := s.transcriptInput(ctx, doc, content)
-	if err == nil && !ok {
-		err = errors.New("no audio track to decode")
+	if err != nil {
+		return fallbackRetry{envErr: err}
+	}
+	if !ok {
+		return fallbackRetry{envErr: errors.New("no audio track to decode")}
 	}
 	cand := rec.FallbackFrom
-	var text string
-	var words []model.TimedWord
-	var cov *TranscriptCoverage
+	route, err := s.retryCandidate(rec.Language, rec.FallbackFrom)
 	if err == nil {
-		var route routedSTT
-		route, err = s.retryCandidate(rec.Language, rec.FallbackFrom)
-		if err == nil {
-			cand = route.route
-			text, words, cov, err = s.transcribeStructuredWindowed(ctx, relPath, audio, route.stt)
-		}
+		cand = route.route
+		var text string
+		var words []model.TimedWord
+		var cov *TranscriptCoverage
+		text, words, cov, err = s.transcribeStructuredWindowed(ctx, relPath, audio, route.stt)
 		if err == nil {
 			out := cachedTranscript{text: normalizeTranscriptNewlines(text), words: words, coverage: cov,
 				route: &itemRoute{Language: rec.Language, Confidence: rec.Confidence, Route: route.route, Uncovered: !routeCovers(route, rec.Language)}}
-			s.getLogger().Printf("route fallback retry %s: candidate %q recovered; its text replaces the fallback text (%s, SPEC §8.2.4)", doc.RelPath, cand, v.why)
+			s.getLogger().Printf("route fallback retry %s: candidate %q recovered; its text replaces the fallback text (%s, SPEC §8.2.4)", doc.RelPath, cand, v.Why)
 			return fallbackRetry{served: out, cache: &out}
 		}
+	}
+	if ctx.Err() != nil {
+		return fallbackRetry{}
 	}
 	return s.itemRetryFailed(ctx, doc, relPath, audio, hit, cand, v, err)
 }
@@ -274,14 +381,14 @@ func (s *Service) retryItemFallback(ctx context.Context, doc model.Document, con
 // under fail the item fails and its fallback text is retired; under default a
 // changed producer decodes it once on the new default profile; otherwise the
 // cached fallback text stays and route_fallback_at moves to now.
-func (s *Service) itemRetryFailed(ctx context.Context, doc model.Document, relPath string, audio []byte, hit cachedTranscript, cand string, v fallbackVerdict, cause error) fallbackRetry {
+func (s *Service) itemRetryFailed(ctx context.Context, doc model.Document, relPath string, audio []byte, hit cachedTranscript, cand string, v RouteFallbackDecision, cause error) fallbackRetry {
 	rec := *hit.route
 	if !s.routeErrorFallback {
 		s.getLogger().Printf("route fallback retry %s: candidate %q failed again (TRANSCRIBE_FAILED: %v); media.stt.on_route_error=fail, so the item fails and its fallback text leaves the index (SPEC §8.2.4)", doc.RelPath, cand, cause)
 		return fallbackRetry{err: fmt.Errorf("%w: %w: transcribe %s on route %q: %w", ErrTranscriptProviderFailure, errRouteFallbackRetired, doc.RelPath, cand, cause)}
 	}
 	now := s.nowUTC()
-	if v.producerChanged {
+	if v.ProducerChanged {
 		def := s.defaultRoute()
 		text, words, cov, err := s.transcribeStructuredWindowed(ctx, relPath, audio, def.stt)
 		if err != nil {
@@ -292,7 +399,7 @@ func (s *Service) itemRetryFailed(ctx context.Context, doc model.Document, relPa
 			Language: rec.Language, Confidence: rec.Confidence, Route: def.route, FallbackFrom: cand,
 			Uncovered: !routeCovers(def, rec.Language), FallbackAt: now.Format(time.RFC3339), FallbackBy: s.defaultRouteIdentity(),
 		}}
-		s.getLogger().Printf("route fallback retry %s: candidate %q failed again (TRANSCRIBE_FAILED: %v); the current default profile %q decoded it once (%s); next due %s (SPEC §8.2.4)", doc.RelPath, cand, cause, def.route, v.why, s.nextDueLabel(now))
+		s.getLogger().Printf("route fallback retry %s: candidate %q failed again (TRANSCRIBE_FAILED: %v); the current default profile %q decoded it once (%s); next due %s (SPEC §8.2.4)", doc.RelPath, cand, cause, def.route, v.Why, s.nextDueLabel(now))
 		return fallbackRetry{served: out, cache: &out}
 	}
 	out := hit
@@ -346,11 +453,4 @@ func (s *Service) readTrackTranscriptOrRetire(ctx context.Context, doc model.Doc
 		return "", nil, nil, nil, fmt.Errorf("retire route-fallback transcript of %s: %w (after: %w)", doc.RelPath, rerr, err)
 	}
 	return "", nil, nil, nil, err
-}
-
-// RouteFallbackStaleForTest exposes the §8.2.4 re-derivation gate for one
-// document, for tests in the tests/ tree.
-func (s *Service) RouteFallbackStaleForTest(ctx context.Context, relPath string) bool {
-	reader, ok := s.store.(representationMetaReader)
-	return ok && s.routeFallbackStale(ctx, reader, relPath)
 }

@@ -201,6 +201,12 @@ type transcriptMeta struct {
 	// scopes. Neither is part of the derivation identity.
 	RouteFallbackAt string `json:"route_fallback_at,omitempty"`
 	RouteFallbackBy string `json:"route_fallback_by,omitempty"`
+	// RouteFallbackDropped lists the fallback windows a retry dropped under
+	// on_route_error: fail. Their cached fallback text is kept (SPEC §8.2.4),
+	// so this record keeps the transcript a fallback result for the
+	// re-derivation gate: a repaired checkpoint then takes over, and a return
+	// to default restores the cached text. Absent otherwise.
+	RouteFallbackDropped []model.CoverageLanguage `json:"route_fallback_dropped,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

@@ -75,6 +75,11 @@ type TranscriptCoverage struct {
 	// (route_fallback_at, route_fallback_by), one value per transcript.
 	RouteFallbackAt string `json:"-"`
 	RouteFallbackBy string `json:"-"`
+	// RouteFallbackDropped lists the fallback windows a retry dropped under
+	// on_route_error: fail. The meta_json records it as route_fallback_dropped,
+	// so the re-derivation gate still sees a fallback result whose cached text
+	// is kept (SPEC §8.2.4). Transient here, like the stamp.
+	RouteFallbackDropped []CoverageLanguage `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds
