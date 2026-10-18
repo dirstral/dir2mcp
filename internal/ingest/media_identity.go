@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,9 @@ import (
 //
 // A file no larger than the three slices together is read whole and hashed
 // exactly as under "full", so small media keeps its historical identity.
+//
+// SPEC §7.6 (spec 0.81.0) fixes the digest bytes and gives three test vectors;
+// tests/ingest pins them (TestSampledIdentity_SpecTestVectors).
 
 // mediaIdentitySampleBytes is the size of each of the three slices.
 const mediaIdentitySampleBytes = 4 << 20
@@ -175,10 +179,11 @@ func (s *Service) ensureMediaContent(ctx context.Context, doc model.Document, co
 // the media's bytes to translate it (§8.6.11). Translation applies only to a
 // model-derived transcript (§8.6.2), and its result is cached; so the read is
 // unnecessary when the document's transcripts are all sidecar-sourced (nothing
-// to translate), or when every configured target language is already present and
-// the derivation identity (§8.6.7) is current. Any doubt — a multi-track
-// selection, a store without the read surface, a store error — answers true and
-// takes the full path, so the output set never changes.
+// to translate), or when every configured target language already has a
+// translation by the active translator and the derivation identity (§8.6.7) is
+// current. Any doubt (a multi-track selection, a store without the read surface,
+// a store error) answers true and takes the full path, so the output set never
+// changes.
 func (s *Service) derivationNeedsContent(ctx context.Context, doc model.Document) bool {
 	sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks)
 	if err != nil || sel.Mode != config.STTTracksFirst {
@@ -192,11 +197,21 @@ func (s *Service) derivationNeedsContent(ctx context.Context, doc model.Document
 	if err != nil {
 		return true
 	}
+	// have holds only the target languages of translations made by the active
+	// translator. An authored sidecar in a target language does not count:
+	// single-pass translates a model-derived transcript into every target, so
+	// the derivation pass must too. A translation by another provider or model
+	// does not count either: its cache key differs, so it is re-derived.
 	have := make(map[string]struct{}, len(reps))
 	modelSource := false
 	for _, rep := range reps {
-		have[strings.ToLower(subexport.RepLanguage(rep.MetaJSON))] = struct{}{}
-		if !subexport.RepIsSidecar(rep.MetaJSON) && !subexport.RepIsTranslation(rep.MetaJSON) {
+		if subexport.RepIsTranslation(rep.MetaJSON) {
+			if s.translationByActiveTranslator(rep.MetaJSON) {
+				have[strings.ToLower(subexport.RepLanguage(rep.MetaJSON))] = struct{}{}
+			}
+			continue
+		}
+		if !subexport.RepIsSidecar(rep.MetaJSON) {
 			modelSource = true
 		}
 	}
@@ -212,4 +227,17 @@ func (s *Service) derivationNeedsContent(ctx context.Context, doc model.Document
 		}
 	}
 	return false
+}
+
+// translationByActiveTranslator reports whether a translated transcript's
+// meta_json records the active translate provider and model (§8.6.7). An
+// unparseable meta, or a different provider or model, answers false, so the
+// derivation pass reads the bytes and re-derives the translation.
+func (s *Service) translationByActiveTranslator(metaJSON string) bool {
+	var meta transcriptMeta
+	if err := json.Unmarshal([]byte(strings.TrimSpace(metaJSON)), &meta); err != nil {
+		return false
+	}
+	return strings.TrimSpace(meta.TranslateProvider) == strings.TrimSpace(s.translateProvider) &&
+		strings.TrimSpace(meta.TranslateModel) == strings.TrimSpace(s.translateModel)
 }
