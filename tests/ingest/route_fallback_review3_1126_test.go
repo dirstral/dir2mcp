@@ -60,6 +60,27 @@ func TestRouteFallbackReview3_MixedDropListIsPerWindow(t *testing.T) {
 	}
 }
 
+// TestRouteFallbackReview3_OtherReadersNeverRetry: a read outside the
+// transcription pass (the MCP transcribe tools) serves the cached result and
+// never decodes, even when a fallback result is due. Under fail it does not
+// return the fallback text.
+func TestRouteFallbackReview3_OtherReadersNeverRetry(t *testing.T) {
+	h := newFallbackItemHarness(t, "default")
+	h.svc.SetRouteRetryAfterForTest(0)
+	content := []byte(strings.Repeat("r", 4000))
+	h.seedFallback(t, content)
+	requests := h.stt.count()
+	text, err := h.svc.ReadOrComputeTranscript(context.Background(), mediaDoc("talks/kk.m4a"), content, "")
+	if err != nil || !strings.Contains(text, "spoken by "+fbModelDefault) || h.stt.count() != requests {
+		t.Fatalf("read %q (%v, %d requests), want the cached text and no request", text, err, h.stt.count()-requests)
+	}
+	h.svc.SetRouteErrorFallback(false)
+	text, err = h.svc.ReadOrComputeTranscript(context.Background(), mediaDoc("talks/kk.m4a"), content, "")
+	if err != nil || text != "" || h.stt.count() != requests {
+		t.Fatalf("under fail the read returned %q (%v, %d requests), want no text and no request", text, err, h.stt.count()-requests)
+	}
+}
+
 // TestRouteFallbackReview3_SkipReasonIsAClass (3): the skip reason stored in
 // meta_json is a short class. A long error with a temp path and tool output
 // goes to the log only.

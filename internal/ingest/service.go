@@ -7006,8 +7006,13 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // originRelPath is the rel_path of the DOCUMENT this transcript belongs to,
 // which is doc.RelPath for an ordinary decode and the real document's path for a
 // per-track decode whose doc is synthetic. Only the #974 redecode mark reads it.
+//
+// It never runs the §8.2.4 retry: only the transcription pass does that
+// (readTrackTranscript), because only it can retire a fallback transcript that
+// fails again. Every other reader (the MCP transcribe tools) gets the cached
+// result as it is, without the fallback text under on_route_error: fail.
 func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string, originRelPath string) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
-	return s.readOrComputeTranscriptOpts(ctx, doc, content, language, originRelPath, true)
+	return s.readOrComputeTranscriptOpts(ctx, doc, content, language, originRelPath, false)
 }
 
 // readOrComputeTranscriptOpts is readOrComputeTranscriptWithWords with the
