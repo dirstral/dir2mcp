@@ -67,6 +67,50 @@ configured cap are indexed. To keep the old ceiling, set `max_file_mb: 10`.
 
 Zero or a negative value is not "unlimited": it selects the built-in default bound.
 
+#### Media identity: hash the whole file or a sample
+
+```yaml
+ingest:
+  media_identity: full   # default: full | sampled
+```
+
+dir2mcp decides whether a document changed by its content hash. For audio and
+video, `full` (the default) hashes the whole file, which means the first scan
+reads every media file in full, even one whose transcript then comes from a
+subtitle sidecar and whose bytes are never used. On a large video archive that
+read is most of the first pass: tens of terabytes over NFS.
+
+`sampled` hashes the file's size plus three fixed 4 MiB slices: the start, the
+middle and the end. The whole file is then read only when a representation needs
+its bytes, which is speech-to-text or direct media embedding. A subtitle sidecar
+removes only the speech-to-text read. Thus a subtitled video is not read in full
+only to hash it. If direct media embedding is on, that step still reads the
+whole file.
+
+The exact digest bytes (the domain tag, the size, the slice offsets and the
+sidecar fold) and three test vectors are in
+[SPEC §7.6](../dirstral-spec/docs/SPEC.md). In short: SHA-256 over
+`dir2mcp-media-identity-v1`, one `0x00` byte, the size as ASCII decimal, one
+`0x00` byte, then the slices at offset 0, at `floor(size/2) - 2 MiB` and at
+`size - 4 MiB`. A file of 12 MiB or less is hashed whole.
+
+| | `full` | `sampled` |
+|---|---|---|
+| Bytes read for a subtitled 1 GB video, with no direct media embedding | 1 GB | 12 MiB |
+| Detects an edit that keeps the same size and only touches bytes outside the three slices | yes | no |
+| Media no larger than 12 MiB | whole file | whole file, same hash as `full` |
+
+The blind spot is an in-place edit that rewrites bytes outside the slices
+without changing the file's length. Transcoded media is not edited that way. Keep
+`full` for a corpus where it might be.
+
+Switching an existing corpus between the two changes every large media
+document's identity once, so the next scan re-processes them. Transcripts come
+from the transcript cache, so speech-to-text does not run again. Under
+`media.batch.two_phase`, the translation pass also skips its read when there is
+nothing to translate: a transcript that came from a sidecar, or translations
+already present for the current models.
+
 #### Retrieval answer keys
 
 ```yaml

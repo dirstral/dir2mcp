@@ -2957,6 +2957,12 @@ func (s *Service) deriveDocumentTranslations(ctx context.Context, f DiscoveredFi
 	if !s.translationConfigured() || s.transcriber == nil {
 		return false
 	}
+	// The read below is the whole media file. Skip it when there is nothing it
+	// could change: a sidecar-only transcript, or translations already present
+	// under the current derivation identity (§8.6.11).
+	if !s.derivationNeedsContent(ctx, doc) {
+		return false
+	}
 	content, err := s.readDocumentContent(ctx, f.RelPath)
 	if err != nil {
 		// A read failure in the derivation pass must not fail the run: the source
@@ -3541,6 +3547,11 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 		Status:  "ok",
 		Deleted: false,
 	}
+	// SPEC §7.6 sampled media identity: hash slices, not the whole file, and
+	// leave the bytes unread until a representation needs them.
+	if s.sampledMediaIdentityActive(docType) {
+		return s.buildSampledMediaDocument(ctx, f, doc, secretPatterns)
+	}
 
 	content, overCap, err := s.readSourceBytes(ctx, f.RelPath)
 	if err != nil {
@@ -4064,6 +4075,13 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 	// then skip OCR; in `augment` OCR is kept alongside.
 	spans := s.mediaSpansFor(ctx, doc, content)
 	mediaProduced = len(spans) > 0
+	if mediaProduced {
+		// Direct media embedding hashes the bytes; load them if the sampled
+		// identity left them unread (§7.6).
+		if content, err = s.ensureMediaContent(ctx, doc, content); err != nil {
+			return false, false, err
+		}
+	}
 	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
 	if ShouldGenerateExtractedMarkdown(doc.DocType) && !skipOCR {
@@ -4768,6 +4786,13 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		// cyclomatic-complexity budget; see skipUncoveredLanguageTranscript.
 		if skip, suppressCredit := s.skipUncoveredLanguageTranscript(ctx, doc, mediaProduced); skip {
 			return suppressCredit, false, nil
+		}
+		// STT needs the bytes: load them if the sampled identity left them unread
+		// (§7.6). A sidecar returned above, so this read never runs for a
+		// subtitled file.
+		content, err = s.ensureMediaContent(ctx, doc, content)
+		if err != nil {
+			return false, false, err
 		}
 		produced, skipReason, err := s.generateTranscriptRepresentation(ctx, doc, content)
 		if err != nil {
