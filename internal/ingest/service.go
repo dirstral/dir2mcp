@@ -7473,10 +7473,8 @@ func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverag
 		RouteFallbackSkipReason: coverage.RouteFallbackSkipReason,
 		WindowMS:                coverage.WindowMS,
 	}
-	if !coverage.RouteFallbackDroppedCached {
-		// Windows whose fallback text the cache keeps are not dropped there.
-		entry.RouteFallbackDropped = coverage.RouteFallbackDropped
-	}
+	// Windows whose fallback text the cache keeps are not dropped there.
+	entry.RouteFallbackDropped = missingDropped(coverage)
 	raw, err := json.Marshal(entry)
 	if err != nil {
 		s.getLogger().Printf("marshal transcript coverage cache: %v; not caching this transcript", err)

@@ -32,6 +32,19 @@ import (
 //   - under both, a fallback result whose route_fallback_by does not name the
 //     current default profile is stale at once.
 
+// Skip reasons: the short class route_fallback_skip_reason records for a retry
+// the host could not run. The full error goes to the log once; meta_json, the
+// cache and doctor carry only the class, so no temp path or tool output is
+// stored.
+const (
+	skipAudioExtract     = "audio_extract_failed"
+	skipNoAudioTrack     = "no_audio_track"
+	skipStage            = "stage_failed"
+	skipProbe            = "probe_failed"
+	skipCut              = "cut_failed"
+	skipScheduleMismatch = "schedule_mismatch"
+)
+
 // errRouteFallbackRetired marks an item whose fallback text must leave the
 // index: its route failed again and the fallback text cannot be served
 // (SPEC §8.2.4). The caller retires the track's transcripts as §8.6.13 retires
@@ -185,7 +198,7 @@ type routeFallbackMeta struct {
 	RouteFallbackAt            string                   `json:"route_fallback_at"`
 	RouteFallbackBy            string                   `json:"route_fallback_by"`
 	RouteFallbackDropped       []model.CoverageLanguage `json:"route_fallback_dropped"`
-	RouteFallbackDroppedCached bool                     `json:"route_fallback_dropped_cached"`
+	RouteFallbackDroppedCached []model.CoverageRange    `json:"route_fallback_dropped_cached"`
 	Coverage                   *TranscriptCoverage      `json:"coverage"`
 }
 
@@ -196,7 +209,7 @@ func (m routeFallbackMeta) record(relPath, repType string) (model.RouteFallbackR
 		return model.RouteFallbackRecord{}, false
 	}
 	return model.RouteFallbackRecord{RelPath: relPath, RepType: repType, At: m.RouteFallbackAt, By: m.RouteFallbackBy,
-		Dropped: dropped, DroppedCached: dropped && m.RouteFallbackDroppedCached}, true
+		Dropped: dropped, DroppedCachedWindows: len(m.RouteFallbackDroppedCached)}, true
 }
 
 // RouteFallbackDue reports whether a stored transcript meta_json holds a
@@ -211,7 +224,7 @@ func (s *Service) RouteFallbackDue(metaJSON string) (bool, string) {
 	if !ok {
 		return false, ""
 	}
-	d := DecideRouteFallback(s.routeFallbackPolicy(), r.At, r.By, droppedState(r.Dropped, r.DroppedCached), s.nowUTC())
+	d := DecideRouteFallback(s.routeFallbackPolicy(), r.At, r.By, droppedState(r.Dropped, r.DroppedCachedWindows > 0), s.nowUTC())
 	return d.Due, d.Why
 }
 
@@ -305,7 +318,7 @@ func (s *Service) routeFallbackStale(ctx context.Context, reader representationM
 	}
 	policy, now := s.routeFallbackPolicy(), s.nowUTC()
 	for _, r := range s.routeFallbackRecordsFor(ctx, reader, relPath, docType) {
-		if d := DecideRouteFallback(policy, r.At, r.By, droppedState(r.Dropped, r.DroppedCached), now); d.Due {
+		if d := DecideRouteFallback(policy, r.At, r.By, droppedState(r.Dropped, r.DroppedCachedWindows > 0), now); d.Due {
 			s.getLogger().Printf("route fallback: %s (%s) holds a route-fallback transcript (%s); decoding it again on its route this scan (SPEC §8.2.4)", relPath, r.RepType, d.Why)
 			return true
 		}
@@ -403,10 +416,10 @@ func (s *Service) retryItemFallback(ctx context.Context, doc model.Document, con
 	rec := *hit.route
 	relPath, audio, ok, err := s.transcriptInput(ctx, doc, content)
 	if err != nil {
-		return s.itemRetryNotRun(doc, hit, err)
+		return s.itemRetryNotRun(doc, hit, skipAudioExtract, err)
 	}
 	if !ok {
-		return s.itemRetryNotRun(doc, hit, errors.New("no audio track to decode"))
+		return s.itemRetryNotRun(doc, hit, skipNoAudioTrack, errors.New("no audio track to decode"))
 	}
 	cand := rec.FallbackFrom
 	route, err := s.retryCandidate(rec.Language, rec.FallbackFrom)
@@ -435,14 +448,14 @@ func (s *Service) retryItemFallback(ctx context.Context, doc model.Document, con
 // route_fallback_skip_reason records why. Under fail the spec does not allow
 // serving fallback text, so the item fails and its fallback text is retired,
 // exactly as when the route fails.
-func (s *Service) itemRetryNotRun(doc model.Document, hit cachedTranscript, cause error) fallbackRetry {
+func (s *Service) itemRetryNotRun(doc model.Document, hit cachedTranscript, class string, cause error) fallbackRetry {
 	if !s.routeErrorFallback {
 		s.getLogger().Printf("route fallback retry %s: could not run (%v); media.stt.on_route_error=fail, so the item fails and its fallback text leaves the index (SPEC §8.2.4)", doc.RelPath, cause)
 		return fallbackRetry{err: fmt.Errorf("%w: %w: transcribe %s: the route-fallback retry could not run: %w", ErrTranscriptProviderFailure, errRouteFallbackRetired, doc.RelPath, cause)}
 	}
 	now := s.nowUTC()
 	rec := *hit.route
-	rec.FallbackAt, rec.SkipReason = now.Format(time.RFC3339), cause.Error()
+	rec.FallbackAt, rec.SkipReason = now.Format(time.RFC3339), class
 	out := hit
 	out.route = &rec
 	s.getLogger().Printf("route fallback retry %s: could not run (%v); the cached fallback text stays indexed; next due %s (SPEC §8.2.4)", doc.RelPath, cause, s.nextDueLabel(now))

@@ -95,14 +95,30 @@ func TestDoctorRouteFallback_DueOnTheNextRun(t *testing.T) {
 	}
 }
 
-// TestDoctorRouteFallback_DroppedUnderDefaultFollowsTheClock: a window dropped
-// under fail is not a decode under default before it is due, so the report
-// names the due time, not "due on the next run".
-func TestDoctorRouteFallback_DroppedUnderDefaultFollowsTheClock(t *testing.T) {
+// TestDoctorRouteFallback_MixedDropListCountsOnlyCachedWindows: a dropped
+// list with one window whose text the cache keeps and one with no text counts
+// one window as the fail cost.
+func TestDoctorRouteFallback_MixedDropListCountsOnlyCachedWindows(t *testing.T) {
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	mixed := `{"source":"stt","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model",` +
+		`"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"},` +
+		`{"start_ms":10,"end_ms":15,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}],` +
+		`"route_fallback_dropped_cached":[{"start_ms":0,"end_ms":5}]}`
+	_, detail := routeFallbackDoctor(t, "fail", seedRep{relPath: "a.mp3", metaJSON: mixed})
+	if want := "1 window(s) in 1 transcript(s) dropped under on_route_error=fail"; !strings.Contains(detail, want) {
+		t.Fatalf("detail %q lacks %q", detail, want)
+	}
+}
+
+// TestDoctorRouteFallback_DroppedUnderDefaultIsProcessedNextRun: a window
+// dropped under fail whose text the cache keeps is processed on the next run
+// under default too (the gate restores the cached text), so doctor says what
+// the gate does.
+func TestDoctorRouteFallback_DroppedUnderDefaultIsProcessedNextRun(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
-	meta := `{"source":"stt","route_fallback_at":"` + at.Format(time.RFC3339) + `","route_fallback_by":"whisper|base-model","route_fallback_dropped_cached":true,"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
+	meta := `{"source":"stt","route_fallback_at":"` + at.Format(time.RFC3339) + `","route_fallback_by":"whisper|base-model","route_fallback_dropped_cached":[{"start_ms":0,"end_ms":5}],"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
 	_, detail := routeFallbackDoctor(t, "default", seedRep{relPath: "a.mp3", metaJSON: meta})
-	if want := "next due " + at.Add(24*time.Hour).Format(time.RFC3339); !strings.Contains(detail, want) {
+	if want := "1 route-fallback transcript(s), due on the next run"; !strings.Contains(detail, want) {
 		t.Fatalf("detail %q: want %q", detail, want)
 	}
 }
@@ -113,10 +129,10 @@ func TestDoctorRouteFallback_DroppedUnderDefaultFollowsTheClock(t *testing.T) {
 // none it says so positively.
 func TestDoctorRouteFallback_CountsRetriesThatCouldNotRunAndTheFailCost(t *testing.T) {
 	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	skipped := `{"source":"stt","route_fallback_from":"ckpt-kk","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_skip_reason":"ffmpeg not found"}`
-	dropped := `{"source":"stt","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_dropped_cached":true,"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
+	skipped := `{"source":"stt","route_fallback_from":"ckpt-kk","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_skip_reason":"audio_extract_failed"}`
+	dropped := `{"source":"stt","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_dropped_cached":[{"start_ms":0,"end_ms":5}],"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
 	_, detail := routeFallbackDoctor(t, "fail", seedRep{relPath: "a.mp3", metaJSON: skipped}, seedRep{relPath: "b.mp3", metaJSON: dropped})
-	for _, want := range []string{"1 route-fallback retries could not run: ffmpeg not found", "1 transcript(s) hold windows dropped under on_route_error=fail"} {
+	for _, want := range []string{"1 route-fallback retries could not run: audio_extract_failed", "1 window(s) in 1 transcript(s) dropped under on_route_error=fail"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("detail %q lacks %q", detail, want)
 		}

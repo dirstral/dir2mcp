@@ -24,11 +24,11 @@ import (
 
 // skipMeta is the §8.2.4 skip record on a transcript meta_json.
 type skipMeta struct {
-	RouteFallbackFrom          string    `json:"route_fallback_from"`
-	RouteFallbackAt            string    `json:"route_fallback_at"`
-	RouteFallbackSkipReason    string    `json:"route_fallback_skip_reason"`
-	RouteFallbackDropped       []covLang `json:"route_fallback_dropped"`
-	RouteFallbackDroppedCached bool      `json:"route_fallback_dropped_cached"`
+	RouteFallbackFrom          string       `json:"route_fallback_from"`
+	RouteFallbackAt            string       `json:"route_fallback_at"`
+	RouteFallbackSkipReason    string       `json:"route_fallback_skip_reason"`
+	RouteFallbackDropped       []covLang    `json:"route_fallback_dropped"`
+	RouteFallbackDroppedCached []covRefused `json:"route_fallback_dropped_cached"`
 }
 
 func decodeSkipMeta(t *testing.T, raw string) skipMeta {
@@ -77,7 +77,7 @@ func TestRouteFallbackReview2_ItemRetryNotRunUnderDefault(t *testing.T) {
 		t.Fatalf("requests %d, reps %d: want no request and the transcript indexed", h.stt.count()-requests, len(h.store.reps))
 	}
 	m := decodeSkipMeta(t, h.store.reps[0].MetaJSON)
-	if m.RouteFallbackFrom != "ckpt-kk" || m.RouteFallbackAt != "2026-10-19T10:00:00Z" || !strings.Contains(m.RouteFallbackSkipReason, "ffmpeg not found") {
+	if m.RouteFallbackFrom != "ckpt-kk" || m.RouteFallbackAt != "2026-10-19T10:00:00Z" || m.RouteFallbackSkipReason != "audio_extract_failed" {
 		t.Errorf("meta = %+v, want the fallback kept, the stamp moved to now and the skip reason", m)
 	}
 }
@@ -142,8 +142,8 @@ func TestRouteFallbackReview2_WindowRetryNotRun(t *testing.T) {
 func assertRetryNotRun(t *testing.T, w *windowFallbackHarness, m windowFallbackMeta, policy string) {
 	t.Helper()
 	sm := decodeSkipMeta(t, w.store.reps[0].MetaJSON)
-	if sm.RouteFallbackSkipReason == "" {
-		t.Errorf("no route_fallback_skip_reason recorded")
+	if sm.RouteFallbackSkipReason != "cut_failed" && sm.RouteFallbackSkipReason != "schedule_mismatch" {
+		t.Errorf("route_fallback_skip_reason = %q, want a short class", sm.RouteFallbackSkipReason)
 	}
 	text := persistedText(w.windowSTTHarness)
 	if policy == "default" {
@@ -152,7 +152,7 @@ func assertRetryNotRun(t *testing.T, w *windowFallbackHarness, m windowFallbackM
 		}
 		return
 	}
-	if strings.Contains(text, "decode 2") || !sm.RouteFallbackDroppedCached || len(sm.RouteFallbackDropped) != 1 {
+	if strings.Contains(text, "decode 2") || len(sm.RouteFallbackDroppedCached) != 1 || len(sm.RouteFallbackDropped) != 1 {
 		t.Errorf("under fail: text %q, meta %+v: want the window dropped and recorded with cached text", text, sm)
 	}
 }
@@ -298,7 +298,7 @@ func TestRouteFallbackReview2_ProducerChangeDropIsRetriedWhenDue(t *testing.T) {
 	w.now = w.now.Add(time.Hour)
 	w.mustRun(t)
 	sm := decodeSkipMeta(t, w.store.reps[0].MetaJSON)
-	if len(sm.RouteFallbackDropped) != 1 || sm.RouteFallbackDroppedCached || sm.RouteFallbackAt != "2026-10-18T10:00:00Z" {
+	if len(sm.RouteFallbackDropped) != 1 || len(sm.RouteFallbackDroppedCached) != 0 || sm.RouteFallbackAt != "2026-10-18T10:00:00Z" {
 		t.Fatalf("meta = %+v, want window 2 dropped with no cached text at the retry time", sm)
 	}
 	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "route_fallback_dropped") {

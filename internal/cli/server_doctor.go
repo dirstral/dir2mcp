@@ -1129,16 +1129,17 @@ func routeFallbackSkipLine(records []model.RouteFallbackRecord) string {
 // whose dropped windows their route decodes again on every run. A route that
 // stays broken costs one decode per window per run there.
 func routeFallbackFailCostLine(records []model.RouteFallbackRecord) string {
-	n := 0
+	transcripts, windows := 0, 0
 	for _, r := range records {
-		if r.Dropped && r.DroppedCached {
-			n++
+		if r.DroppedCachedWindows > 0 {
+			transcripts++
+			windows += r.DroppedCachedWindows
 		}
 	}
-	if n == 0 {
+	if transcripts == 0 {
 		return "no transcript holds a window dropped under on_route_error=fail"
 	}
-	return fmt.Sprintf("%d transcript(s) hold windows dropped under on_route_error=fail; their route decodes them again on every run", n)
+	return fmt.Sprintf("%d window(s) in %d transcript(s) dropped under on_route_error=fail; their route decodes them again on every run", windows, transcripts)
 }
 
 // routeFallbackRecords reads the fallback records from the index through a
@@ -1167,12 +1168,14 @@ func routeFallbackNextDue(cfg config.Config, records []model.RouteFallbackRecord
 	}
 	var earliest time.Time
 	for _, r := range records {
-		// A window dropped under fail is processed on every run to restore its
-		// cached text, but under default that costs no decode before the result
-		// is due, so the report follows the time rule for it.
+		// The same decision the gate makes: a transcript with a window dropped
+		// while the cache keeps its text is processed on the next run.
 		dropped := ingest.DroppedNone
-		if r.Dropped && r.DroppedCached && policy.Fail {
+		switch {
+		case r.DroppedCachedWindows > 0:
 			dropped = ingest.DroppedCached
+		case r.Dropped:
+			dropped = ingest.DroppedWithoutText
 		}
 		d := ingest.DecideRouteFallback(policy, r.At, r.By, dropped, now)
 		if d.Due {
