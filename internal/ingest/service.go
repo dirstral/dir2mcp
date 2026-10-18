@@ -7106,6 +7106,14 @@ func normalizeTranscriptNewlines(text string) string {
 // gracefully; missing coverage asserts completeness). Only a failure to write
 // the text itself is an error.
 func (s *Service) publishTranscriptCache(paths transcriptCachePaths, entry cachedTranscript) error {
+	// An entry that is rewritten (a §8.2.4 retry) loses its old text first.
+	// Otherwise a text write that fails after the sidecars changed would leave
+	// the old text under records that describe the new decode, for example
+	// fallback text labelled as a route decode.
+	if err := os.Remove(paths.text); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.getLogger().Printf("clear transcript cache (%s): %v; not caching this transcript", paths.text, err)
+		return nil
+	}
 	if !s.publishCachedCoverage(paths.coverage, entry.coverage) {
 		return nil
 	}
