@@ -210,6 +210,9 @@ func TestSupportBundleDefaultKeepsDiagnosticSettings(t *testing.T) {
 		"stt_provider: auto",
 		"source_kind: s3",
 		"public: false",
+		// SPEC §8.2.4 policy keys (dir2mcp #1122).
+		"media_stt_on_route_error: fail",
+		"media_stt_route_retry_after: 24h0m0s",
 	} {
 		if !strings.Contains(snapshot, want) {
 			t.Errorf("redaction dropped a diagnostic setting %q:\n%s", want, snapshot)

@@ -480,7 +480,16 @@ func (s *Service) decodeSingleWindowScoped(ctx context.Context, relPath string, 
 	stats.decoded = 1
 	stats.ranges = wd.covered
 	text, words := MergeTranscriptWindows(wd.decoded, totalMS)
-	return text, words, s.liveScopedCoverage(stats, totalMS), nil
+	return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), totalMS), nil
+}
+
+// withWindowMS records the decode window on a coverage record, for the
+// transcript cache (a §8.2.4 retry rebuilds the same schedule from it).
+func withWindowMS(cov *TranscriptCoverage, windowMS int) *TranscriptCoverage {
+	if cov != nil {
+		cov.WindowMS = windowMS
+	}
+	return cov
 }
 
 // withoutCoverage adapts a SINGLE-request decode to the windowed decode's return
@@ -572,9 +581,9 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	// dying in the log line above, so the transcript representation can record what
 	// it does and does not cover.
 	if st != nil {
-		return text, words, s.liveScopedCoverage(stats, totalMS), nil
+		return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), windowMS), nil
 	}
-	return text, words, newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), nil
+	return text, words, withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS), nil
 }
 
 // windowSchedule is the plan for one windowed decode: the recording length, the

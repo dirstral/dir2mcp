@@ -73,7 +73,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		providerCheck(ctx, cfg, "embed", provider.CapEmbed, true, deep),
 		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
 		egressCheck(cfg),
-		sttRoutesCheck(cfg),
+		sttRoutesCheck(ctx, cfg),
 		extractorCheck(cfg),
 		corpusRecordCheck(ctx, a, cfg),
 		extractionCoverageCheck(ctx, a, cfg),
@@ -1029,12 +1029,16 @@ func resolvedTextEmbedModel(cfg config.Config) string {
 // candidates are all ineligible is a warning naming the default profile that
 // decodes it instead. With nothing configured the check reports that
 // positively, because an omitted line and a clean configuration read the same
-// (§7.7). The informational stt_validation fields are surfaced unchanged.
-func sttRoutesCheck(cfg config.Config) doctorCheck {
+// (§7.7). The informational stt_validation fields are surfaced unchanged. The
+// check also counts the transcripts that hold a route-fallback result and names
+// when the next is due (SPEC §8.2.4, spec 0.82.0), and says so positively when
+// there is none.
+func sttRoutesCheck(ctx context.Context, cfg config.Config) doctorCheck {
 	const name = "stt_routes"
+	fallbacks := routeFallbackSummary(ctx, cfg)
 	identifier := strings.TrimSpace(cfg.MediaSTTLanguageIdentifier)
 	if identifier == "" && len(cfg.MediaSTTLanguageProviders) == 0 {
-		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no language routes configured: the default STT profile decodes every language"}
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no language routes configured: the default STT profile decodes every language; " + fallbacks}
 	}
 	byName := cfg.Providers().ByName()
 	defName, _, hasDefault := ingest.ResolveSTTProviderModel(cfg)
@@ -1067,7 +1071,7 @@ func sttRoutesCheck(cfg config.Config) doctorCheck {
 	if policy == "" {
 		policy = "fail"
 	}
-	parts = append(parts, "on_route_error="+policy)
+	parts = append(parts, "on_route_error="+policy, "route_retry_after="+cfg.MediaSTTRouteRetryAfter.String(), fallbacks)
 	detail := strings.Join(parts, "; ")
 	if len(uneligible) > 0 {
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
@@ -1075,6 +1079,113 @@ func sttRoutesCheck(cfg config.Config) doctorCheck {
 			detail, strings.Join(uneligible, ", "), defName)}
 	}
 	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: detail}
+}
+
+// routeFallbackSummary counts the live transcripts that hold a route-fallback
+// result (SPEC §8.2.4) and names when the next is due: the earliest
+// route_fallback_at plus media.stt.route_retry_after, or "due on the next run"
+// when one records no valid time, its route_fallback_by is absent or is not the
+// current default profile, the interval is 0, or the policy is fail. It also
+// counts the retries that could not run (a host problem) and, under fail, the
+// transcripts whose dropped windows are decoded again on every run. Each line
+// is stated positively when its count is 0.
+func routeFallbackSummary(ctx context.Context, cfg config.Config) string {
+	records, err := routeFallbackRecords(ctx, cfg)
+	if err != nil {
+		return "route-fallback transcripts unknown: " + err.Error()
+	}
+	if len(records) == 0 {
+		return "no route-fallback transcripts; every due route-fallback retry ran"
+	}
+	parts := []string{
+		fmt.Sprintf("%d route-fallback transcript(s), %s", len(records), routeFallbackNextDue(cfg, records, time.Now().UTC())),
+		routeFallbackSkipLine(records),
+	}
+	if !cfg.RouteErrorFallsBack() {
+		parts = append(parts, routeFallbackFailCostLine(records))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// routeFallbackSkipLine counts the fallback results whose last due retry could
+// not run, with the first reason.
+func routeFallbackSkipLine(records []model.RouteFallbackRecord) string {
+	n, reason := 0, ""
+	for _, r := range records {
+		if r.SkipReason != "" {
+			if n == 0 {
+				reason = r.SkipReason
+			}
+			n++
+		}
+	}
+	if n == 0 {
+		return "every due route-fallback retry ran"
+	}
+	return fmt.Sprintf("%d route-fallback retries could not run: %s", n, reason)
+}
+
+// routeFallbackFailCostLine counts, under on_route_error: fail, the transcripts
+// whose dropped windows their route decodes again on every run. A route that
+// stays broken costs one decode per window per run there.
+func routeFallbackFailCostLine(records []model.RouteFallbackRecord) string {
+	transcripts, windows := 0, 0
+	for _, r := range records {
+		if r.DroppedCachedWindows > 0 {
+			transcripts++
+			windows += r.DroppedCachedWindows
+		}
+	}
+	if transcripts == 0 {
+		return "no transcript holds a window dropped under on_route_error=fail"
+	}
+	return fmt.Sprintf("%d window(s) in %d transcript(s) dropped under on_route_error=fail; their route decodes them again on every run", windows, transcripts)
+}
+
+// routeFallbackRecords reads the fallback records from the index through a
+// read-only connection: a diagnostic never initialises, migrates or locks a
+// live index. No index yet is no records.
+func routeFallbackRecords(ctx context.Context, cfg config.Config) ([]model.RouteFallbackRecord, error) {
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return store.ReadRouteFallbackTranscripts(ctx, metaPath)
+}
+
+// routeFallbackNextDue names when the next fallback result is due (SPEC
+// §8.2.4), with the same decision the ingest gate makes
+// (ingest.DecideRouteFallback).
+func routeFallbackNextDue(cfg config.Config, records []model.RouteFallbackRecord, now time.Time) string {
+	defName, defModel, _ := ingest.ResolveSTTProviderModel(cfg)
+	policy := ingest.RouteFallbackPolicy{
+		Fail:       !cfg.RouteErrorFallsBack(),
+		RetryAfter: cfg.MediaSTTRouteRetryAfter,
+		Producer:   strings.TrimSpace(defName) + "|" + strings.TrimSpace(defModel),
+	}
+	var earliest time.Time
+	for _, r := range records {
+		// The same decision the gate makes: a transcript with a window dropped
+		// while the cache keeps its text is processed on the next run.
+		dropped := ingest.DroppedNone
+		switch {
+		case r.DroppedCachedWindows > 0:
+			dropped = ingest.DroppedCached
+		case r.Dropped:
+			dropped = ingest.DroppedWithoutText
+		}
+		d := ingest.DecideRouteFallback(policy, r.At, r.By, dropped, now)
+		if d.Due {
+			return "due on the next run"
+		}
+		if earliest.IsZero() || d.NextDue.Before(earliest) {
+			earliest = d.NextDue
+		}
+	}
+	return "next due " + earliest.UTC().Format(time.RFC3339)
 }
 
 // sttRouteLine renders one language's candidates in order, each with the model

@@ -68,6 +68,28 @@ type TranscriptCoverage struct {
 	// marker only when that marker holds the active window gate's fingerprint,
 	// so text cached while gates were off still gets every check.
 	ScreenedPerWindow bool `json:"-"`
+	// RouteFallbackAt and RouteFallbackBy carry the §8.2.4 route-fallback
+	// stamp of a window-scoped transcript (spec 0.82.0) between the decode,
+	// the transcript cache and the meta_json. They are not part of the
+	// persisted coverage object: the meta_json records them at its top level
+	// (route_fallback_at, route_fallback_by), one value per transcript.
+	RouteFallbackAt string `json:"-"`
+	RouteFallbackBy string `json:"-"`
+	// RouteFallbackDropped lists the fallback windows a retry dropped under
+	// on_route_error: fail. The meta_json records it as route_fallback_dropped,
+	// so the re-derivation gate still sees a fallback result whose cached text
+	// is kept (SPEC §8.2.4). Transient here, like the stamp.
+	RouteFallbackDropped []CoverageLanguage `json:"-"`
+	// RouteFallbackDroppedCached lists the dropped windows whose fallback text
+	// the transcript cache still holds (a drop under on_route_error: fail), one
+	// range per window. A dropped entry outside these ranges has no text left.
+	RouteFallbackDroppedCached []CoverageRange `json:"-"`
+	// RouteFallbackSkipReason says why the last due retry could not run.
+	RouteFallbackSkipReason string `json:"-"`
+	// WindowMS is the decode window the windowed decode used. The transcript
+	// cache keeps it, so a §8.2.4 retry rebuilds the same window schedule. Not
+	// part of the persisted coverage object.
+	WindowMS int `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds
