@@ -218,7 +218,7 @@ func (s *Service) derivationNeedsContent(ctx context.Context, doc model.Document
 	if !modelSource {
 		return false
 	}
-	if s.derivationIdentityStale(ctx, doc.RelPath) {
+	if s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
 		return true
 	}
 	for _, target := range s.translateTargetLangs {

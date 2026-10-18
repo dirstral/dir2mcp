@@ -15,4 +15,12 @@ type RouteFallbackRecord struct {
 	At      string
 	By      string
 	Dropped bool
+	// DroppedCached is set when the dropped windows' fallback text is still in
+	// the transcript cache (a drop under on_route_error: fail). Without it the
+	// dropped windows have no text left and are retried when due.
+	DroppedCached bool
+	// SkipReason is route_fallback_skip_reason: why the last due retry could
+	// not run (the host could not extract, stage, probe or cut the audio, or
+	// the decode schedule did not match). Empty when the last retry ran.
+	SkipReason string
 }

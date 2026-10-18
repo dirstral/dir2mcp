@@ -2397,7 +2397,7 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	// derived. When the recorded derivation identity no longer matches, fall back
 	// to the full read/hash path so the stale representation is re-derived rather
 	// than silently skipped. Only meaningful for an existing ok document.
-	if existing.Status == "ok" && s.derivationIdentityStale(ctx, f.RelPath) {
+	if existing.Status == "ok" && s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) {
 		return false, nil
 	}
 	s.skipUnchangedDocument(ctx, f, existing, seen)
@@ -2501,7 +2501,7 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if existingDoc.DocType != "" && existingDoc.DocType != doc.DocType {
 		return true
 	}
-	if doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath) {
+	if doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
 		return true
 	}
 	return false
@@ -7385,16 +7385,25 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 		return nil
 	}
 	coverage.RouteFallbackAt, coverage.RouteFallbackBy = entry.RouteFallbackAt, entry.RouteFallbackBy
+	coverage.RouteFallbackDropped, coverage.RouteFallbackSkipReason = entry.RouteFallbackDropped, entry.RouteFallbackSkipReason
+	coverage.WindowMS = entry.WindowMS
 	return coverage
 }
 
 // coverageCacheEntry is the coverage sidecar of a transcript cache entry: the
 // §8.6.13 coverage object plus the §8.2.4 route-fallback stamp (spec 0.82.0),
 // which a cache hit restores with the text exactly as it restores coverage.
+//
+// The cache also keeps the decode window (window_ms), so a retry rebuilds the
+// same schedule, and the windows a changed producer left with no text
+// (route_fallback_dropped), so they are retried when due.
 type coverageCacheEntry struct {
 	*TranscriptCoverage
-	RouteFallbackAt string `json:"route_fallback_at,omitempty"`
-	RouteFallbackBy string `json:"route_fallback_by,omitempty"`
+	RouteFallbackAt         string                   `json:"route_fallback_at,omitempty"`
+	RouteFallbackBy         string                   `json:"route_fallback_by,omitempty"`
+	RouteFallbackDropped    []model.CoverageLanguage `json:"route_fallback_dropped,omitempty"`
+	RouteFallbackSkipReason string                   `json:"route_fallback_skip_reason,omitempty"`
+	WindowMS                int                      `json:"window_ms,omitempty"`
 }
 
 // restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
@@ -7457,11 +7466,18 @@ func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverag
 		}
 		return true
 	}
-	raw, err := json.Marshal(coverageCacheEntry{
-		TranscriptCoverage: coverage,
-		RouteFallbackAt:    coverage.RouteFallbackAt,
-		RouteFallbackBy:    coverage.RouteFallbackBy,
-	})
+	entry := coverageCacheEntry{
+		TranscriptCoverage:      coverage,
+		RouteFallbackAt:         coverage.RouteFallbackAt,
+		RouteFallbackBy:         coverage.RouteFallbackBy,
+		RouteFallbackSkipReason: coverage.RouteFallbackSkipReason,
+		WindowMS:                coverage.WindowMS,
+	}
+	if !coverage.RouteFallbackDroppedCached {
+		// Windows whose fallback text the cache keeps are not dropped there.
+		entry.RouteFallbackDropped = coverage.RouteFallbackDropped
+	}
+	raw, err := json.Marshal(entry)
 	if err != nil {
 		s.getLogger().Printf("marshal transcript coverage cache: %v; not caching this transcript", err)
 		return false

@@ -46,11 +46,11 @@ func TestRouteFallbackItem_GateSeesEveryAudioTrack(t *testing.T) {
 	svc.SetRouteErrorFallback(true)
 	svc.SetRouteRetryAfterForTest(24 * time.Hour)
 	svc.SetClockForTest(func() time.Time { return time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC) })
-	if svc.RouteFallbackStaleForTest(ctx, "two.mp4") {
+	if svc.RouteFallbackStaleForTest(ctx, "two.mp4", "") {
 		t.Fatal("a document with no fallback record is stale")
 	}
 	seed(ingest.TranscriptRepTypeForTrack(1, ""), `{"source":"stt","route":"whisper","route_fallback_from":"ckpt-kk","route_fallback_at":"2026-10-17T08:00:00Z","route_fallback_by":"whisper|large-v3"}`)
-	if !svc.RouteFallbackStaleForTest(ctx, "two.mp4") {
+	if !svc.RouteFallbackStaleForTest(ctx, "two.mp4", "") {
 		t.Fatal("a due fallback on track 1 does not make the document stale")
 	}
 }

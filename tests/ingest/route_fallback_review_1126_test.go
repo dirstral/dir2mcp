@@ -165,10 +165,10 @@ func TestRouteFallbackReview_GateCostsOneQueryPerScan(t *testing.T) {
 		t.Fatalf("the second scan made %d corpus and %d per-document fallback queries, want 1 and 0", st.all.Load(), st.per.Load())
 	}
 	// Outside a scan a text document costs nothing, a media document one query.
-	if svc.RouteFallbackStaleForTest(ctx, "a.txt") || st.per.Load() != 0 {
+	if svc.RouteFallbackStaleForTest(ctx, "a.txt", "") || st.per.Load() != 0 {
 		t.Fatalf("a text document made %d per-document queries", st.per.Load())
 	}
-	if svc.RouteFallbackStaleForTest(ctx, "a.mp3") || st.per.Load() != 1 {
+	if svc.RouteFallbackStaleForTest(ctx, "a.mp3", "") || st.per.Load() != 1 {
 		t.Fatalf("a media document made %d per-document queries, want 1", st.per.Load())
 	}
 }
@@ -220,74 +220,6 @@ func TestRouteFallbackReview_CancelledWindowRetryChangesNothing(t *testing.T) {
 	}
 	if strings.Join(w.cachedLines(t), "\n") != before || readCoverageCache(t, w.stateDir) != coverageBefore {
 		t.Errorf("a cancelled retry changed the cache entry")
-	}
-}
-
-// TestRouteFallbackReview_ItemEnvironmentErrorChangesNothing (fix 4): a host
-// that cannot extract the audio is not a route failure: under fail the item
-// is not retired, no route is asked, and the cache stays.
-func TestRouteFallbackReview_ItemEnvironmentErrorChangesNothing(t *testing.T) {
-	h := newFallbackItemHarness(t, "default")
-	extractFails := false
-	h.svc.ExtractAudioTrackFunc = func(context.Context, string) ([]byte, error) {
-		if extractFails {
-			return nil, errors.New("ffmpeg not found")
-		}
-		return []byte(strings.Repeat("v", 4000)), nil
-	}
-	video := model.Document{DocID: 1, RelPath: "talks/kk.mp4", DocType: "video"}
-	content := []byte(strings.Repeat("m", 4000))
-	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), video, content); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	before := readRouteCache(t, h.state)
-	h.svc.SetRouteErrorFallback(false)
-	extractFails = true
-	requests := h.stt.count()
-	err := h.svc.GenerateTranscriptRepresentation(context.Background(), video, content)
-	if err == nil || !strings.Contains(err.Error(), "could not run") {
-		t.Fatalf("err = %v, want the retry reported as not run", err)
-	}
-	if h.stt.count() != requests || len(h.store.retired) != 0 {
-		t.Errorf("a host error asked the route (%d requests) or retired %v", h.stt.count()-requests, h.store.retired)
-	}
-	if after := readRouteCache(t, h.state); after != before {
-		t.Errorf("a host error changed the cache entry")
-	}
-}
-
-// TestRouteFallbackReview_WindowEnvironmentErrorsChangeNothing (fix 4): a cut
-// that fails, or a rebuilt schedule that does not match the cached record
-// (another duration), is not a route failure: under fail no window is dropped,
-// no decode runs, and the cache stays.
-func TestRouteFallbackReview_WindowEnvironmentErrorsChangeNothing(t *testing.T) {
-	for name, breakHost := range map[string]func(w *windowFallbackHarness){
-		"cut fails": func(w *windowFallbackHarness) {
-			w.mu.Lock()
-			w.failCut = map[int]error{win2StartMS: errors.New("ffmpeg not found")}
-			w.mu.Unlock()
-		},
-		"schedule mismatch": func(w *windowFallbackHarness) {
-			w.svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 40 * time.Minute, nil }
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			w := newWindowFallbackHarness(t)
-			before := strings.Join(w.seed(t), "\n")
-			coverageBefore := readCoverageCache(t, w.stateDir)
-			w.svc.SetRouteErrorFallback(false)
-			breakHost(w)
-			calls := w.cand.count() + w.def.callCount()
-			if _, err := w.run(t); err == nil || !strings.Contains(err.Error(), "could not run") {
-				t.Fatalf("err = %v, want the retry reported as not run", err)
-			}
-			if w.cand.count()+w.def.callCount() != calls {
-				t.Errorf("a host error decoded a window")
-			}
-			if strings.Join(w.cachedLines(t), "\n") != before || readCoverageCache(t, w.stateDir) != coverageBefore {
-				t.Errorf("a host error changed the cache entry")
-			}
-		})
 	}
 }
 

@@ -1085,17 +1085,60 @@ func sttRoutesCheck(ctx context.Context, cfg config.Config) doctorCheck {
 // result (SPEC §8.2.4) and names when the next is due: the earliest
 // route_fallback_at plus media.stt.route_retry_after, or "due on the next run"
 // when one records no valid time, its route_fallback_by is absent or is not the
-// current default profile, the interval is 0, or the policy is fail. With none
-// it says so positively.
+// current default profile, the interval is 0, or the policy is fail. It also
+// counts the retries that could not run (a host problem) and, under fail, the
+// transcripts whose dropped windows are decoded again on every run. Each line
+// is stated positively when its count is 0.
 func routeFallbackSummary(ctx context.Context, cfg config.Config) string {
 	records, err := routeFallbackRecords(ctx, cfg)
 	if err != nil {
 		return "route-fallback transcripts unknown: " + err.Error()
 	}
 	if len(records) == 0 {
-		return "no route-fallback transcripts"
+		return "no route-fallback transcripts; every due route-fallback retry ran"
 	}
-	return fmt.Sprintf("%d route-fallback transcript(s), %s", len(records), routeFallbackNextDue(cfg, records, time.Now().UTC()))
+	parts := []string{
+		fmt.Sprintf("%d route-fallback transcript(s), %s", len(records), routeFallbackNextDue(cfg, records, time.Now().UTC())),
+		routeFallbackSkipLine(records),
+	}
+	if !cfg.RouteErrorFallsBack() {
+		parts = append(parts, routeFallbackFailCostLine(records))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// routeFallbackSkipLine counts the fallback results whose last due retry could
+// not run, with the first reason.
+func routeFallbackSkipLine(records []model.RouteFallbackRecord) string {
+	n, reason := 0, ""
+	for _, r := range records {
+		if r.SkipReason != "" {
+			if n == 0 {
+				reason = r.SkipReason
+			}
+			n++
+		}
+	}
+	if n == 0 {
+		return "every due route-fallback retry ran"
+	}
+	return fmt.Sprintf("%d route-fallback retries could not run: %s", n, reason)
+}
+
+// routeFallbackFailCostLine counts, under on_route_error: fail, the transcripts
+// whose dropped windows their route decodes again on every run. A route that
+// stays broken costs one decode per window per run there.
+func routeFallbackFailCostLine(records []model.RouteFallbackRecord) string {
+	n := 0
+	for _, r := range records {
+		if r.Dropped && r.DroppedCached {
+			n++
+		}
+	}
+	if n == 0 {
+		return "no transcript holds a window dropped under on_route_error=fail"
+	}
+	return fmt.Sprintf("%d transcript(s) hold windows dropped under on_route_error=fail; their route decodes them again on every run", n)
 }
 
 // routeFallbackRecords reads the fallback records from the index through a
@@ -1124,7 +1167,14 @@ func routeFallbackNextDue(cfg config.Config, records []model.RouteFallbackRecord
 	}
 	var earliest time.Time
 	for _, r := range records {
-		d := ingest.DecideRouteFallback(policy, r.At, r.By, r.Dropped, now)
+		// A window dropped under fail is processed on every run to restore its
+		// cached text, but under default that costs no decode before the result
+		// is due, so the report follows the time rule for it.
+		dropped := ingest.DroppedNone
+		if r.Dropped && r.DroppedCached && policy.Fail {
+			dropped = ingest.DroppedCached
+		}
+		d := ingest.DecideRouteFallback(policy, r.At, r.By, dropped, now)
 		if d.Due {
 			return "due on the next run"
 		}

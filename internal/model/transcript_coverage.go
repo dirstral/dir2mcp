@@ -80,6 +80,15 @@ type TranscriptCoverage struct {
 	// so the re-derivation gate still sees a fallback result whose cached text
 	// is kept (SPEC §8.2.4). Transient here, like the stamp.
 	RouteFallbackDropped []CoverageLanguage `json:"-"`
+	// RouteFallbackDroppedCached is set when the transcript cache still holds
+	// the dropped windows' fallback text (a drop under on_route_error: fail).
+	RouteFallbackDroppedCached bool `json:"-"`
+	// RouteFallbackSkipReason says why the last due retry could not run.
+	RouteFallbackSkipReason string `json:"-"`
+	// WindowMS is the decode window the windowed decode used. The transcript
+	// cache keeps it, so a §8.2.4 retry rebuilds the same window schedule. Not
+	// part of the persisted coverage object.
+	WindowMS int `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds

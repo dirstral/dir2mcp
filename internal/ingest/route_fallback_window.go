@@ -26,6 +26,10 @@ type fallbackWindow struct {
 	core           CoverageRange
 	last           bool
 	entry          model.CoverageLanguage
+	// missing is set for a window a changed producer left with no text (a
+	// route_fallback_dropped entry in the cache): a recovered retry adds its
+	// text, range and entry instead of replacing them.
+	missing bool
 }
 
 // windowRetryResult is the retry of one fallback window: the pieces a route
@@ -51,33 +55,33 @@ type windowRetryPlan struct {
 
 // retryWindowFallback decodes each fallback window of a window-scoped
 // transcript once more on its route and splices the result into the cached
-// transcript (SPEC §8.2.4). Every window is cut before any is decoded: a host
-// that cannot stage, probe or cut the audio, or a rebuilt schedule that does
-// not match the cached record, is an environment error. That leaves the cache
-// and the index as they are, because it says nothing about the route.
+// transcript (SPEC §8.2.4). Every window is cut before any is decoded. A host
+// that cannot extract, stage, probe or cut the audio, or a rebuilt schedule
+// that does not match the cached record, means the retry cannot run; that is
+// settled by windowRetryNotRun, not as a route failure.
 func (s *Service) retryWindowFallback(ctx context.Context, doc model.Document, content []byte, hit cachedTranscript, v RouteFallbackDecision) fallbackRetry {
 	relPath, audio, ok, err := s.transcriptInput(ctx, doc, content)
 	if err != nil {
-		return fallbackRetry{envErr: err}
+		return s.windowRetryNotRun(doc, hit, err)
 	}
 	if !ok {
-		return fallbackRetry{envErr: fmt.Errorf("no audio track to decode")}
+		return s.windowRetryNotRun(doc, hit, fmt.Errorf("no audio track to decode"))
 	}
 	tmpPath, cleanup, err := stageMediaTemp(audio, filepath.Ext(relPath))
 	if err != nil {
-		return fallbackRetry{envErr: err}
+		return s.windowRetryNotRun(doc, hit, err)
 	}
 	defer cleanup()
 	rp := s.rebuildWindowPlan(ctx, tmpPath, audio, relPath, hit.coverage)
 	wins := fallbackWindows(rp, hit.coverage)
 	if err := scheduleMatches(rp, hit.coverage, wins); err != nil {
-		return fallbackRetry{envErr: err}
+		return s.windowRetryNotRun(doc, hit, err)
 	}
 	cuts := make([][]windowPiece, len(wins))
 	for i, w := range wins {
 		pieces, err := s.retryPieces(ctx, rp, w)
 		if err != nil {
-			return fallbackRetry{envErr: fmt.Errorf("cut window [%d,%d)ms: %w", w.startMS, w.endMS, err)}
+			return s.windowRetryNotRun(doc, hit, fmt.Errorf("cut window [%d,%d)ms: %w", w.startMS, w.endMS, err))
 		}
 		cuts[i] = pieces
 	}
@@ -88,31 +92,139 @@ func (s *Service) retryWindowFallback(ctx context.Context, doc model.Document, c
 	return s.settleWindowRetry(doc, hit, outcomes, v)
 }
 
+// windowRetryNotRun settles a window retry the host could not run (SPEC
+// §8.2.4). Under default the cached fallback text is served, the document
+// stays indexed, route_fallback_at moves to now so the retry waits one
+// interval, and route_fallback_skip_reason records why. Under fail the spec
+// does not allow serving fallback text, so the fallback windows leave the
+// served transcript as failed windows (the cache keeps their text and the
+// transcript records them as dropped), exactly as when the route fails.
+func (s *Service) windowRetryNotRun(doc model.Document, hit cachedTranscript, cause error) fallbackRetry {
+	now := s.nowUTC()
+	reason := cause.Error()
+	if s.routeErrorFallback {
+		out := hit
+		out.coverage = copyCoverage(hit.coverage)
+		out.coverage.RouteFallbackAt = now.Format(time.RFC3339)
+		out.coverage.RouteFallbackSkipReason = reason
+		s.getLogger().Printf("route fallback retry %s: could not run (%v); the cached fallback text stays indexed; next due %s (SPEC §8.2.4)", doc.RelPath, cause, s.nextDueLabel(now))
+		return fallbackRetry{served: out, cache: &out}
+	}
+	served := dropAllFallback(hit, true)
+	served.coverage.RouteFallbackSkipReason = reason
+	s.getLogger().Printf("route fallback retry %s: could not run (%v); media.stt.on_route_error=fail, so the fallback windows leave the transcript (SPEC §8.2.4)", doc.RelPath, cause)
+	if served.coverage.WindowsDecoded == 0 {
+		return fallbackRetry{err: fmt.Errorf("%w: %w: transcribe %s: the route-fallback retry could not run (%v) and every decoded window was a fallback window", ErrTranscriptProviderFailure, errRouteFallbackRetired, doc.RelPath, cause)}
+	}
+	return fallbackRetry{served: served}
+}
+
+// dropAllFallback is a cached window-scoped transcript without its fallback
+// windows, cut on the cores of the cached decode schedule (the same cores the
+// served splice uses). markDropped records them as dropped windows whose text
+// the cache keeps. A cache entry that predates the recorded schedule has no
+// window size; its cores are then the entry ranges, which the coalesced
+// entries span exactly when no window failed in between.
+func dropAllFallback(hit cachedTranscript, markDropped bool) cachedTranscript {
+	segs := windowSegments(model.TranscriptResult{Text: hit.text, Words: hit.words}, 0, 0)
+	cov := copyCoverage(hit.coverage)
+	var dropped []model.CoverageLanguage
+	for _, w := range cachedFallbackWindows(hit.coverage) {
+		if w.missing {
+			continue
+		}
+		dropped = append(dropped, fallbackEntriesInCore(cov.Languages, w.core)...)
+		segs = dropCoreSegments(segs, w)
+		dropCoreCoverage(cov, w.core)
+	}
+	cov.RouteFallbackAt, cov.RouteFallbackBy = "", ""
+	cov.RouteFallbackDropped, cov.RouteFallbackDroppedCached = nil, false
+	if markDropped && len(dropped) > 0 {
+		cov.RouteFallbackAt, cov.RouteFallbackBy = hit.coverage.RouteFallbackAt, hit.coverage.RouteFallbackBy
+		cov.RouteFallbackDropped, cov.RouteFallbackDroppedCached = append(dropped, hit.coverage.RouteFallbackDropped...), true
+	}
+	text, words := renderSegments(segs)
+	return cachedTranscript{text: text, words: words, coverage: cov}
+}
+
+// cachedFallbackWindows is fallbackWindows on the schedule the cache records.
+func cachedFallbackWindows(coverage *TranscriptCoverage) []fallbackWindow {
+	if rp, ok := cachedWindowPlan(coverage); ok {
+		return fallbackWindows(rp, coverage)
+	}
+	var out []fallbackWindow
+	for _, e := range coverageLanguages(coverage) {
+		if e.FallbackFrom != "" {
+			last := coverage.DurationMS > 0 && e.EndMS >= coverage.DurationMS
+			out = append(out, fallbackWindow{startMS: e.StartMS, endMS: e.EndMS, core: CoverageRange{StartMS: e.StartMS, EndMS: e.EndMS}, last: last, entry: e})
+		}
+	}
+	return out
+}
+
+// routeFallbackDurationToleranceMS is how far the probed recording length may
+// drift from the cached one (an ffprobe rounding change) before the cached
+// schedule is no longer trusted.
+const routeFallbackDurationToleranceMS = 1000
+
+// cachedWindowPlan is the decode schedule the cache records: its recording
+// length and decode window. ok is false for a cache entry that predates the
+// recorded window.
+func cachedWindowPlan(coverage *TranscriptCoverage) (windowRetryPlan, bool) {
+	if coverage == nil || coverage.DurationMS <= 0 || coverage.WindowMS <= 0 {
+		return windowRetryPlan{}, false
+	}
+	return windowPlanFor(coverage.DurationMS, coverage.WindowMS, 0), true
+}
+
+// windowPlanFor is the schedule decodeWindowedTranscript builds for a length
+// and a window; a window as long as the recording is one window.
+func windowPlanFor(totalMS, windowMS, capBytes int) windowRetryPlan {
+	if windowMS <= 0 || windowMS >= totalMS {
+		return windowRetryPlan{plan: windowSchedule{totalMS: totalMS, windowMS: totalMS, stepMS: totalMS, capBytes: capBytes, label: "transcription"}, starts: []int{0}}
+	}
+	overlapMS := TranscriptWindowOverlapMS(windowMS)
+	stepMS := windowMS - overlapMS
+	if stepMS <= 0 {
+		stepMS = windowMS
+	}
+	return windowRetryPlan{
+		plan:   windowSchedule{totalMS: totalMS, windowMS: windowMS, stepMS: stepMS, capBytes: capBytes, label: "transcription"},
+		starts: TranscriptWindowStarts(totalMS, stepMS, overlapMS),
+	}
+}
+
 // scheduleMatches checks that the rebuilt schedule is the one the cached
-// record was decoded under: the same recording length, and every fallback
-// entry starts at a rebuilt window and overlaps a window the retry decodes.
-// A mismatch (another duration, payload cap or window size) would splice text
-// at the wrong place, so it is an environment error, never a route failure.
+// record was decoded under: a known length within the tolerance of the cached
+// one, the same window count, and every fallback or dropped entry inside a
+// window the retry decodes. A mismatch would splice text at the wrong place,
+// so the retry does not run.
 func scheduleMatches(rp windowRetryPlan, coverage *TranscriptCoverage, wins []fallbackWindow) error {
 	if rp.plan.totalMS <= 0 {
 		return fmt.Errorf("the recording length is unknown")
 	}
-	if coverage != nil && coverage.DurationMS > 0 && coverage.DurationMS != rp.plan.totalMS {
+	if coverage == nil {
+		return nil
+	}
+	if coverage.DurationMS > 0 && absInt(coverage.DurationMS-rp.plan.totalMS) > routeFallbackDurationToleranceMS {
 		return fmt.Errorf("the recording is %d ms now and %d ms in the cached record", rp.plan.totalMS, coverage.DurationMS)
 	}
-	starts := map[int]bool{}
-	for _, st := range rp.starts {
-		starts[st] = true
+	if coverage.WindowsAttempted > 0 && coverage.WindowsAttempted != len(rp.starts) {
+		return fmt.Errorf("the decode schedule has %d windows now and %d in the cached record", len(rp.starts), coverage.WindowsAttempted)
 	}
-	for _, e := range coverageLanguages(coverage) {
-		if e.FallbackFrom == "" {
-			continue
-		}
-		if !starts[e.StartMS] || !entryInWindows(e, wins) {
+	for _, e := range append(append([]model.CoverageLanguage(nil), coverageLanguages(coverage)...), coverage.RouteFallbackDropped...) {
+		if e.FallbackFrom != "" && !entryInWindows(e, wins) {
 			return fmt.Errorf("the fallback entry [%d,%d)ms does not match the rebuilt decode schedule", e.StartMS, e.EndMS)
 		}
 	}
 	return nil
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // entryInWindows reports whether an entry overlaps one of the windows.
@@ -127,33 +239,30 @@ func entryInWindows(e model.CoverageLanguage, wins []fallbackWindow) bool {
 
 // rebuildWindowPlan rebuilds the decode schedule the windowed decode used, so
 // a retried window has the same extent and core it had then (SPEC §8.6.13).
-// The duration comes from the probe, else from the cached coverage.
+// The schedule the cache records is used when the probed length is within
+// the tolerance of the cached one (or the probe fails). Otherwise the
+// schedule is computed as the decode computed it, from the probed length.
 func (s *Service) rebuildWindowPlan(ctx context.Context, tmpPath string, audio []byte, relPath string, coverage *TranscriptCoverage) windowRetryPlan {
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
-	if totalMS <= 0 && coverage != nil {
+	capBytes := sttPayloadCapBytes(s.transcriber)
+	var rp windowRetryPlan
+	if coverage != nil && coverage.DurationMS > 0 && (totalMS <= 0 || absInt(totalMS-coverage.DurationMS) <= routeFallbackDurationToleranceMS) {
 		totalMS = coverage.DurationMS
 	}
-	capBytes := sttPayloadCapBytes(s.transcriber)
-	rp := windowRetryPlan{tmpPath: tmpPath, audio: audio, relPath: relPath}
-	windowMS := STTWindowMS(totalMS, len(audio), capBytes)
-	if windowMS <= 0 {
-		// The recording fit one request: one window, the whole recording.
-		rp.plan = windowSchedule{totalMS: totalMS, windowMS: totalMS, stepMS: totalMS, capBytes: capBytes, label: "transcription"}
-		rp.starts = []int{0}
-		return rp
+	if cached, ok := cachedWindowPlan(coverage); ok && totalMS == coverage.DurationMS {
+		rp = cached
+		rp.plan.capBytes = capBytes
+	} else {
+		windowMS := STTWindowMS(totalMS, len(audio), capBytes)
+		rp = windowPlanFor(totalMS, windowMS, capBytes)
 	}
-	overlapMS := TranscriptWindowOverlapMS(windowMS)
-	stepMS := windowMS - overlapMS
-	if stepMS <= 0 {
-		stepMS = windowMS
-	}
-	rp.plan = windowSchedule{totalMS: totalMS, windowMS: windowMS, stepMS: stepMS, capBytes: capBytes, label: "transcription"}
-	rp.starts = TranscriptWindowStarts(totalMS, stepMS, overlapMS)
+	rp.tmpPath, rp.audio, rp.relPath = tmpPath, audio, relPath
 	return rp
 }
 
 // fallbackWindows lists the scheduled windows whose core overlaps a
-// coverage.languages entry that records fallback_from, in schedule order.
+// coverage.languages entry that records fallback_from, or a dropped entry a
+// changed producer left with no text, in schedule order.
 func fallbackWindows(rp windowRetryPlan, coverage *TranscriptCoverage) []fallbackWindow {
 	var out []fallbackWindow
 	for i, start := range rp.starts {
@@ -165,16 +274,30 @@ func fallbackWindows(rp windowRetryPlan, coverage *TranscriptCoverage) []fallbac
 		if i+1 < len(rp.starts) && rp.starts[i+1] < core.EndMS {
 			core.EndMS = rp.starts[i+1]
 		}
-		if e, ok := fallbackEntryIn(coverage, core); ok {
-			out = append(out, fallbackWindow{startMS: start, endMS: end, core: core, last: i == len(rp.starts)-1, entry: e})
+		w := fallbackWindow{startMS: start, endMS: end, core: core, last: i == len(rp.starts)-1}
+		if e, ok := fallbackEntryIn(coverageLanguages(coverage), core); ok {
+			w.entry = e
+			out = append(out, w)
+		} else if e, ok := fallbackEntryIn(missingDropped(coverage), core); ok {
+			w.entry, w.missing = e, true
+			out = append(out, w)
 		}
 	}
 	return out
 }
 
+// missingDropped is the dropped entries of a cached coverage record whose
+// windows have no text in the cache.
+func missingDropped(coverage *TranscriptCoverage) []model.CoverageLanguage {
+	if coverage == nil || coverage.RouteFallbackDroppedCached {
+		return nil
+	}
+	return coverage.RouteFallbackDropped
+}
+
 // fallbackEntryIn returns the first fallback entry that overlaps core.
-func fallbackEntryIn(coverage *TranscriptCoverage, core CoverageRange) (model.CoverageLanguage, bool) {
-	for _, e := range coverageLanguages(coverage) {
+func fallbackEntryIn(entries []model.CoverageLanguage, core CoverageRange) (model.CoverageLanguage, bool) {
+	for _, e := range entries {
 		if e.FallbackFrom != "" && e.StartMS < core.EndMS && e.EndMS > core.StartMS {
 			return e, true
 		}
@@ -248,10 +371,11 @@ func (s *Service) retryDecodeError(results []pieceResult, pieces []windowPiece, 
 // too; otherwise it keeps its cached fallback text. The cache keeps a failed
 // window's fallback text unless a changed producer made it invalid: under fail
 // the entry is not purged, so a return to default costs no decode until due.
-// A window dropped under fail is recorded on the served transcript
-// (route_fallback_dropped, with the cached stamp), so the re-derivation gate
-// keeps processing it: a repaired checkpoint takes over, and a return to
-// default restores the cached fallback text.
+// Every dropped window is recorded (route_fallback_dropped). Under fail the
+// cache keeps its text, so the gate processes the transcript on every run: a
+// repaired checkpoint takes over, and a return to default restores the cached
+// fallback text. After a producer change no text is left, so the window is
+// retried when due on its route.
 func (s *Service) settleWindowRetry(doc model.Document, hit cachedTranscript, outcomes []windowRetryResult, v RouteFallbackDecision) fallbackRetry {
 	now := s.nowUTC()
 	underFail := !s.routeErrorFallback
@@ -318,43 +442,92 @@ func (s *Service) logWindowRetry(doc model.Document, outcomes []windowRetryResul
 
 // spliceWindowRetry applies the retried windows to a copy of the cached
 // transcript: a decoded window's segments replace the cached ones in its core
-// and its coverage.languages entries name the route that decoded it; a failed
-// window is dropped (text, range and entries) when drop is set and kept
-// otherwise. markDropped records the dropped fallback entries on the copy
-// (route_fallback_dropped) and keeps the cached stamp with them. The
-// route-fallback stamp is set when a fallback window remains and removed when
-// none does.
-func (s *Service) spliceWindowRetry(hit cachedTranscript, outcomes []windowRetryResult, drop, markDropped bool, now time.Time, v RouteFallbackDecision) cachedTranscript {
+// and its coverage.languages entries name the route that decoded it (a window
+// with no cached text gets its text, range and entry added); a failed window
+// is dropped (text, range and entries) when drop is set and kept otherwise.
+// Every dropped window is recorded in route_fallback_dropped. cachedText says
+// that the cache keeps the text of the windows this splice drops (a drop
+// under fail). The route-fallback stamp is set while a fallback window or a
+// dropped window remains and removed when none does.
+func (s *Service) spliceWindowRetry(hit cachedTranscript, outcomes []windowRetryResult, drop, cachedText bool, now time.Time, v RouteFallbackDecision) cachedTranscript {
 	segs := windowSegments(model.TranscriptResult{Text: hit.text, Words: hit.words}, 0, 0)
 	cov := copyCoverage(hit.coverage)
+	carried := append([]model.CoverageLanguage(nil), missingDropped(hit.coverage)...)
 	var dropped []model.CoverageLanguage
 	for i, o := range outcomes {
 		switch {
+		case o.results != nil && o.win.missing:
+			segs = append(segs, retrySegments(o, i+1)...)
+			addRecoveredWindow(cov, o)
+			carried = removeCore(carried, o.win.core)
 		case o.results != nil:
 			segs = append(dropCoreSegments(segs, o.win), retrySegments(o, i+1)...)
 			cov.Languages = relabelCore(cov.Languages, o.win.core, o.route, o.fallbackFrom)
-		case drop:
+		case drop && !o.win.missing:
 			dropped = append(dropped, fallbackEntriesInCore(cov.Languages, o.win.core)...)
 			segs = dropCoreSegments(segs, o.win)
 			dropCoreCoverage(cov, o.win.core)
 		}
 	}
 	cov.Languages = coalesceCoverageLanguages(cov.Languages, cov.DurationMS)
-	cov.RouteFallbackAt, cov.RouteFallbackBy, cov.RouteFallbackDropped = "", "", nil
+	s.stampSplice(cov, hit, carried, dropped, cachedText, now, v)
+	text, words := renderSegments(segs)
+	return cachedTranscript{text: text, words: words, coverage: cov, route: nil}
+}
+
+// stampSplice sets the dropped-window record and the stamp of a spliced
+// coverage record. A window dropped while the cache keeps its text keeps the
+// cached stamp, so the next retry follows the cached record. Otherwise a
+// remaining fallback or dropped window takes the retry time and the producer
+// that decoded it. The retry ran, so no skip reason remains.
+func (s *Service) stampSplice(cov *TranscriptCoverage, hit cachedTranscript, carried, dropped []model.CoverageLanguage, cachedText bool, now time.Time, v RouteFallbackDecision) {
+	cov.RouteFallbackAt, cov.RouteFallbackBy, cov.RouteFallbackSkipReason = "", "", ""
+	cov.RouteFallbackDropped = append(append([]model.CoverageLanguage(nil), dropped...), carried...)
+	cov.RouteFallbackDroppedCached = cachedText && len(dropped) > 0
+	if len(cov.RouteFallbackDropped) == 0 {
+		cov.RouteFallbackDropped = nil
+	}
 	switch {
-	case coverageHasFallback(cov):
+	case cov.RouteFallbackDroppedCached && !coverageHasFallback(cov) && len(carried) == 0:
+		cov.RouteFallbackAt, cov.RouteFallbackBy = hit.coverage.RouteFallbackAt, hit.coverage.RouteFallbackBy
+	case coverageHasFallback(cov) || len(cov.RouteFallbackDropped) > 0:
 		cov.RouteFallbackAt, cov.RouteFallbackBy = now.Format(time.RFC3339), hit.coverage.RouteFallbackBy
 		if v.ProducerChanged {
 			cov.RouteFallbackBy = s.defaultRouteIdentity()
 		}
-	case markDropped && len(dropped) > 0:
-		cov.RouteFallbackAt, cov.RouteFallbackBy = hit.coverage.RouteFallbackAt, hit.coverage.RouteFallbackBy
 	}
-	if markDropped {
-		cov.RouteFallbackDropped = dropped
+}
+
+// addRecoveredWindow records a recovered window that had no cached text: its
+// decoded range, a coverage.languages entry for its core, and one more decoded
+// window.
+func addRecoveredWindow(cov *TranscriptCoverage, o windowRetryResult) {
+	entry := o.win.entry
+	entry.StartMS, entry.EndMS = max(entry.StartMS, o.win.core.StartMS), min(entry.EndMS, o.win.core.EndMS)
+	entry.Route, entry.FallbackFrom, entry.Covered = o.route.route, o.fallbackFrom, routeCovers(o.route, entry.Language)
+	cov.Languages = append(cov.Languages, entry)
+	for _, r := range o.results {
+		cov.Ranges = append(cov.Ranges, CoverageRange{StartMS: r.piece.startMS, EndMS: r.piece.endMS})
 	}
-	text, words := renderSegments(segs)
-	return cachedTranscript{text: text, words: words, coverage: cov, route: nil}
+	cov.Ranges = coalesceCoverageRanges(cov.Ranges)
+	cov.DecodedMS = 0
+	for _, r := range cov.Ranges {
+		cov.DecodedMS += r.EndMS - r.StartMS
+	}
+	cov.WindowsDecoded++
+}
+
+// removeCore removes the parts of entries inside a core.
+func removeCore(entries []model.CoverageLanguage, core CoverageRange) []model.CoverageLanguage {
+	var out []model.CoverageLanguage
+	for _, e := range entries {
+		if e.EndMS <= core.StartMS || e.StartMS >= core.EndMS {
+			out = append(out, e)
+			continue
+		}
+		out = append(out, outsideCore(e, core)...)
+	}
+	return out
 }
 
 // fallbackEntriesInCore returns the parts of the fallback entries inside a
@@ -437,6 +610,7 @@ func copyCoverage(c *TranscriptCoverage) *TranscriptCoverage {
 	out.Ranges = append([]CoverageRange(nil), c.Ranges...)
 	out.Languages = append([]model.CoverageLanguage(nil), c.Languages...)
 	out.Refused = append([]model.RefusedRange(nil), c.Refused...)
+	out.RouteFallbackDropped = append([]model.CoverageLanguage(nil), c.RouteFallbackDropped...)
 	return &out
 }
 

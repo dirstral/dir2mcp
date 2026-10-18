@@ -207,6 +207,14 @@ type transcriptMeta struct {
 	// re-derivation gate: a repaired checkpoint then takes over, and a return
 	// to default restores the cached text. Absent otherwise.
 	RouteFallbackDropped []model.CoverageLanguage `json:"route_fallback_dropped,omitempty"`
+	// RouteFallbackDroppedCached is true when the transcript cache still holds
+	// the dropped windows' fallback text (a drop under on_route_error: fail).
+	// Such a transcript is processed on every run. When it is absent, the
+	// dropped windows have no text left and are retried when due.
+	RouteFallbackDroppedCached bool `json:"route_fallback_dropped_cached,omitempty"`
+	// RouteFallbackSkipReason says why the last due route-fallback retry could
+	// not run (a host problem, not a route failure). Absent when it ran.
+	RouteFallbackSkipReason string `json:"route_fallback_skip_reason,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

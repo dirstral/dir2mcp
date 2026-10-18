@@ -320,7 +320,7 @@ func (s *Service) activeOCRIdentityForPath(relPath string) string {
 //
 // The caller is responsible for only invoking this on the content-unchanged,
 // status==ok path; under --force/reindex the normal gate already returns true.
-func (s *Service) derivationIdentityStale(ctx context.Context, relPath string) bool {
+func (s *Service) derivationIdentityStale(ctx context.Context, relPath, docType string) bool {
 	// Contextual-retrieval self-heal (SPEC §8.1.8, issue #330) runs before the
 	// representation-meta gates because it needs no meta reader: a document that
 	// still carries a `fallback` chunk is reprocessed while contextualization
@@ -339,7 +339,7 @@ func (s *Service) derivationIdentityStale(ctx context.Context, relPath string) b
 	// SPEC §8.2.4 (spec 0.82.0): a route-fallback transcript is provisional.
 	// It is processed again when it is stale or due, although its identity is
 	// unchanged, because on_route_error is not part of the identity.
-	if s.routeFallbackStale(ctx, reader, relPath) {
+	if s.routeFallbackStale(ctx, reader, relPath, docType) {
 		return true
 	}
 	return s.ocrStale(ctx, reader, relPath)

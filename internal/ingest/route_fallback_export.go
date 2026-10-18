@@ -37,7 +37,7 @@ func (s *Service) DeriveReadTranscriptForTest(ctx context.Context, doc model.Doc
 
 // RouteFallbackStaleForTest exposes the §8.2.4 re-derivation gate for one
 // document.
-func (s *Service) RouteFallbackStaleForTest(ctx context.Context, relPath string) bool {
+func (s *Service) RouteFallbackStaleForTest(ctx context.Context, relPath, docType string) bool {
 	reader, ok := s.store.(representationMetaReader)
-	return ok && s.routeFallbackStale(ctx, reader, relPath)
+	return ok && s.routeFallbackStale(ctx, reader, relPath, docType)
 }

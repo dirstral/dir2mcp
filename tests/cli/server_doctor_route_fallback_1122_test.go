@@ -79,12 +79,12 @@ func TestDoctorRouteFallback_DueOnTheNextRun(t *testing.T) {
 		policy string
 		meta   string
 	}{
-		"no producer":     {"default", itemFallbackMeta(recent, "")},
-		"other producer":  {"default", itemFallbackMeta(recent, "whisper|old-model")},
-		"no time":         {"default", itemFallbackMeta("", "whisper|base-model")},
-		"future time":     {"default", itemFallbackMeta(future, "whisper|base-model")},
-		"policy fail":     {"fail", itemFallbackMeta(recent, "whisper|base-model")},
-		"dropped windows": {"default", dropped},
+		"no producer":                {"default", itemFallbackMeta(recent, "")},
+		"other producer":             {"default", itemFallbackMeta(recent, "whisper|old-model")},
+		"no time":                    {"default", itemFallbackMeta("", "whisper|base-model")},
+		"future time":                {"default", itemFallbackMeta(future, "whisper|base-model")},
+		"policy fail":                {"fail", itemFallbackMeta(recent, "whisper|base-model")},
+		"dropped windows under fail": {"fail", dropped},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, detail := routeFallbackDoctor(t, c.policy, seedRep{relPath: "a.mp3", metaJSON: c.meta})
@@ -92,5 +92,39 @@ func TestDoctorRouteFallback_DueOnTheNextRun(t *testing.T) {
 				t.Fatalf("detail %q: want the result due on the next run", detail)
 			}
 		})
+	}
+}
+
+// TestDoctorRouteFallback_DroppedUnderDefaultFollowsTheClock: a window dropped
+// under fail is not a decode under default before it is due, so the report
+// names the due time, not "due on the next run".
+func TestDoctorRouteFallback_DroppedUnderDefaultFollowsTheClock(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	meta := `{"source":"stt","route_fallback_at":"` + at.Format(time.RFC3339) + `","route_fallback_by":"whisper|base-model","route_fallback_dropped_cached":true,"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
+	_, detail := routeFallbackDoctor(t, "default", seedRep{relPath: "a.mp3", metaJSON: meta})
+	if want := "next due " + at.Add(24*time.Hour).Format(time.RFC3339); !strings.Contains(detail, want) {
+		t.Fatalf("detail %q: want %q", detail, want)
+	}
+}
+
+// TestDoctorRouteFallback_CountsRetriesThatCouldNotRunAndTheFailCost: the
+// report counts the retries a host problem stopped, and under fail the
+// transcripts whose dropped windows are decoded again on every run. With
+// none it says so positively.
+func TestDoctorRouteFallback_CountsRetriesThatCouldNotRunAndTheFailCost(t *testing.T) {
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	skipped := `{"source":"stt","route_fallback_from":"ckpt-kk","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_skip_reason":"ffmpeg not found"}`
+	dropped := `{"source":"stt","route_fallback_at":"` + recent + `","route_fallback_by":"whisper|base-model","route_fallback_dropped_cached":true,"route_fallback_dropped":[{"start_ms":0,"end_ms":5,"language":"kk","route":"whisper","covered":true,"fallback_from":"ckpt-kk"}]}`
+	_, detail := routeFallbackDoctor(t, "fail", seedRep{relPath: "a.mp3", metaJSON: skipped}, seedRep{relPath: "b.mp3", metaJSON: dropped})
+	for _, want := range []string{"1 route-fallback retries could not run: ffmpeg not found", "1 transcript(s) hold windows dropped under on_route_error=fail"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail %q lacks %q", detail, want)
+		}
+	}
+	_, clean := routeFallbackDoctor(t, "fail", seedRep{relPath: "a.mp3", metaJSON: itemFallbackMeta(recent, "whisper|base-model")})
+	for _, want := range []string{"every due route-fallback retry ran", "no transcript holds a window dropped under on_route_error=fail"} {
+		if !strings.Contains(clean, want) {
+			t.Errorf("detail %q lacks the positive line %q", clean, want)
+		}
 	}
 }

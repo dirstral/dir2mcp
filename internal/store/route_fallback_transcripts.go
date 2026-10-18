@@ -15,6 +15,8 @@ type routeFallbackMeta struct {
 	RouteFallbackAt      string            `json:"route_fallback_at"`
 	RouteFallbackBy      string            `json:"route_fallback_by"`
 	RouteFallbackDropped []json.RawMessage `json:"route_fallback_dropped"`
+	DroppedCached        bool              `json:"route_fallback_dropped_cached"`
+	SkipReason           string            `json:"route_fallback_skip_reason"`
 	Coverage             *struct {
 		Languages []struct {
 			FallbackFrom string `json:"fallback_from"`
@@ -95,7 +97,9 @@ func routeFallbackTranscripts(ctx context.Context, db *sql.DB, relPath string) (
 		if err := json.Unmarshal([]byte(raw), &meta); err != nil || !meta.holdsFallback() {
 			continue
 		}
-		out = append(out, model.RouteFallbackRecord{RelPath: path, RepType: repType, At: meta.RouteFallbackAt, By: meta.RouteFallbackBy, Dropped: len(meta.RouteFallbackDropped) > 0})
+		dropped := len(meta.RouteFallbackDropped) > 0
+		out = append(out, model.RouteFallbackRecord{RelPath: path, RepType: repType, At: meta.RouteFallbackAt, By: meta.RouteFallbackBy,
+			Dropped: dropped, DroppedCached: dropped && meta.DroppedCached, SkipReason: meta.SkipReason})
 	}
 	return out, rows.Err()
 }
