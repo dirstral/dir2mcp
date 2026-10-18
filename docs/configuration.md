@@ -81,13 +81,22 @@ subtitle sidecar and whose bytes are never used. On a large video archive that
 read is most of the first pass: tens of terabytes over NFS.
 
 `sampled` hashes the file's size plus three fixed 4 MiB slices: the start, the
-middle and the end. The whole file is then read only when something needs its
-bytes, which is speech-to-text or direct media embedding. A subtitled video is
-never read in full.
+middle and the end. The whole file is then read only when a representation needs
+its bytes, which is speech-to-text or direct media embedding. A subtitle sidecar
+removes only the speech-to-text read. Thus a subtitled video is not read in full
+only to hash it. If direct media embedding is on, that step still reads the
+whole file.
+
+The exact digest bytes (the domain tag, the size, the slice offsets and the
+sidecar fold) and three test vectors are in
+[SPEC §7.6](../dirstral-spec/docs/SPEC.md). In short: SHA-256 over
+`dir2mcp-media-identity-v1`, one `0x00` byte, the size as ASCII decimal, one
+`0x00` byte, then the slices at offset 0, at `floor(size/2) - 2 MiB` and at
+`size - 4 MiB`. A file of 12 MiB or less is hashed whole.
 
 | | `full` | `sampled` |
 |---|---|---|
-| Bytes read for a subtitled 1 GB video | 1 GB | 12 MiB |
+| Bytes read for a subtitled 1 GB video, with no direct media embedding | 1 GB | 12 MiB |
 | Detects an edit that keeps the same size and only touches bytes outside the three slices | yes | no |
 | Media no larger than 12 MiB | whole file | whole file, same hash as `full` |
 

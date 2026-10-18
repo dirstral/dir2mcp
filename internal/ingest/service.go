@@ -4788,7 +4788,8 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 			return suppressCredit, false, nil
 		}
 		// STT needs the bytes: load them if the sampled identity left them unread
-		// (§7.6). A sidecar returned above, so a subtitled file is never read.
+		// (§7.6). A sidecar returned above, so this read never runs for a
+		// subtitled file.
 		content, err = s.ensureMediaContent(ctx, doc, content)
 		if err != nil {
 			return false, false, err

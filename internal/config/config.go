@@ -748,9 +748,10 @@ type Config struct {
 	// IngestMediaIdentity selects how an audio/video document's content_hash is
 	// computed (config `ingest.media_identity`, SPEC §7.6): "full" (default) hashes
 	// the whole file; "sampled" hashes the size plus fixed head/middle/tail slices,
-	// so a media file whose transcript comes from a sidecar is never read in full.
-	// Changing it changes every media document's identity (one re-processing pass;
-	// the transcript cache still hits).
+	// and reads the whole file only when a representation needs the bytes (STT,
+	// direct media embedding). A sidecar removes only the transcription read.
+	// Changing it changes the identity of every media document larger than 12 MiB
+	// (one re-processing pass; the transcript cache still hits).
 	IngestMediaIdentity string
 
 	// IndexBackend selects the vector index backend (issue #246): "memory"

@@ -3,9 +3,11 @@ package tests
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -84,6 +86,16 @@ func writeRandomFile(t *testing.T, path string, n int) {
 		t.Fatal(err)
 	}
 	mustWriteFile(t, path, buf)
+}
+
+// patternBytes returns n bytes where byte i is i mod 251: the SPEC §7.6 test
+// vector pattern. It holds no 0xFF byte, so no MP3 frame sync word.
+func patternBytes(n int) []byte {
+	buf := make([]byte, n)
+	for i := range buf {
+		buf[i] = byte(i % 251)
+	}
+	return buf
 }
 
 type identityRun struct {
@@ -179,7 +191,10 @@ func TestSampledIdentity_SubtitledVideoIsNeverReadInFull(t *testing.T) {
 func TestSampledIdentity_STTGetsTheWholeFile(t *testing.T) {
 	t.Parallel()
 	root := testutil.TempDir(t)
-	writeRandomFile(t, filepath.Join(root, "audio", "long.mp3"), identityTestMediaBytes)
+	// Not random bytes: random data can hold MP3 frame sync words (0xFF 0xEx),
+	// and ffprobe then reports a duration that sends the file down the windowed
+	// STT path. The i mod 251 pattern never holds a 0xFF byte.
+	mustWriteFile(t, filepath.Join(root, "audio", "long.mp3"), patternBytes(identityTestMediaBytes))
 	r := runIdentityCorpus(t, root, "sampled", false)
 	if len(r.trans.lens) == 0 {
 		t.Fatalf("an unsubtitled file must be transcribed")
@@ -355,5 +370,133 @@ func TestTwoPhase_DerivationNeverOverwritesAnAuthoredSidecar(t *testing.T) {
 	}
 	if !sawEN {
 		t.Fatalf("the authored English sidecar must be indexed")
+	}
+}
+
+// TestTwoPhase_DerivationRetranslatesAfterATranslatorChange pins that the
+// derivation pass skips its read only for a translation by the active
+// translator (SPEC §8.6.7, §8.6.11). A translation that another model made is
+// present in the target language, but its cache key differs, so the pass must
+// read the bytes and translate again.
+func TestTwoPhase_DerivationRetranslatesAfterATranslatorChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	mustWriteFile(t, filepath.Join(root, "media", "clip.mp3"), []byte("fake-audio"))
+	stateDir := testutil.TempDir(t)
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	run := func(model string) *fakeTranslator {
+		t.Helper()
+		cfg := config.Default()
+		cfg.RootDir = root
+		cfg.StateDir = stateDir
+		cfg.STTProvider = "off"
+		cfg.MediaBatchTwoPhase = true
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] машинный текст"})
+		svc.SetSTTIdentity("whisper", "large-v3")
+		svc.SetTranscriptLanguage("ru")
+		tr := &fakeTranslator{}
+		svc.SetTranslator(tr, "mistral", model, []string{"en"})
+		if err := svc.Run(ctx); err != nil {
+			t.Fatalf("Run(%s): %v", model, err)
+		}
+		return tr
+	}
+	translateModelOf := func() string {
+		t.Helper()
+		reps, err := st.TranscriptRepresentations(ctx, "media/clip.mp3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rep := range reps {
+			if !subexport.RepIsTranslation(rep.MetaJSON) || subexport.RepLanguage(rep.MetaJSON) != "en" {
+				continue
+			}
+			var meta struct {
+				TranslateModel string `json:"translate_model"`
+			}
+			if err := json.Unmarshal([]byte(rep.MetaJSON), &meta); err != nil {
+				t.Fatal(err)
+			}
+			return meta.TranslateModel
+		}
+		return ""
+	}
+
+	if first := run("model-a"); first.calls == 0 {
+		t.Fatalf("the first run must translate the STT transcript")
+	}
+	if got := translateModelOf(); got != "model-a" {
+		t.Fatalf("translation after the first run: translate_model=%q, want model-a", got)
+	}
+	if same := run("model-a"); same.calls != 0 {
+		t.Fatalf("an unchanged translator must not translate again, got %d calls", same.calls)
+	}
+	if second := run("model-b"); second.calls == 0 {
+		t.Fatalf("a translator model change must translate again")
+	}
+	if got := translateModelOf(); got != "model-b" {
+		t.Fatalf("translation after the model change: translate_model=%q, want model-b", got)
+	}
+}
+
+// TestSampledIdentity_SpecTestVectors reproduces the three normative test
+// vectors of SPEC §7.6 (spec 0.81.0). Each file holds N bytes where byte i is
+// i mod 251, and has no sidecar. Above 3 x 4 MiB the content hash is the
+// sampled digest; at exactly 3 x 4 MiB the file is hashed whole.
+func TestSampledIdentity_SpecTestVectors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		size int
+		want string
+	}{
+		{20971521, "a580fb302c21e6fc1d57e4ea3a080387a4f13894e1e27bb7ac3a9b698ec91b93"},
+		{12582913, "a14342b2bdf68415cdf65512b51113621f7cda9a10e5fab3c0c0e11fa49b883e"},
+		{12582912, "b6967a4c54cdab8a16907be0774af71e5db8198045f91933ebed106ddba22dfb"},
+	} {
+		tc := tc
+		t.Run(strconv.Itoa(tc.size), func(t *testing.T) {
+			t.Parallel()
+			root := testutil.TempDir(t)
+			buf := patternBytes(tc.size)
+			// Audio goes to the transcriber as is (a video would need ffmpeg to
+			// extract its audio), so the fake transcript lets the document reach
+			// status ok, and an ok document records its content_hash.
+			mustWriteFile(t, filepath.Join(root, "media", "clip.mp3"), buf)
+			stateDir := testutil.TempDir(t)
+			st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+			if err := st.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			cfg := config.Default()
+			cfg.RootDir = root
+			cfg.StateDir = stateDir
+			cfg.STTProvider = "off"
+			cfg.IngestMediaIdentity = "sampled"
+			cfg.IngestMaxFileMB = 64 // the largest vector is 20 MiB + 1 byte
+			svc := mustNewIngestService(t, cfg, st)
+			svc.SetTranscriber(&fakeTranscriber{text: "[00:00] first line"})
+			svc.SetSTTIdentity("whisper", "large-v3")
+			if err := svc.Run(context.Background()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			doc, err := st.GetDocumentByPath(context.Background(), "media/clip.mp3")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if doc.Status != "ok" || doc.SidecarFingerprint != "" {
+				t.Fatalf("vector document: status=%q sidecar_fingerprint=%q, want ok and no sidecar", doc.Status, doc.SidecarFingerprint)
+			}
+			if doc.ContentHash != tc.want {
+				t.Fatalf("content_hash of the %d-byte vector = %q, want %q (SPEC §7.6)", tc.size, doc.ContentHash, tc.want)
+			}
+		})
 	}
 }
