@@ -336,6 +336,12 @@ func (s *Service) derivationIdentityStale(ctx context.Context, relPath string) b
 	if s.transcriptStale(ctx, reader, relPath) {
 		return true
 	}
+	// SPEC §8.2.4 (spec 0.82.0): a route-fallback transcript is provisional.
+	// It is processed again when it is stale or due, although its identity is
+	// unchanged, because on_route_error is not part of the identity.
+	if s.routeFallbackStale(ctx, reader, relPath) {
+		return true
+	}
 	return s.ocrStale(ctx, reader, relPath)
 }
 

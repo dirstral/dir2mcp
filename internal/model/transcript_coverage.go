@@ -68,6 +68,13 @@ type TranscriptCoverage struct {
 	// marker only when that marker holds the active window gate's fingerprint,
 	// so text cached while gates were off still gets every check.
 	ScreenedPerWindow bool `json:"-"`
+	// RouteFallbackAt and RouteFallbackBy carry the §8.2.4 route-fallback
+	// stamp of a window-scoped transcript (spec 0.82.0) between the decode,
+	// the transcript cache and the meta_json. They are not part of the
+	// persisted coverage object: the meta_json records them at its top level
+	// (route_fallback_at, route_fallback_by), one value per transcript.
+	RouteFallbackAt string `json:"-"`
+	RouteFallbackBy string `json:"-"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds

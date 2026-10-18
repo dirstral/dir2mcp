@@ -73,7 +73,7 @@ func (a *App) runServerDoctor(ctx context.Context, global globalOptions, args []
 		providerCheck(ctx, cfg, "embed", provider.CapEmbed, true, deep),
 		providerCheck(ctx, cfg, "chat", provider.CapChat, false, false),
 		egressCheck(cfg),
-		sttRoutesCheck(cfg),
+		sttRoutesCheck(ctx, a, cfg),
 		extractorCheck(cfg),
 		corpusRecordCheck(ctx, a, cfg),
 		extractionCoverageCheck(ctx, a, cfg),
@@ -1029,12 +1029,16 @@ func resolvedTextEmbedModel(cfg config.Config) string {
 // candidates are all ineligible is a warning naming the default profile that
 // decodes it instead. With nothing configured the check reports that
 // positively, because an omitted line and a clean configuration read the same
-// (§7.7). The informational stt_validation fields are surfaced unchanged.
-func sttRoutesCheck(cfg config.Config) doctorCheck {
+// (§7.7). The informational stt_validation fields are surfaced unchanged. The
+// check also counts the transcripts that hold a route-fallback result and names
+// when the next is due (SPEC §8.2.4, spec 0.82.0), and says so positively when
+// there is none.
+func sttRoutesCheck(ctx context.Context, a *App, cfg config.Config) doctorCheck {
 	const name = "stt_routes"
+	fallbacks := routeFallbackSummary(ctx, a, cfg)
 	identifier := strings.TrimSpace(cfg.MediaSTTLanguageIdentifier)
 	if identifier == "" && len(cfg.MediaSTTLanguageProviders) == 0 {
-		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no language routes configured: the default STT profile decodes every language"}
+		return doctorCheck{Name: name, Status: doctorStatusOK, Detail: "no language routes configured: the default STT profile decodes every language; " + fallbacks}
 	}
 	byName := cfg.Providers().ByName()
 	defName, _, hasDefault := ingest.ResolveSTTProviderModel(cfg)
@@ -1067,7 +1071,7 @@ func sttRoutesCheck(cfg config.Config) doctorCheck {
 	if policy == "" {
 		policy = "fail"
 	}
-	parts = append(parts, "on_route_error="+policy)
+	parts = append(parts, "on_route_error="+policy, "route_retry_after="+cfg.MediaSTTRouteRetryAfter.String(), fallbacks)
 	detail := strings.Join(parts, "; ")
 	if len(uneligible) > 0 {
 		return doctorCheck{Name: name, Status: doctorStatusWarn, Detail: fmt.Sprintf(
@@ -1075,6 +1079,71 @@ func sttRoutesCheck(cfg config.Config) doctorCheck {
 			detail, strings.Join(uneligible, ", "), defName)}
 	}
 	return doctorCheck{Name: name, Status: doctorStatusOK, Detail: detail}
+}
+
+// routeFallbackSummary counts the live transcripts that hold a route-fallback
+// result (SPEC §8.2.4) and names when the next is due: the earliest
+// route_fallback_at plus media.stt.route_retry_after, or "due on the next run"
+// when one records no valid time, its route_fallback_by is absent or is not the
+// current default profile, the interval is 0, or the policy is fail. With none
+// it says so positively.
+func routeFallbackSummary(ctx context.Context, a *App, cfg config.Config) string {
+	records, err := routeFallbackRecords(ctx, a, cfg)
+	if err != nil {
+		return "route-fallback transcripts unknown: " + err.Error()
+	}
+	if len(records) == 0 {
+		return "no route-fallback transcripts"
+	}
+	return fmt.Sprintf("%d route-fallback transcript(s), %s", len(records), routeFallbackNextDue(cfg, records, time.Now().UTC()))
+}
+
+// routeFallbackRecords reads the fallback records from the index. No index yet
+// is no records; a store that is not SQLite-backed cannot be asked.
+func routeFallbackRecords(ctx context.Context, a *App, cfg config.Config) ([]model.RouteFallbackRecord, error) {
+	metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+	if _, err := os.Stat(metaPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	sqliteStore, ok := st.(*store.SQLiteStore)
+	if !ok {
+		return nil, errors.New("store is not SQLite-backed")
+	}
+	if err := sqliteStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		return nil, err
+	}
+	return sqliteStore.RouteFallbackTranscripts(ctx)
+}
+
+// routeFallbackNextDue names when the next fallback result is due (SPEC §8.2.4).
+func routeFallbackNextDue(cfg config.Config, records []model.RouteFallbackRecord, now time.Time) string {
+	const nextRun = "due on the next run"
+	interval := cfg.MediaSTTRouteRetryAfter
+	if !cfg.RouteErrorFallsBack() || interval <= 0 {
+		return nextRun
+	}
+	defName, defModel, _ := ingest.ResolveSTTProviderModel(cfg)
+	producer := strings.TrimSpace(defName) + "|" + strings.TrimSpace(defModel)
+	var earliest time.Time
+	for _, r := range records {
+		at, err := time.Parse(time.RFC3339, strings.TrimSpace(r.At))
+		if err != nil || strings.TrimSpace(r.By) != producer {
+			return nextRun
+		}
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
+		}
+	}
+	due := earliest.Add(interval)
+	if !due.After(now) {
+		return nextRun
+	}
+	return "next due " + due.UTC().Format(time.RFC3339)
 }
 
 // sttRouteLine renders one language's candidates in order, each with the model

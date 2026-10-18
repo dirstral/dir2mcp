@@ -191,6 +191,16 @@ type transcriptMeta struct {
 	// per range) and on a transcript the identifier gave no signal for.
 	Route             string `json:"route,omitempty"`
 	RouteFallbackFrom string `json:"route_fallback_from,omitempty"`
+	// RouteFallbackAt and RouteFallbackBy are recorded only on a transcript
+	// that holds a fallback result (SPEC §8.2.4, spec 0.82.0, dir2mcp #1122):
+	// route_fallback_from under item scope, or a coverage.languages entry with
+	// fallback_from under window scope. RouteFallbackAt is the RFC 3339 UTC
+	// time of the last decode or retry that left a fallback record in place.
+	// RouteFallbackBy is the "<profile>|<model>" of the default profile that
+	// decoded the fallback text. One value of each per transcript, under both
+	// scopes. Neither is part of the derivation identity.
+	RouteFallbackAt string `json:"route_fallback_at,omitempty"`
+	RouteFallbackBy string `json:"route_fallback_by,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

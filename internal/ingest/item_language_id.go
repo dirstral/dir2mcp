@@ -35,6 +35,11 @@ type itemRoute struct {
 	Route        string  `json:"route"`
 	FallbackFrom string  `json:"fallback_from,omitempty"`
 	Uncovered    bool    `json:"uncovered,omitempty"`
+	// FallbackAt and FallbackBy are the §8.2.4 route_fallback_at and
+	// route_fallback_by of a fallback result (spec 0.82.0). They are cached
+	// here so a cache hit restores them with the text.
+	FallbackAt string `json:"route_fallback_at,omitempty"`
+	FallbackBy string `json:"route_fallback_by,omitempty"`
 }
 
 // itemIdentifierActive reports whether the §8.2.4 item-scope identifier runs:
@@ -154,6 +159,10 @@ func (s *Service) applyItemRouteMeta(meta *transcriptMeta, rec *itemRoute) {
 	}
 	meta.Route = rec.Route
 	meta.RouteFallbackFrom = rec.FallbackFrom
+	meta.RouteFallbackAt, meta.RouteFallbackBy = "", ""
+	if rec.FallbackFrom != "" {
+		meta.RouteFallbackAt, meta.RouteFallbackBy = rec.FallbackAt, rec.FallbackBy
+	}
 	// The §8.2.1 covered fact is evaluated against the profile that decoded,
 	// not the default: it is set only to false, absence being "no assertion".
 	meta.LanguageCovered = nil

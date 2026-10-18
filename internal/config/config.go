@@ -1295,6 +1295,17 @@ type Config struct {
 	// the default STT profile and records the failed candidate on the
 	// transcript. Any other value is CONFIG_INVALID.
 	MediaSTTOnRouteError string
+	// MediaSTTRouteRetryAfter is how long a route-fallback transcript waits
+	// before its route candidate decodes it again under on_route_error: default
+	// (config `media.stt.route_retry_after`, env
+	// DIR2MCP_MEDIA_STT_ROUTE_RETRY_AFTER, SPEC §8.2.4, dir2mcp #1122). Default
+	// 24h. 0 makes a fallback result due on every run. A negative value is
+	// CONFIG_INVALID. Under on_route_error: fail a fallback result is stale on
+	// every run, so the interval does not apply there.
+	MediaSTTRouteRetryAfter time.Duration
+	// mediaSTTRouteRetryAfterEnvErr keeps an env value that is not a duration,
+	// so Validate reports it as CONFIG_INVALID instead of a warning.
+	mediaSTTRouteRetryAfterEnvErr string
 	// MediaSTTLanguageCandidates is media.stt.language_providers with each value
 	// as the ordered candidate list SPEC §8.2.3 allows (a single name is a
 	// one-element list). MediaSTTLanguageProviders keeps the FIRST candidate, so
@@ -1617,6 +1628,7 @@ type fileConfig struct {
 	MediaSTTLanguageProbeSec           *int
 	MediaSTTRequireValidation          *bool
 	MediaSTTOnRouteError               *string
+	MediaSTTRouteRetryAfter            *time.Duration
 	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
@@ -1801,6 +1813,7 @@ type persistedConfig struct {
 	MediaSTTLanguageProbeSec           int           `yaml:"media_stt_language_probe_sec"`
 	MediaSTTRequireValidation          bool          `yaml:"media_stt_require_validation"`
 	MediaSTTOnRouteError               string        `yaml:"media_stt_on_route_error"`
+	MediaSTTRouteRetryAfter            time.Duration `yaml:"media_stt_route_retry_after"`
 	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
@@ -2067,6 +2080,7 @@ func Default() Config {
 		MediaSTTLanguageScope:       languageScopeItem,
 		MediaSTTLanguageProbeSec:    30,
 		MediaSTTOnRouteError:        routeErrorFail,
+		MediaSTTRouteRetryAfter:     DefaultMediaSTTRouteRetryAfter,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2289,6 +2303,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTLanguageProbeSec:           cfg.MediaSTTLanguageProbeSec,
 		MediaSTTRequireValidation:          cfg.MediaSTTRequireValidation,
 		MediaSTTOnRouteError:               cfg.MediaSTTOnRouteError,
+		MediaSTTRouteRetryAfter:            cfg.MediaSTTRouteRetryAfter,
 		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
@@ -3333,6 +3348,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTOnRouteError != nil {
 		cfg.MediaSTTOnRouteError = *fc.MediaSTTOnRouteError
 	}
+	if fc.MediaSTTRouteRetryAfter != nil {
+		cfg.MediaSTTRouteRetryAfter = *fc.MediaSTTRouteRetryAfter
+	}
 	if fc.MediaSTTTracks != nil {
 		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
@@ -3905,6 +3923,7 @@ var configKeyAliases = map[string]string{
 	"media_stt_language_probe_sec":            "media.stt.language_probe_sec",
 	"media_stt_require_validation":            "media.stt.require_validation",
 	"media_stt_on_route_error":                "media.stt.on_route_error",
+	"media_stt_route_retry_after":             "media.stt.route_retry_after",
 	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
@@ -4254,6 +4273,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.RetrievalRecencyHalfLife
 	case "recognize.timeout":
 		target = &cfg.RecognizeTimeout
+	case "media.stt.route_retry_after":
+		target = &cfg.MediaSTTRouteRetryAfter
 	default:
 		return nil
 	}
@@ -4262,7 +4283,7 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil {
-		return fmt.Errorf("invalid duration for %s", key)
+		return durationParseError(key, value)
 	}
 	*target = &d
 	return nil
@@ -4823,6 +4844,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_stt_language_probe_sec", cfg.MediaSTTLanguageProbeSec)
 	writeBool("media_stt_require_validation", cfg.MediaSTTRequireValidation)
 	writeScalar("media_stt_on_route_error", cfg.MediaSTTOnRouteError)
+	writeScalar("media_stt_route_retry_after", cfg.MediaSTTRouteRetryAfter.String())
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -5086,6 +5108,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_INGEST_WATCH_DEBOUNCE", env); ok && strings.TrimSpace(raw) != "" {
 		applyDurationEnvField(cfg, raw, "DIR2MCP_INGEST_WATCH_DEBOUNCE", &cfg.IngestWatchDebounce)
 	}
+	applyRouteRetryAfterEnv(cfg, env)
 	applyDoclingTimeoutEnv(cfg, env)
 	applyRetrievalAdaptiveKEnv(cfg, env)
 	// rag.evidence_threshold (#1081): applied as text; Validate parses it, so
@@ -5357,6 +5380,7 @@ func (c *Config) Validate() error {
 		c.validateMediaSTTLanguageScope,
 		c.validateSTTLanguageIdentifier,
 		c.validateMediaSTTOnRouteError,
+		c.validateMediaSTTRouteRetryAfter,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -6243,6 +6267,51 @@ func (c *Config) validateMediaSTTOnRouteError() error {
 		return fmt.Errorf("CONFIG_INVALID: media.stt.on_route_error must be one of fail, default: %q", c.MediaSTTOnRouteError)
 	}
 	c.MediaSTTOnRouteError = v
+	return nil
+}
+
+// DefaultMediaSTTRouteRetryAfter is the default media.stt.route_retry_after
+// (SPEC §8.2.4): a daily reindex retries a broken route once per day, and a
+// restart loop or a watch rescan on the same day does not decode it again.
+const DefaultMediaSTTRouteRetryAfter = 24 * time.Hour
+
+// durationParseError is the load error for a duration key that does not
+// parse. media.stt.route_retry_after is CONFIG_INVALID by SPEC §8.2.4, so its
+// message says so; the other keys keep their message.
+func durationParseError(key, value string) error {
+	if key == "media.stt.route_retry_after" {
+		return fmt.Errorf("CONFIG_INVALID: media.stt.route_retry_after must be a duration such as 24h, 90m or 0: %q", value)
+	}
+	return fmt.Errorf("invalid duration for %s", key)
+}
+
+// applyRouteRetryAfterEnv applies DIR2MCP_MEDIA_STT_ROUTE_RETRY_AFTER. A value
+// that is not a duration is kept for Validate, which reports it as
+// CONFIG_INVALID (SPEC §8.2.4): a typo must not silently keep the default.
+func applyRouteRetryAfterEnv(cfg *Config, env map[string]string) {
+	raw, ok := envLookup("DIR2MCP_MEDIA_STT_ROUTE_RETRY_AFTER", env)
+	trimmed := strings.TrimSpace(raw)
+	if !ok || trimmed == "" {
+		return
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil {
+		cfg.mediaSTTRouteRetryAfterEnvErr = trimmed
+		return
+	}
+	cfg.MediaSTTRouteRetryAfter = d
+}
+
+// validateMediaSTTRouteRetryAfter rejects a negative media.stt.route_retry_after
+// and an env value that is not a duration (SPEC §8.2.4). 0 is valid: a
+// fallback result is then due on every run.
+func (c *Config) validateMediaSTTRouteRetryAfter() error {
+	if c.mediaSTTRouteRetryAfterEnvErr != "" {
+		return fmt.Errorf("CONFIG_INVALID: DIR2MCP_MEDIA_STT_ROUTE_RETRY_AFTER must be a duration such as 24h, 90m or 0: %q", c.mediaSTTRouteRetryAfterEnvErr)
+	}
+	if c.MediaSTTRouteRetryAfter < 0 {
+		return fmt.Errorf("CONFIG_INVALID: media.stt.route_retry_after must not be negative: %v", c.MediaSTTRouteRetryAfter)
+	}
 	return nil
 }
 

@@ -160,8 +160,14 @@ type Service struct {
 	// default profile for that window or item; false under "fail", today's
 	// failed window or item.
 	routeErrorFallback bool
-	routeMu            sync.Mutex
-	routes             map[string]routedSTT
+	// routeRetryAfter is media.stt.route_retry_after (SPEC §8.2.4, spec
+	// 0.82.0, #1122): how long a route-fallback result waits before its route
+	// candidate decodes it again under on_route_error: default. clock is the
+	// time source for that rule; nil means time.Now (tests inject one).
+	routeRetryAfter time.Duration
+	clock           func() time.Time
+	routeMu         sync.Mutex
+	routes          map[string]routedSTT
 	// languageRouteIDs is media.stt.language_providers resolved to route
 	// identities (languageRouteIdentities), the form that joins the §8.6.7
 	// derivation identity and is recorded as language_routes.
@@ -1039,6 +1045,7 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		onPartialTranscript:             normalizeOnPartialTranscript(cfg.MediaSTTOnPartialTranscript),
 		languageScope:                   normalizeLanguageScope(cfg.MediaSTTLanguageScope),
 		routeErrorFallback:              cfg.RouteErrorFallsBack(),
+		routeRetryAfter:                 cfg.MediaSTTRouteRetryAfter,
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -5815,7 +5822,7 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 // single-track path; each additional track N ≥ 1 is persisted under
 // `transcript@t<N>` with its container-declared track/language/label in meta_json.
 func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, string, error) {
-	transcriptText, words, coverage, route, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, words, coverage, route, err := s.readTrackTranscriptOrRetire(ctx, doc, content, tc)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -6989,24 +6996,10 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 		return "", nil, nil, nil, errors.New("transcriber not configured")
 	}
 
-	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
-	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", nil, nil, nil, fmt.Errorf("create transcript cache dir: %w", err)
+	paths, err := s.transcriptCachePathsFor(content, language)
+	if err != nil {
+		return "", nil, nil, nil, err
 	}
-
-	// Key the cache on the media bytes AND the active STT derivation identity
-	// (SPEC §8.6.7), not the bytes alone: when the STT provider/model changes the
-	// re-ingest gate forces re-transcription, and a bytes-only key would return
-	// the previous model's cached text — silently defeating the re-derivation. The
-	// TranscriptLangSuffix is retained on the filename so cache files stay
-	// human-identifiable by language. With no resolved STT identity the historical
-	// bytes-only key is preserved.
-	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
-	cachePath := filepath.Join(cacheDir, base+".txt")
-	wordsPath := filepath.Join(cacheDir, base+".words.json")
-	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
-	screenedPath := filepath.Join(cacheDir, base+".screened")
-	routePath := filepath.Join(cacheDir, base+".route.json")
 	// #974: an operator asked for this document to be decoded again, so the cache
 	// is not consulted. The entry is rewritten below, so this costs one decode
 	// rather than leaving the document uncached forever.
@@ -7018,15 +7011,23 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	// transcripts the report surfaces on a multilingual archive, where the
 	// original is track 0 and the interpreted feed is track 1.
 	if !s.redecodeTranscripts[originRelPath] {
-		if cached, err := os.ReadFile(cachePath); err == nil {
+		if cached, err := os.ReadFile(paths.text); err == nil {
 			// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
 			// text. A cache hit that dropped it would re-index the same PARTIAL
 			// transcript as a complete one on the next run, which is the whole defect.
 			// SPEC §8.2.4: the item-level route record is restored with the text
 			// for the same reason the coverage is: a cache hit that dropped it
 			// would record the next run's transcript under the text detector's
-			// language and no route, so the record would differ run to run.
-			return string(cached), readCachedWords(wordsPath), s.restoreCachedCoverage(coveragePath, screenedPath), readCachedItemRoute(routePath), nil
+			// language and no route, so the record would differ run to run. A
+			// route-fallback result is provisional (spec 0.82.0): it may be
+			// decoded again on its route before it is served.
+			hit := cachedTranscript{
+				text:     string(cached),
+				words:    readCachedWords(paths.words),
+				coverage: s.restoreCachedCoverage(paths.coverage, paths.screened),
+				route:    readCachedItemRoute(paths.route),
+			}
+			return s.serveCachedTranscript(ctx, doc, content, paths, hit)
 		}
 	}
 
@@ -7034,44 +7035,106 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	if err != nil {
 		return "", nil, nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
+	s.stampFreshRouteFallback(coverage, route)
+	out := cachedTranscript{text: normalizeTranscriptNewlines(transcript), words: words, coverage: coverage, route: route}
+	if err := s.publishTranscriptCache(paths, out); err != nil {
+		return "", nil, nil, nil, err
+	}
+	return out.unpack()
+}
 
-	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
-	// SPEC §8.6.13: the coverage sidecar is written BEFORE the text it describes,
-	// and a failure to write it withholds the text cache entirely. The .txt file is
-	// what a later run reads; publishing it without its coverage would republish a
-	// PARTIAL transcript as a complete one, which is the defect this whole change
-	// exists to prevent. Skipping the cache costs one re-decode; getting it wrong
-	// costs an archive that lies. Word timing keeps its best-effort treatment
-	// (missing timing degrades gracefully; missing coverage asserts completeness).
-	if !s.publishCachedCoverage(coveragePath, coverage) {
-		return string(transcriptBytes), words, coverage, route, nil
+// transcriptCachePaths names the files of one transcript cache entry: the text
+// and its word-timing, coverage, screening and route sidecars.
+type transcriptCachePaths struct {
+	dir, text, words, coverage, screened, route string
+}
+
+// transcriptCachePathsFor returns the cache entry paths for the media bytes
+// and language, and creates the cache directory.
+//
+// The cache is keyed on the media bytes AND the active STT derivation identity
+// (SPEC §8.6.7), not the bytes alone: when the STT provider/model changes the
+// re-ingest gate forces re-transcription, and a bytes-only key would return
+// the previous model's cached text, silently defeating the re-derivation. The
+// TranscriptLangSuffix is retained on the filename so cache files stay
+// human-identifiable by language. With no resolved STT identity the historical
+// bytes-only key is preserved.
+func (s *Service) transcriptCachePathsFor(content []byte, language string) (transcriptCachePaths, error) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
+	if err := statefs.MkdirAll(cacheDir); err != nil {
+		return transcriptCachePaths{}, fmt.Errorf("create transcript cache dir: %w", err)
 	}
-	if !s.publishCachedItemRoute(routePath, route) {
-		return string(transcriptBytes), words, coverage, route, nil
+	base := filepath.Join(cacheDir, s.transcriptCacheKey(content)+TranscriptLangSuffix(language))
+	return transcriptCachePaths{
+		dir:      cacheDir,
+		text:     base + ".txt",
+		words:    base + ".words.json",
+		coverage: base + ".coverage.json",
+		screened: base + ".screened",
+		route:    base + ".route.json",
+	}, nil
+}
+
+// cachedTranscript is one transcript with the records the cache keeps beside
+// it: word timing, §8.6.13 coverage and the §8.2.4 item route.
+type cachedTranscript struct {
+	text     string
+	words    []model.TimedWord
+	coverage *TranscriptCoverage
+	route    *itemRoute
+}
+
+func (c cachedTranscript) unpack() (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
+	return c.text, c.words, c.coverage, c.route, nil
+}
+
+// normalizeTranscriptNewlines makes every line break a single \n, the form the
+// cache stores and the chunker reads.
+func normalizeTranscriptNewlines(text string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+}
+
+// publishTranscriptCache writes one transcript and its sidecars to the cache.
+//
+// SPEC §8.6.13: the coverage sidecar is written BEFORE the text it describes,
+// and a failure to write it withholds the text cache entirely. The .txt file is
+// what a later run reads; publishing it without its coverage would republish a
+// PARTIAL transcript as a complete one, which is the defect this whole change
+// exists to prevent. Skipping the cache costs one re-decode; getting it wrong
+// costs an archive that lies. The route sidecar (§8.2.4) is held to the same
+// rule. Word timing keeps its best-effort treatment (missing timing degrades
+// gracefully; missing coverage asserts completeness). Only a failure to write
+// the text itself is an error.
+func (s *Service) publishTranscriptCache(paths transcriptCachePaths, entry cachedTranscript) error {
+	if !s.publishCachedCoverage(paths.coverage, entry.coverage) {
+		return nil
 	}
-	s.publishScreenedMarker(screenedPath, coverage)
-	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
-		return "", nil, nil, nil, fmt.Errorf("write transcript cache: %w", err)
+	if !s.publishCachedItemRoute(paths.route, entry.route) {
+		return nil
 	}
-	s.writeCachedWords(wordsPath, words)
-	shouldEnforceAfterWrite := s.markOCRCacheWrite()
-	if shouldEnforceAfterWrite {
-		// Reuse the same cache-policy limits/hooks as OCR for now so transcript
-		// cache growth is bounded under the same operational policy.
-		s.ocrCacheMu.RLock()
-		enforceHook := s.ocrCacheEnforce
-		s.ocrCacheMu.RUnlock()
-		var err error
-		if enforceHook != nil {
-			err = enforceHook(cacheDir)
-		} else {
-			err = s.enforceCachePolicy(cacheDir)
-		}
-		if err != nil {
-			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
-		}
+	s.publishScreenedMarker(paths.screened, entry.coverage)
+	if err := statefs.WriteFile(paths.text, []byte(entry.text)); err != nil {
+		return fmt.Errorf("write transcript cache: %w", err)
 	}
-	return string(transcriptBytes), words, coverage, route, nil
+	s.writeCachedWords(paths.words, entry.words)
+	if !s.markOCRCacheWrite() {
+		return nil
+	}
+	// Reuse the same cache-policy limits/hooks as OCR for now so transcript
+	// cache growth is bounded under the same operational policy.
+	s.ocrCacheMu.RLock()
+	enforceHook := s.ocrCacheEnforce
+	s.ocrCacheMu.RUnlock()
+	var err error
+	if enforceHook != nil {
+		err = enforceHook(paths.dir)
+	} else {
+		err = s.enforceCachePolicy(paths.dir)
+	}
+	if err != nil {
+		s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", paths.dir, err)
+	}
+	return nil
 }
 
 // readOrComputeWhisperTranslation produces the English transcript for
@@ -7189,18 +7252,9 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // (issue #954): a 3-hour recording used to be refused whole on the provider's
 // payload cap and left the document at status=error with no transcript.
 func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
-	relPath := doc.RelPath
-	if doc.DocType == "video" {
-		audio, err := s.extractVideoAudioTrack(ctx, doc, content)
-		if err != nil {
-			if errors.Is(err, avutil.ErrNoAudioStream) {
-				s.getLogger().Printf("no audio track to transcribe in video %s; skipping STT", doc.RelPath)
-				return "", nil, nil, nil, nil
-			}
-			return "", nil, nil, nil, err
-		}
-		content = audio
-		relPath = videoAudioRelPath(doc.RelPath)
+	relPath, content, ok, err := s.transcriptInput(ctx, doc, content)
+	if err != nil || !ok {
+		return "", nil, nil, nil, err
 	}
 	// SPEC §8.2.4: under item scope with an identifier bound, the item's
 	// language is resolved before transcription and selects the route.
@@ -7209,6 +7263,25 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 	}
 	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber)
 	return text, words, coverage, nil, err
+}
+
+// transcriptInput returns the audio STT decodes for a document and the
+// rel_path the provider sees: the bytes as they are, or a video's demuxed audio
+// track. ok is false, with no error, when a video has no audio track: the
+// caller records "no transcript" rather than failing.
+func (s *Service) transcriptInput(ctx context.Context, doc model.Document, content []byte) (string, []byte, bool, error) {
+	if doc.DocType != "video" {
+		return doc.RelPath, content, true, nil
+	}
+	audio, err := s.extractVideoAudioTrack(ctx, doc, content)
+	if err != nil {
+		if errors.Is(err, avutil.ErrNoAudioStream) {
+			s.getLogger().Printf("no audio track to transcribe in video %s; skipping STT", doc.RelPath)
+			return "", nil, false, nil
+		}
+		return "", nil, false, err
+	}
+	return videoAudioRelPath(doc.RelPath), audio, true, nil
 }
 
 // extractVideoAudioTrack demuxes a video's audio track to a compact STT-ready
@@ -7269,14 +7342,29 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	if err != nil {
 		return nil
 	}
-	var coverage TranscriptCoverage
-	if err := json.Unmarshal(raw, &coverage); err != nil {
+	entry := coverageCacheEntry{TranscriptCoverage: &TranscriptCoverage{}}
+	if err := json.Unmarshal(raw, &entry); err != nil {
 		return nil
 	}
-	if coverage.WindowsAttempted < 2 {
+	coverage := entry.TranscriptCoverage
+	// A one-window decode under window scope records coverage too (§8.2.2:
+	// coverage.languages is required whatever the window count), so its record
+	// is restored with the text. Without languages or refusals a record of
+	// fewer than two windows asserts nothing (§8.6.13).
+	if coverage.WindowsAttempted < 2 && len(coverage.Languages) == 0 && len(coverage.Refused) == 0 {
 		return nil
 	}
-	return &coverage
+	coverage.RouteFallbackAt, coverage.RouteFallbackBy = entry.RouteFallbackAt, entry.RouteFallbackBy
+	return coverage
+}
+
+// coverageCacheEntry is the coverage sidecar of a transcript cache entry: the
+// §8.6.13 coverage object plus the §8.2.4 route-fallback stamp (spec 0.82.0),
+// which a cache hit restores with the text exactly as it restores coverage.
+type coverageCacheEntry struct {
+	*TranscriptCoverage
+	RouteFallbackAt string `json:"route_fallback_at,omitempty"`
+	RouteFallbackBy string `json:"route_fallback_by,omitempty"`
 }
 
 // restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
@@ -7339,7 +7427,11 @@ func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverag
 		}
 		return true
 	}
-	raw, err := json.Marshal(coverage)
+	raw, err := json.Marshal(coverageCacheEntry{
+		TranscriptCoverage: coverage,
+		RouteFallbackAt:    coverage.RouteFallbackAt,
+		RouteFallbackBy:    coverage.RouteFallbackBy,
+	})
 	if err != nil {
 		s.getLogger().Printf("marshal transcript coverage cache: %v; not caching this transcript", err)
 		return false
