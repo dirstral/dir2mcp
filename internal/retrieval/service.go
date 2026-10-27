@@ -5393,9 +5393,10 @@ func spanCandidateFor(label uint64, hit model.SearchHit, requested model.Span) (
 	return spanCandidate{}, false
 }
 
-// chunkFullText returns the stored text of chunkID, or fallback when the store
-// cannot supply it: no chunkByIDer capability, a failed lookup, or a chunk with
-// no text (a media chunk).
+// chunkFullText returns the stored text of chunkID exactly as stored (leading
+// indentation and trailing newlines included, so a span read matches the chunk
+// byte for byte), or fallback when the store cannot supply it: no chunkByIDer
+// capability, a failed lookup, or a chunk with no text (a media chunk).
 func chunkFullText(ctx context.Context, fetcher chunkByIDer, chunkID uint64, fallback string) string {
 	if fetcher == nil || chunkID == 0 {
 		return fallback
@@ -5404,10 +5405,10 @@ func chunkFullText(ctx context.Context, fetcher chunkByIDer, chunkID uint64, fal
 	if err != nil {
 		return fallback
 	}
-	if text := strings.TrimSpace(task.Text); text != "" {
-		return text
+	if strings.TrimSpace(task.Text) == "" {
+		return fallback
 	}
-	return fallback
+	return task.Text
 }
 
 func overlapsTime(aStart, aEnd, bStart, bEnd int) bool {
