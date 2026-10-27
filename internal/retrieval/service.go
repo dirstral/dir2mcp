@@ -2512,7 +2512,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
-	if content, truncated, handled, err := s.openFileFromMetadata(normalizedRel, span, maxChars, secretPatterns, kind); handled {
+	if content, truncated, handled, err := s.openFileFromMetadata(ctx, normalizedRel, span, maxChars, secretPatterns, kind); handled {
 		return content, truncated, err
 	}
 
@@ -2942,13 +2942,13 @@ func foldDerivationCacheKey(contentHash, identity string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Service) openFileFromMetadata(normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
+func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
 	if !isMetaSpanKind(kind) || (kind == "time" && span.EndMS <= 0) {
 		return "", false, false, nil
 	}
 	normalizedSpan := span
 	normalizedSpan.Kind = kind
-	fromMeta, ok := s.sliceFromMetadata(normalizedRel, normalizedSpan)
+	fromMeta, ok := s.sliceFromMetadata(ctx, normalizedRel, normalizedSpan)
 	if !ok {
 		return "", false, false, nil
 	}
@@ -5297,54 +5297,42 @@ func truncateRunesWithFlag(s string, max int) (string, bool) {
 	return string(r[:max]), true
 }
 
-func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (string, bool) {
+// spanCandidate is one metadata chunk that answers an open_file page or time
+// read: its sort keys, the id to resolve its text by, and the snippet fallback.
+type spanCandidate struct {
+	start   int
+	page    int
+	chunkID uint64
+	snippet string
+}
+
+// sliceFromMetadata serves an open_file page or time read from the in-memory
+// chunk metadata: every chunk of relPath whose span overlaps the request, in
+// reading order. The metadata hit carries only the ~240-rune store snippet, so
+// each chunk's FULL text is resolved through the store's chunkByIDer capability,
+// exactly as contextTexts does for ask (SPEC §9.4.2, issue #403 F5). Serving the
+// snippet cut a transcript excerpt mid-word and reported truncated=false, so a
+// client that opened a cited span to verify an answer never saw the line the
+// citation pointed at (issue #1129). The snippet stays the fallback when the
+// store lacks the capability, the lookup fails, or the chunk carries no text.
+//
+// Matches are collected under metaMu and the store lookups run after the lock
+// is released, so a slow store never holds the metadata read lock.
+func (s *Service) sliceFromMetadata(ctx context.Context, relPath string, requested model.Span) (string, bool) {
+	matches := make([]spanCandidate, 0, 8)
+	want := strings.TrimSpace(filepath.ToSlash(relPath))
+
 	s.metaMu.RLock()
-	defer s.metaMu.RUnlock()
-
-	type candidate struct {
-		start int
-		page  int
-		text  string
-	}
-	matches := make([]candidate, 0, 8)
-
-	for _, hit := range s.chunkByLabel {
-		if strings.TrimSpace(filepath.ToSlash(hit.RelPath)) != strings.TrimSpace(filepath.ToSlash(relPath)) {
+	store := s.store
+	for label, hit := range s.chunkByLabel {
+		if strings.TrimSpace(filepath.ToSlash(hit.RelPath)) != want || strings.TrimSpace(hit.Snippet) == "" {
 			continue
 		}
-		if strings.TrimSpace(hit.Snippet) == "" {
-			continue
-		}
-		span := hit.Span
-		switch requested.Kind {
-		case "page":
-			if strings.EqualFold(span.Kind, "page") && span.Page == requested.Page {
-				matches = append(matches, candidate{page: span.Page, text: hit.Snippet})
-			} else if strings.EqualFold(span.Kind, "region") && regionCoversPage(span.Region, requested.Page) {
-				// Structured (docling) chunks carry a region span with a page
-				// range, not a plain page span. Without this, open_file page=N on
-				// a docling-extracted PDF found no metadata match and fell through
-				// to reading raw PDF bytes -> DOC_TYPE_UNSUPPORTED (issue #383).
-				//
-				// The region covers the requested page, so attribute the slice to
-				// the page the caller actually asked about — NOT the region's
-				// primary (start) page. A multi-page region's cited text can sit on
-				// a later page than its primary, and localizing it to the primary
-				// page mis-reports where the text is (issue #403 F7). StartPage is
-				// kept as the secondary sort key so, when several chunks answer one
-				// page, they order by document reading order (and a plain page span,
-				// start 0, leads a region that merely spans into that page).
-				matches = append(matches, candidate{page: requested.Page, start: span.Region.StartPage, text: hit.Snippet})
-			}
-		case "time":
-			if !strings.EqualFold(span.Kind, "time") {
-				continue
-			}
-			if overlapsTime(span.StartMS, span.EndMS, requested.StartMS, requested.EndMS) {
-				matches = append(matches, candidate{start: span.StartMS, text: hit.Snippet})
-			}
+		if c, ok := spanCandidateFor(label, hit, requested); ok {
+			matches = append(matches, c)
 		}
 	}
+	s.metaMu.RUnlock()
 
 	if len(matches) == 0 {
 		return "", false
@@ -5353,14 +5341,73 @@ func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (strin
 		if matches[i].page != matches[j].page {
 			return matches[i].page < matches[j].page
 		}
-		return matches[i].start < matches[j].start
+		if matches[i].start != matches[j].start {
+			return matches[i].start < matches[j].start
+		}
+		return matches[i].chunkID < matches[j].chunkID
 	})
 
+	fetcher, _ := store.(chunkByIDer)
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
-		out = append(out, m.text)
+		out = append(out, chunkFullText(ctx, fetcher, m.chunkID, m.snippet))
 	}
 	return strings.Join(out, "\n"), true
+}
+
+// spanCandidateFor decides whether one metadata hit answers the requested page
+// or time read, and if so with which sort keys. A hit registered without a
+// ChunkID (older callers, tests) resolves by its label, which is the chunk id.
+func spanCandidateFor(label uint64, hit model.SearchHit, requested model.Span) (spanCandidate, bool) {
+	chunkID := hit.ChunkID
+	if chunkID == 0 {
+		chunkID = label
+	}
+	span := hit.Span
+	switch requested.Kind {
+	case "page":
+		if strings.EqualFold(span.Kind, "page") && span.Page == requested.Page {
+			return spanCandidate{page: span.Page, chunkID: chunkID, snippet: hit.Snippet}, true
+		}
+		if strings.EqualFold(span.Kind, "region") && regionCoversPage(span.Region, requested.Page) {
+			// Structured (docling) chunks carry a region span with a page
+			// range, not a plain page span. Without this, open_file page=N on
+			// a docling-extracted PDF found no metadata match and fell through
+			// to reading raw PDF bytes -> DOC_TYPE_UNSUPPORTED (issue #383).
+			//
+			// The region covers the requested page, so attribute the slice to
+			// the page the caller actually asked about — NOT the region's
+			// primary (start) page. A multi-page region's cited text can sit on
+			// a later page than its primary, and localizing it to the primary
+			// page mis-reports where the text is (issue #403 F7). StartPage is
+			// kept as the secondary sort key so, when several chunks answer one
+			// page, they order by document reading order (and a plain page span,
+			// start 0, leads a region that merely spans into that page).
+			return spanCandidate{page: requested.Page, start: span.Region.StartPage, chunkID: chunkID, snippet: hit.Snippet}, true
+		}
+	case "time":
+		if strings.EqualFold(span.Kind, "time") && overlapsTime(span.StartMS, span.EndMS, requested.StartMS, requested.EndMS) {
+			return spanCandidate{start: span.StartMS, chunkID: chunkID, snippet: hit.Snippet}, true
+		}
+	}
+	return spanCandidate{}, false
+}
+
+// chunkFullText returns the stored text of chunkID, or fallback when the store
+// cannot supply it: no chunkByIDer capability, a failed lookup, or a chunk with
+// no text (a media chunk).
+func chunkFullText(ctx context.Context, fetcher chunkByIDer, chunkID uint64, fallback string) string {
+	if fetcher == nil || chunkID == 0 {
+		return fallback
+	}
+	task, _, err := fetcher.ChunkTaskByID(ctx, chunkID)
+	if err != nil {
+		return fallback
+	}
+	if text := strings.TrimSpace(task.Text); text != "" {
+		return text
+	}
+	return fallback
 }
 
 func overlapsTime(aStart, aEnd, bStart, bEnd int) bool {
