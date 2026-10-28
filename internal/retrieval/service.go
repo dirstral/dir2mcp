@@ -1428,6 +1428,18 @@ type chunkByIDer interface {
 	ChunkTaskByID(ctx context.Context, chunkID uint64) (model.ChunkTask, string, error)
 }
 
+// chunkTextsByIDer is the batch form of chunkByIDer: the stored text of many
+// live chunks in one store round trip, keyed by chunk id. An open_file page or
+// time read over a broad span can match hundreds of chunks, and one
+// ChunkTaskByID per chunk serialized that many queries on the store's single
+// writer connection before max_chars discarded most of the text (PR #1130
+// review). An id absent from the result (tombstoned, errored parent, unknown)
+// keeps its snippet fallback. A store without the capability, or a batch that
+// fails, resolves chunk by chunk through chunkByIDer as before.
+type chunkTextsByIDer interface {
+	ChunkTextsByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error)
+}
+
 // EvictChunks removes the given chunk labels from the in-memory retrieval
 // metadata and drops their vectors from the text and code indexes. It is the
 // chunk-granularity analogue of EvictDocuments: an in-place edit that shrinks a
@@ -5347,12 +5359,41 @@ func (s *Service) sliceFromMetadata(ctx context.Context, relPath string, request
 		return matches[i].chunkID < matches[j].chunkID
 	})
 
-	fetcher, _ := store.(chunkByIDer)
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		out = append(out, chunkFullText(ctx, fetcher, m.chunkID, m.snippet))
+	return strings.Join(spanTexts(ctx, store, matches), "\n"), true
+}
+
+// spanTexts resolves the full text of every candidate, in the candidates'
+// order: one batch lookup when the store offers it and the span holds more than
+// one chunk, else one lookup per chunk. Either way a chunk the store cannot
+// supply keeps its snippet, and the whole selection is resolved before the
+// caller scans it for secrets and applies max_chars.
+func spanTexts(ctx context.Context, store model.Store, matches []spanCandidate) []string {
+	out := make([]string, len(matches))
+	if batcher, ok := store.(chunkTextsByIDer); ok && len(matches) > 1 {
+		ids := make([]uint64, 0, len(matches))
+		seen := make(map[uint64]struct{}, len(matches))
+		for _, m := range matches {
+			if _, dup := seen[m.chunkID]; dup || m.chunkID == 0 {
+				continue
+			}
+			seen[m.chunkID] = struct{}{}
+			ids = append(ids, m.chunkID)
+		}
+		if texts, err := batcher.ChunkTextsByIDs(ctx, ids); err == nil {
+			for i, m := range matches {
+				out[i] = m.snippet
+				if text, found := texts[m.chunkID]; found && strings.TrimSpace(text) != "" {
+					out[i] = text
+				}
+			}
+			return out
+		}
 	}
-	return strings.Join(out, "\n"), true
+	fetcher, _ := store.(chunkByIDer)
+	for i, m := range matches {
+		out[i] = chunkFullText(ctx, fetcher, m.chunkID, m.snippet)
+	}
+	return out
 }
 
 // spanCandidateFor decides whether one metadata hit answers the requested page

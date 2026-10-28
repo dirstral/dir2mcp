@@ -2199,6 +2199,83 @@ WHERE `+liveParentDocument, int64(chunkID))
 	return t, thash, nil
 }
 
+// chunkTextsBatchSize bounds the IN list of one ChunkTextsByIDs query. SQLite
+// builds before 3.32 allow 999 bound variables, so a span that matches more
+// chunks than this goes out in several queries.
+const chunkTextsBatchSize = 500
+
+// sqlPlaceholders returns n comma-separated "?" markers for an IN list.
+func sqlPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// ChunkTextsByIDs returns the stored text of every live chunk among ids, keyed
+// by chunk id, in as few queries as the ids allow (one per chunkTextsBatchSize).
+// Liveness is the same rule ChunkTaskByID applies: the chunk is not tombstoned
+// and its parent document is live (liveParentDocument). A tombstoned chunk, a
+// chunk of an errored document, an unknown id and the zero id are absent from
+// the result, never an error, so the caller keeps its own fallback for them.
+//
+// It serves open_file page and time reads, which resolve the full text of every
+// chunk in the span. One ChunkTaskByID per chunk serialized that many queries
+// on the single writer connection before max_chars discarded most of the text
+// (PR #1130 review); this is one round trip for the whole span.
+func (s *SQLiteStore) ChunkTextsByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error) {
+	out := make(map[uint64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	queryBatch := func(batch []uint64) error {
+		args := make([]any, 0, len(batch))
+		for _, id := range batch {
+			if id != 0 {
+				args = append(args, int64(id))
+			}
+		}
+		if len(args) == 0 {
+			return nil
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT c.chunk_id, c.text
+FROM chunks c
+LEFT JOIN documents d ON d.rel_path = c.rel_path
+WHERE c.deleted = 0 AND c.chunk_id IN (`+sqlPlaceholders(len(args))+`) AND `+liveParentDocument, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				cid  int64
+				text string
+			)
+			if err := rows.Scan(&cid, &text); err != nil {
+				return err
+			}
+			if cid > 0 {
+				out[uint64(cid)] = text
+			}
+		}
+		return rows.Err()
+	}
+	for start := 0; start < len(ids); start += chunkTextsBatchSize {
+		end := start + chunkTextsBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		if err := queryBatch(ids[start:end]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // EmbeddedChunksByPath returns the embedded (status='ok'), non-deleted chunks of
 // one document (corpus-relative rel_path), ordered by chunk_id. It is the store
 // half of dir2mcp_related's (SPEC §15.12) rel_path seed: the tool aggregates the
