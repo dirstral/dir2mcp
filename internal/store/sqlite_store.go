@@ -2249,7 +2249,7 @@ WHERE c.deleted = 0 AND c.chunk_id IN (`+sqlPlaceholders(len(args))+`) AND `+liv
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var (
 				cid  int64
