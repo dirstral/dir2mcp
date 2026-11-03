@@ -1538,7 +1538,25 @@ func timeSpanIndexForWord(segs []chunkSegment, startMS int) int {
 	return lastTime
 }
 
+// lineEndResolver returns the end (ms) of a transcript line that starts at
+// startMS. nextMS is the end the chunker would assign on its own (the next
+// line's start, or a pace estimate for the last line); a resolver returns it
+// unchanged when it knows nothing better.
+type lineEndResolver func(startMS, nextMS int) int
+
 func chunkTranscriptByTime(content string) []chunkSegment {
+	return chunkTranscriptByTimeEnds(content, nil)
+}
+
+// chunkTranscriptByTimeEnds is chunkTranscriptByTime with an optional per-line
+// end resolver. The chunker's own rule ends a line at the next line's start,
+// which makes any silence between two lines part of the earlier line's span. A
+// native transcript carries word timings, so its consumers (broadcast export,
+// §8.6.3) recover the spoken end from the words; a translated transcript has
+// marker lines only, so without a resolver its spans inherit that silence and
+// re-segmentation spreads the translated words across it (SPEC §8.6.2). The
+// resolver supplies the spoken end of the source line with the same marker.
+func chunkTranscriptByTimeEnds(content string, endFor lineEndResolver) []chunkSegment {
 	// normalize line endings just like NormalizeUTF8 does; this ensures both
 	// "\r\n" and lone "\r" are converted to "\n" before we split.  we
 	// also salvage any invalid UTF-8 sequences, although the transcript
@@ -1614,13 +1632,77 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 
 	out := make([]chunkSegment, 0, len(segments))
 	for i := range segments {
-		endMS := segments[i].startMS + estimateTranscriptDurationMS(segments[i].text)
+		nextMS := segments[i].startMS + estimateTranscriptDurationMS(segments[i].text)
 		if i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS {
-			endMS = segments[i+1].startMS
+			nextMS = segments[i+1].startMS
 		}
+		endMS := resolveLineEnd(endFor, segments[i].startMS, nextMS)
 		out = append(out, splitTranscriptSegmentWithTiming(segments[i].text, segments[i].startMS, endMS)...)
 	}
 	return out
+}
+
+// resolveLineEnd applies an optional lineEndResolver to a line's chunker end.
+func resolveLineEnd(endFor lineEndResolver, startMS, nextMS int) int {
+	if endFor == nil {
+		return nextMS
+	}
+	return endFor(startMS, nextMS)
+}
+
+// spokenLineEnds derives, from a source transcript and its per-word timings,
+// where the speech of each marked line ends: the latest word end among the
+// words that start inside the line's window [start, next line start). The
+// resolver it returns gives that end to a line with the same start marker when
+// the end lies strictly inside the line's window, and otherwise leaves the
+// chunker's own end. It returns nil when there are no words or no markers, so a
+// caller can pass the result straight to chunkTranscriptByTimeEnds and get the
+// unchanged next-start rule. It is the SPEC §8.6.2 rule that a translated line
+// inherits the SPOKEN span of its source line: the translation preserves each
+// source marker verbatim (translate.go), so the markers are the join key.
+func spokenLineEnds(sourceText string, words []model.TimedWord) lineEndResolver {
+	if len(words) == 0 {
+		return nil
+	}
+	var starts []int
+	for _, line := range strings.Split(string(normalizeUTF8([]byte(sourceText))), "\n") {
+		if startMS, _, ok := parseTranscriptTimestamp(line); ok {
+			starts = append(starts, startMS)
+		}
+	}
+	if len(starts) == 0 {
+		return nil
+	}
+	sort.Ints(starts)
+	ends := make(map[int]int, len(starts))
+	for _, w := range words {
+		// The line a word belongs to is the last marker at or before the word's
+		// start; a word before the first marker belongs to no line.
+		idx := sort.SearchInts(starts, w.StartMS+1) - 1
+		if idx < 0 {
+			continue
+		}
+		if w.EndMS > ends[starts[idx]] {
+			ends[starts[idx]] = w.EndMS
+		}
+	}
+	return func(startMS, nextMS int) int {
+		end, ok := ends[startMS]
+		if !ok || end <= startMS || end >= nextMS {
+			return nextMS
+		}
+		return end
+	}
+}
+
+// chunkTranslatedTranscriptFiltered chunks a chat-engine translated transcript
+// (marker lines, no word timings of its own) so that each line carries the
+// spoken span of the source line it translates (SPEC §8.6.2), then applies the
+// caption word filter like the source path. With no source words it is
+// chunkTranscriptByTime plus the filter, the historical behaviour.
+func chunkTranslatedTranscriptFiltered(translated, sourceText string, sourceWords []model.TimedWord, filter *subtitle.WordFilter) []chunkSegment {
+	segs := chunkTranscriptByTimeEnds(translated, spokenLineEnds(sourceText, sourceWords))
+	return applyWordFilterToSegments(segs, filter)
 }
 
 func estimateTranscriptDurationMS(text string) int {
@@ -2036,6 +2118,19 @@ func ChunkRawText(docType, content string) []ChunkSegment {
 // primarily provided so that tests can exercise the chunking logic directly.
 func ChunkTranscriptByTime(content string) []ChunkSegment {
 	raw := chunkTranscriptByTime(content)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkTranslatedTranscriptByTime is the exported counterpart of
+// chunkTranslatedTranscriptFiltered without a filter, exposed for tests in the
+// tests/ tree: a translated transcript chunked with the spoken ends of its
+// source lines (SPEC §8.6.2). With nil sourceWords it is ChunkTranscriptByTime.
+func ChunkTranslatedTranscriptByTime(translated, sourceText string, sourceWords []model.TimedWord) []ChunkSegment {
+	raw := chunkTranslatedTranscriptFiltered(translated, sourceText, sourceWords, nil)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))
