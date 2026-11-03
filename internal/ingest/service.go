@@ -6558,12 +6558,17 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// describe the spans that are actually stored.
 	segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
 
+	spanRule := ""
+	if s.translateEngine != "whisper" {
+		spanRule = translationSpanRuleSourceSpoken
+	}
 	meta := transcriptMeta{
 		Source:            translationSource,
 		Language:          targetLang,
 		SourceLanguage:    sourceLang,
 		TranslateProvider: s.translateProvider,
 		TranslateModel:    s.translateModel,
+		SpanRule:          spanRule,
 		Timestamps:        true,
 		// §8.6.9: a whisper-translate pass carries per-word timings onto the
 		// translated segments; the chat engine leaves them empty (segment-only).

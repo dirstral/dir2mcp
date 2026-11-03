@@ -55,4 +55,25 @@ func TestTranslatedSegmentsInheritSpokenEnds(t *testing.T) {
 	if len(segs) != 2 || segs[0].Span.EndMS != 1200 || segs[1].Span.StartMS != 60000 {
 		t.Fatalf("partial markers: got %+v", segs)
 	}
+
+	// The last line has no next marker, only a pace estimate; the source words
+	// say where it really ends, and a long final word must not be cut to the
+	// estimate.
+	longLast := []model.TimedWord{
+		{Word: "раз", StartMS: 0, EndMS: 500},
+		{Word: "четыре", StartMS: 60000, EndMS: 63000},
+	}
+	segs = ingest.ChunkTranslatedTranscriptByTime(translated, source, longLast)
+	if segs[2].Span.EndMS != 63000 {
+		t.Fatalf("last line: got end %d, want 63000", segs[2].Span.EndMS)
+	}
+
+	// A source word that runs past the next source marker is capped there, so
+	// a translated line never reaches into the next source line, even when the
+	// translation kept no marker for it.
+	overrun := []model.TimedWord{{Word: "раз", StartMS: 0, EndMS: 15000}}
+	segs = ingest.ChunkTranslatedTranscriptByTime(partial, source, overrun)
+	if segs[0].Span.EndMS != 10000 {
+		t.Fatalf("overrun capped at next source marker: got %d, want 10000", segs[0].Span.EndMS)
+	}
 }

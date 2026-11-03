@@ -1539,10 +1539,10 @@ func timeSpanIndexForWord(segs []chunkSegment, startMS int) int {
 }
 
 // lineEndResolver returns the end (ms) of a transcript line that starts at
-// startMS. nextMS is the end the chunker would assign on its own (the next
-// line's start, or a pace estimate for the last line); a resolver returns it
-// unchanged when it knows nothing better.
-type lineEndResolver func(startMS, nextMS int) int
+// startMS. nextMS is the end the chunker would assign on its own: the next
+// line's start when hasNext is true, else a pace estimate for the last line. A
+// resolver returns nextMS unchanged when it knows nothing better.
+type lineEndResolver func(startMS, nextMS int, hasNext bool) int
 
 func chunkTranscriptByTime(content string) []chunkSegment {
 	return chunkTranscriptByTimeEnds(content, nil)
@@ -1633,21 +1633,22 @@ func chunkTranscriptByTimeEnds(content string, endFor lineEndResolver) []chunkSe
 	out := make([]chunkSegment, 0, len(segments))
 	for i := range segments {
 		nextMS := segments[i].startMS + estimateTranscriptDurationMS(segments[i].text)
-		if i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS {
+		hasNext := i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS
+		if hasNext {
 			nextMS = segments[i+1].startMS
 		}
-		endMS := resolveLineEnd(endFor, segments[i].startMS, nextMS)
+		endMS := resolveLineEnd(endFor, segments[i].startMS, nextMS, hasNext)
 		out = append(out, splitTranscriptSegmentWithTiming(segments[i].text, segments[i].startMS, endMS)...)
 	}
 	return out
 }
 
 // resolveLineEnd applies an optional lineEndResolver to a line's chunker end.
-func resolveLineEnd(endFor lineEndResolver, startMS, nextMS int) int {
+func resolveLineEnd(endFor lineEndResolver, startMS, nextMS int, hasNext bool) int {
 	if endFor == nil {
 		return nextMS
 	}
-	return endFor(startMS, nextMS)
+	return endFor(startMS, nextMS, hasNext)
 }
 
 // spokenLineEnds derives, from a source transcript and its per-word timings,
@@ -1677,18 +1678,30 @@ func spokenLineEnds(sourceText string, words []model.TimedWord) lineEndResolver 
 	ends := make(map[int]int, len(starts))
 	for _, w := range words {
 		// The line a word belongs to is the last marker at or before the word's
-		// start; a word before the first marker belongs to no line.
+		// start; a word before the first marker belongs to no line. A word that
+		// runs past the next source marker is capped there, so a line's spoken
+		// end never crosses into the next source line even when the translation
+		// kept no marker for that line.
 		idx := sort.SearchInts(starts, w.StartMS+1) - 1
 		if idx < 0 {
 			continue
 		}
-		if w.EndMS > ends[starts[idx]] {
-			ends[starts[idx]] = w.EndMS
+		endMS := w.EndMS
+		if idx+1 < len(starts) && endMS > starts[idx+1] {
+			endMS = starts[idx+1]
+		}
+		if endMS > ends[starts[idx]] {
+			ends[starts[idx]] = endMS
 		}
 	}
-	return func(startMS, nextMS int) int {
+	return func(startMS, nextMS int, hasNext bool) int {
 		end, ok := ends[startMS]
-		if !ok || end <= startMS || end >= nextMS {
+		if !ok || end <= startMS {
+			return nextMS
+		}
+		// The next marker caps the span; the last line's pace estimate does not,
+		// because the source words are the better measure of where it ends.
+		if hasNext && end >= nextMS {
 			return nextMS
 		}
 		return end
