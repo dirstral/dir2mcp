@@ -76,3 +76,36 @@ func TestTranslatedTranscript_CarriesSpokenSourceEnds(t *testing.T) {
 		})
 	}
 }
+
+// A source with no word timings leaves the translation on the next-start rule,
+// and the meta must not claim otherwise: no span_rule marker, so the re-time
+// pass of a later version can tell these spans from spoken ones.
+func TestTranslatedTranscript_NoSourceWordsNoSpanRule(t *testing.T) {
+	t.Parallel()
+	st := &fakeIngestStore{}
+	svc := mustNewIngestService(t, config.Config{StateDir: testutil.TempDir(t)}, st)
+	svc.SetTranscriber(&fakeStructuredTranscriber{text: "[00:00] раз два\n[00:10] три"})
+	svc.SetTranslator(&fakeTranslator{}, "mistral", "m1", []string{"en"})
+	doc := model.Document{DocID: 92, RelPath: "audio/plain.mp3", DocType: "audio"}
+	if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, []byte("audio-no-words")); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i, rep := range st.reps {
+		if !strings.Contains(rep.MetaJSON, `"source":"translation"`) {
+			continue
+		}
+		found = true
+		if strings.Contains(rep.MetaJSON, "span_rule") {
+			t.Fatalf("translation of a wordless source must not carry span_rule: %s", rep.MetaJSON)
+		}
+		for k, ch := range st.chunks {
+			if ch.RepID == int64(i+1) && ch.ChunkID == 1 && st.spans[k].EndMS != 10000 {
+				t.Fatalf("first span should keep the next-start end 10000, got %d", st.spans[k].EndMS)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no translated representation stored")
+	}
+}

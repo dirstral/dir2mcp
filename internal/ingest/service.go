@@ -6558,8 +6558,12 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// describe the spans that are actually stored.
 	segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
 
+	// The marker says the stored spans ARE the spoken spans of the source
+	// lines. Without source word timings the chunker fell back to the next-start
+	// rule, so the marker stays off and a later re-time pass (which needs the
+	// words too) sees the representation as not yet timed.
 	spanRule := ""
-	if s.translateEngine != "whisper" {
+	if s.translateEngine != "whisper" && len(sourceWords) > 0 {
 		spanRule = translationSpanRuleSourceSpoken
 	}
 	meta := transcriptMeta{
