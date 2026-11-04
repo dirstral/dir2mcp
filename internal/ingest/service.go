@@ -3045,7 +3045,7 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 // track through the ordinary transcript path; an empty result is a no-op.
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
 	tc.noFallbackRetry = true
-	transcriptText, _, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, words, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return err
 	}
@@ -3053,7 +3053,7 @@ func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Docu
 	if transcriptText == "" {
 		return nil
 	}
-	return s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS, tc.audioIndex)
+	return s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, words, duration, trimOffsetMS, tc.audioIndex)
 }
 
 // readDocumentContent reads an asset's bytes through the corpus filesystem,
@@ -5984,7 +5984,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	if s.activePass == passTranscription {
 		return true, false, "", nil
 	}
-	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS, tc.audioIndex); err != nil {
+	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, words, duration, trimOffsetMS, tc.audioIndex); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
 		s.addErrors(1)
 		// §8.6.11/§14.4: record the canonical translation-failure code
@@ -6422,7 +6422,7 @@ func (s *Service) applyDiarization(ctx context.Context, doc model.Document, cont
 // quality gate; and records source_language + translate provider/model in meta_json.
 // track is the 0-based audio-relative index of the transcript being translated (0
 // for the bare/default transcript).
-func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, duration time.Duration, trimOffsetMS, track int) error {
+func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc model.Document, content []byte, sourceText string, sourceWords []model.TimedWord, duration time.Duration, trimOffsetMS, track int) error {
 	if !s.translationConfigured() {
 		return nil
 	}
@@ -6434,7 +6434,7 @@ func (s *Service) translateTranscriptRepresentations(ctx context.Context, doc mo
 			// Skip a no-op translation into the source language itself.
 			continue
 		}
-		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceLang, lang, duration, trimOffsetMS, track); err != nil {
+		if err := s.translateOneTranscript(ctx, doc, content, sourceText, sourceWords, sourceLang, lang, duration, trimOffsetMS, track); err != nil {
 			// Best-effort per language: a failure on one target must not suppress
 			// the remaining targets. Log here and keep going; the first error is
 			// returned so the caller can log/count it (non-fatally).
@@ -6476,7 +6476,7 @@ func sameLanguage(a, b string) bool {
 // is cached per-language (TranscriptLangSuffix) keyed by the SOURCE content hash
 // so re-ingesting an unchanged document reuses the cached translation instead of
 // re-calling the chat provider.
-func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText, sourceLang, targetLang string, duration time.Duration, trimOffsetMS, track int) error {
+func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document, content []byte, sourceText string, sourceWords []model.TimedWord, sourceLang, targetLang string, duration time.Duration, trimOffsetMS, track int) error {
 	// Source the English text either from the chat generator (line-by-line over
 	// the source transcript) or, for engine=whisper, from Whisper's native
 	// translate task (a second pass over the audio that re-segments with its own
@@ -6520,13 +6520,21 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		Duration:         duration,
 	})
 
-	// Chunk the translated text with the same word-aware transcript chunker as the
-	// source path so its time spans line up with the source segments (the
-	// translation preserves each segment's verbatim [mm:ss] marker) AND carry the
-	// whisper-translate per-word timings, enabling broadcast segmentation of the
-	// English track. translatedWords is nil for the chat engine, leaving that path
-	// chunk-only as before.
-	segments := chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
+	// Chunk the translated text so its time spans line up with the source
+	// segments. The chat engine preserves each source line's verbatim [mm:ss]
+	// marker and yields no word timings, so each translated line takes the SPOKEN
+	// span of the source line with that marker (SPEC §8.6.2): the next-start rule
+	// alone would hand the silence after a source cue to its translation, and
+	// broadcast re-segmentation would then spread the translated words across
+	// that silence, one word per cue. The whisper engine re-segments the audio
+	// with timings of its own and carries per-word timings, so it keeps the
+	// word-aware chunker as before.
+	var segments []chunkSegment
+	if s.translateEngine == "whisper" {
+		segments = chunkTranscriptByTimeWithWordsFiltered(translated, translatedWords, s.captionWordFilter())
+	} else {
+		segments = chunkTranslatedTranscriptFiltered(translated, sourceText, sourceWords, s.captionWordFilter())
+	}
 	// Apply the configured subtitle cue cleaning to the translated chunk text
 	// before embedding (issues #545, #765), consistent with the source transcript
 	// path.
@@ -6550,12 +6558,21 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	// describe the spans that are actually stored.
 	segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
 
+	// The marker says the stored spans ARE the spoken spans of the source
+	// lines. Without source word timings the chunker fell back to the next-start
+	// rule, so the marker stays off and a later re-time pass (which needs the
+	// words too) sees the representation as not yet timed.
+	spanRule := ""
+	if s.translateEngine != "whisper" && len(sourceWords) > 0 {
+		spanRule = translationSpanRuleSourceSpoken
+	}
 	meta := transcriptMeta{
 		Source:            translationSource,
 		Language:          targetLang,
 		SourceLanguage:    sourceLang,
 		TranslateProvider: s.translateProvider,
 		TranslateModel:    s.translateModel,
+		SpanRule:          spanRule,
 		Timestamps:        true,
 		// §8.6.9: a whisper-translate pass carries per-word timings onto the
 		// translated segments; the chat engine leaves them empty (segment-only).

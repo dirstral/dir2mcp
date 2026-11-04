@@ -36,6 +36,11 @@ const sttSource = "stt"
 // derivation identity and IS screened by the output quality gate.
 const translationSource = "translation"
 
+// translationSpanRuleSourceSpoken is the meta_json span_rule value of a
+// chat-engine translation whose segments carry the spoken span of their source
+// lines (SPEC §8.6.2).
+const translationSpanRuleSourceSpoken = "source-spoken"
+
 // language_source values for transcriptMeta.LanguageSource (SPEC §5.2/§8.8).
 // They record which signal won the §8.8 precedence (configured > declared >
 // detected) for a representation's effective language.
@@ -133,6 +138,11 @@ type transcriptMeta struct {
 	SourceLanguage    string `json:"source_language,omitempty"`
 	TranslateProvider string `json:"translate_provider,omitempty"`
 	TranslateModel    string `json:"translate_model,omitempty"`
+	// SpanRule records that a chat-engine translation's segments carry the
+	// spoken span of their source lines (SPEC §8.6.2, "source-spoken"). A stored
+	// translation without it carries the older next-start spans. Omitted on
+	// every other transcript.
+	SpanRule string `json:"span_rule,omitempty"`
 
 	// Diarized / DiarizeProvider / DiarizeModel / Speakers record speaker
 	// attribution on a diarized transcript (Source any; spec §8.6.8/§5.2).
