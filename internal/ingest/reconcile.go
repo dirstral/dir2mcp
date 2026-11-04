@@ -135,6 +135,7 @@ type pipelineOutputIdentityStore interface {
 func (s *Service) beginOutputReconciliation(ctx context.Context, forceReindex bool) {
 	s.reconcileOutputs = false
 	s.pendingOutputIdentity = ""
+	s.reconcileIncomplete = false
 	if _, ok := s.store.(activeRepresentationLister); !ok {
 		return
 	}
@@ -188,6 +189,14 @@ func (s *Service) commitOutputReconciliation(ctx context.Context) {
 		// the read failed), so it has nothing it is entitled to record.
 		return
 	}
+	if s.reconcileIncomplete {
+		// A per-document step failed. Recording the identity now would mark the
+		// pass as done and no later scan would retry the failed step; leaving it
+		// unrecorded costs one more armed pass.
+		s.getLogger().Printf("output reconciliation: a per-document step failed this scan; the pipeline output identity stays unrecorded so the next scan retries")
+		s.pendingOutputIdentity = ""
+		return
+	}
 	identityStore, ok := s.store.(pipelineOutputIdentityStore)
 	if !ok {
 		return
@@ -233,6 +242,7 @@ func (s *Service) reconcileDocumentOutputs(ctx context.Context, relPath string) 
 		retired, err := retirer.SoftDeleteRepresentations(ctx, relPath, obsolete)
 		if err != nil {
 			s.getLogger().Printf("output reconciliation: retire representations for %s failed: %v", relPath, err)
+			s.reconcileIncomplete = true
 			return
 		}
 		if retired > 0 {

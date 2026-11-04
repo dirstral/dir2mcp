@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -319,6 +320,62 @@ func TestRetime_SourceWithoutWordsRecordsOnlyTheMarker(t *testing.T) {
 	}
 	if !strings.Contains(repMetaJSON(t, st, "talk.mp3", enRepID), `"span_rule":"source-spoken"`) {
 		t.Fatalf("marker lost: %s", repMetaJSON(t, st, "talk.mp3", enRepID))
+	}
+}
+
+// failingRetimeStore is the real store with one failing re-time write: the
+// scan must then leave the pipeline output identity unrecorded, so the next
+// scan arms the pass again and retries the representation.
+type failingRetimeStore struct {
+	*store.SQLiteStore
+	failures int
+}
+
+func (f *failingRetimeStore) RetimeRepresentation(ctx context.Context, repID int64, metaJSON string, updates []store.ChunkSpanUpdate) error {
+	if f.failures > 0 {
+		f.failures--
+		return errors.New("injected re-time failure")
+	}
+	return f.SQLiteStore.RetimeRepresentation(ctx, repID, metaJSON, updates)
+}
+
+func TestRetime_FailedWriteLeavesTheIdentityUnrecordedSoTheNextScanRetries(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
+	st := newRealStore(t)
+	ctx := context.Background()
+	cfg := translateConfig(root, stateDir, "en")
+
+	if err := retimingService(t, cfg, st, wordedTranscriber()).Run(ctx); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	enRepID := repIDForType(t, st, "talk.mp3", ingest.TranscriptRepType("en"))
+	ageTranslation(t, st, "talk.mp3", enRepID, nil)
+
+	failing := &failingRetimeStore{SQLiteStore: st, failures: 1}
+	if err := retimingService(t, cfg, failing, wordedTranscriber()).Run(ctx); err != nil {
+		t.Fatalf("scan with the failing write: %v", err)
+	}
+	if spans := translatedSpans(t, st, enRepID); spans[0].EndMS != 10000 {
+		t.Fatalf("spans changed although the write failed: %+v", spans)
+	}
+	if recorded, err := st.PipelineOutputIdentity(ctx); err != nil || recorded != "translate=on:en|summary=off" {
+		t.Fatalf("identity after the failed scan = %q (err %v), want the pre-rule value kept so the next scan retries", recorded, err)
+	}
+
+	if err := retimingService(t, cfg, st, wordedTranscriber()).Run(ctx); err != nil {
+		t.Fatalf("retry scan: %v", err)
+	}
+	if spans := translatedSpans(t, st, enRepID); spans[0].EndMS != 1200 {
+		t.Fatalf("retry scan did not re-time: %+v", spans)
+	}
+	if !strings.Contains(repMetaJSON(t, st, "talk.mp3", enRepID), `"span_rule":"source-spoken"`) {
+		t.Fatalf("retry scan did not record the marker")
+	}
+	if recorded, err := st.PipelineOutputIdentity(ctx); err != nil || recorded == "translate=on:en|summary=off" {
+		t.Fatalf("identity after the retry = %q (err %v), want the current value recorded", recorded, err)
 	}
 }
 

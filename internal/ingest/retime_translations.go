@@ -96,9 +96,12 @@ func (s *Service) retimeOneTranslation(ctx context.Context, retimer translationR
 		s.getLogger().Printf("translation re-time: %s %s has no live %s source transcript; left as stored (#1133)", relPath, rep.RepType, sourceRepType)
 		return
 	}
+	// Every failure below marks the scan incomplete, so the identity stays
+	// unrecorded and the next scan retries this representation.
 	sourceChunks, err := retimer.ChunkTimeSpans(ctx, sourceRepID)
 	if err != nil {
 		s.getLogger().Printf("translation re-time: read source spans for %s %s failed: %v", relPath, rep.RepType, err)
+		s.reconcileIncomplete = true
 		return
 	}
 	words := timedWordsOfChunks(sourceChunks)
@@ -107,6 +110,7 @@ func (s *Service) retimeOneTranslation(ctx context.Context, retimer translationR
 		chunks, err := retimer.ChunkTimeSpans(ctx, rep.RepID)
 		if err != nil {
 			s.getLogger().Printf("translation re-time: read spans for %s %s failed: %v", relPath, rep.RepType, err)
+			s.reconcileIncomplete = true
 			return
 		}
 		updates = retimeTranslatedChunks(chunks, words)
@@ -115,10 +119,12 @@ func (s *Service) retimeOneTranslation(ctx context.Context, retimer translationR
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		s.getLogger().Printf("translation re-time: marshal meta for %s %s failed: %v", relPath, rep.RepType, err)
+		s.reconcileIncomplete = true
 		return
 	}
 	if err := retimer.RetimeRepresentation(ctx, rep.RepID, string(metaJSON), updates); err != nil {
 		s.getLogger().Printf("translation re-time: write %s %s failed: %v", relPath, rep.RepType, err)
+		s.reconcileIncomplete = true
 		return
 	}
 	s.getLogger().Printf("translation re-time: %s %s now carries the spoken spans of its source lines (%d chunk spans moved from %d source words) (#1133)",
@@ -207,7 +213,7 @@ func retimeMergedWindow(span model.Span, words []model.TimedWord, last bool) (mo
 	end := span.StartMS
 	for k := range cues {
 		cueEnd := cues[k].T + cues[k].D
-		capped := !(last && k == len(cues)-1)
+		capped := !last || k != len(cues)-1
 		if spoken, ok := spokenEndInWindow(words, cues[k].T, cueEnd, capped); ok && spoken > cues[k].T && spoken != cueEnd {
 			cues[k].D = spoken - cues[k].T
 			cueEnd = spoken

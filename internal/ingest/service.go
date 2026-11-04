@@ -515,6 +515,12 @@ type Service struct {
 	// nothing and leaves the comparison to the next run.
 	pendingOutputIdentity string
 
+	// reconcileIncomplete is set when a per-document reconcile step failed in
+	// this scan (a retirement, or a translation re-time read or write, #1133).
+	// The scan then leaves the pipeline output identity unrecorded, so the next
+	// scan compares again and retries the step instead of never looking again.
+	reconcileIncomplete bool
+
 	// deferGateDocError suppresses the EAGER per-document status=error marking that
 	// the output quality gate normally applies (recordQualityGateDocError), scoping a
 	// gate rejection to the failing TRACK instead of the whole document (SPEC
