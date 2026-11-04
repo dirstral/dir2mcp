@@ -69,8 +69,14 @@ func (s *Service) pipelineOutputIdentity() string {
 	if s.cfg.HierarchicalDocumentLevelEnabled() {
 		summary = "on"
 	}
-	return fmt.Sprintf("translate=%s:%s|summary=%s",
-		translate, strings.Join(normalizedLanguageList(s.cfg.MediaTranslateTargetLangs), ","), summary)
+	// translation_spans names the span rule a stored chat-engine translation
+	// must carry (SPEC §8.6.2). It is constant, so it changes the fingerprint
+	// exactly once, on the first scan after the rule arrived: that scan arms the
+	// pass that re-times every stored translation (#1133), and every later scan
+	// finds the fingerprint recorded.
+	return fmt.Sprintf("translate=%s:%s|summary=%s|translation_spans=%s",
+		translate, strings.Join(normalizedLanguageList(s.cfg.MediaTranslateTargetLangs), ","), summary,
+		translationSpanRuleSourceSpoken)
 }
 
 // normalizedLanguageList lower-cases, trims, de-duplicates and sorts a language
@@ -222,18 +228,26 @@ func (s *Service) reconcileDocumentOutputs(ctx context.Context, relPath string) 
 		return
 	}
 	obsolete := s.obsoleteRepresentations(reps)
-	if len(obsolete) == 0 {
-		return
+	retiredSet := make(map[int64]struct{}, len(obsolete))
+	if len(obsolete) > 0 {
+		retired, err := retirer.SoftDeleteRepresentations(ctx, relPath, obsolete)
+		if err != nil {
+			s.getLogger().Printf("output reconciliation: retire representations for %s failed: %v", relPath, err)
+			return
+		}
+		if retired > 0 {
+			s.getLogger().Printf("output reconciliation: retired %d representation(s) for %s that the current pipeline no longer produces (#692)",
+				retired, relPath)
+		}
+		for _, id := range obsolete {
+			retiredSet[id] = struct{}{}
+		}
 	}
-	retired, err := retirer.SoftDeleteRepresentations(ctx, relPath, obsolete)
-	if err != nil {
-		s.getLogger().Printf("output reconciliation: retire representations for %s failed: %v", relPath, err)
-		return
-	}
-	if retired > 0 {
-		s.getLogger().Printf("output reconciliation: retired %d representation(s) for %s that the current pipeline no longer produces (#692)",
-			retired, relPath)
-	}
+	// The same armed pass re-times the stored chat-engine translations that
+	// still carry the older spans (SPEC §8.6.2, #1133). It runs after the
+	// retirement so a translation the operator stopped asking for is never
+	// re-timed first and tombstoned next.
+	s.retimeStoredTranslations(ctx, relPath, reps, retiredSet)
 }
 
 // obsoleteRepresentations selects, from a document's active representations, the

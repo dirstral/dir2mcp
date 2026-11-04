@@ -2946,6 +2946,11 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	s.recordContentHash(doc.ContentHash)
 
 	derived := s.deriveDocumentTranslations(ctx, f, doc)
+	// The translations just derived are the last outputs of this document for
+	// the run, so the output reconciliation runs here as it runs after the
+	// generation pass in single-pass mode (#692, #1133): the transcription pass
+	// reconciled before they existed. Same observable result as single-pass.
+	s.reconcileDocumentOutputs(ctx, doc.RelPath)
 	// §8.6.14: the derivation pass is the point where every transcript of the
 	// document for this run exists (source from the transcription pass,
 	// translations just above), so this is where write-back runs under two-phase.
