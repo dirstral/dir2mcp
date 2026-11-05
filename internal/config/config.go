@@ -2577,7 +2577,7 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	for scanner.Scan() {
 		rawLine := scanner.Text()
 		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
-		line := strings.TrimSpace(rawLine)
+		line := strings.TrimSpace(stripYAMLComment(rawLine))
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") {
 			continue
 		}
@@ -3567,7 +3567,7 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 		lineNo++
 		rawLine := scanner.Text()
 		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
-		line := strings.TrimSpace(rawLine)
+		line := strings.TrimSpace(stripYAMLComment(rawLine))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -4917,6 +4917,59 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 
 // unquoteYAMLScalar trims value and strips matching single/double
 // quotes (interpreting escapes in double-quoted form).
+// stripYAMLComment removes a YAML comment from line (#1142). As in YAML, a `#`
+// starts a comment when it opens the line or follows a space or tab, and it is
+// outside a quoted scalar. So `key: value  # note` reads as `key: value`, while
+// `url: http://host/#frag` and `key: "a # b"` keep their `#`. A quote opens a
+// quoted scalar only where a scalar starts (line start, or after `:`, `-`, `[`,
+// `{` or `,`), so the apostrophe in `name: it's  # note` does not hide the
+// comment. Inside double quotes a backslash escapes the next character; inside
+// single quotes `”` is an escaped quote and does not close the scalar.
+func stripYAMLComment(line string) string {
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if (c == '"' || c == '\'') && scalarStartsAt(line, i) {
+			i = quotedScalarEnd(line, i)
+			continue
+		}
+		if c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			return strings.TrimRight(line[:i], " \t")
+		}
+	}
+	return line
+}
+
+// quotedScalarEnd returns the index of the quote that closes the quoted scalar
+// opened at line[start], or len(line) when the scalar is not closed. Inside
+// double quotes a backslash escapes the next character; inside single quotes
+// `”` is an escaped quote.
+func quotedScalarEnd(line string, start int) int {
+	q := line[start]
+	for i := start + 1; i < len(line); i++ {
+		switch {
+		case q == '"' && line[i] == '\\':
+			i++
+		case line[i] != q:
+		case q == '\'' && i+1 < len(line) && line[i+1] == '\'':
+			i++
+		default:
+			return i
+		}
+	}
+	return len(line)
+}
+
+// scalarStartsAt reports whether a scalar can start at line[i]: the line holds
+// only whitespace before it, or its last non-blank character before i is one of
+// `:`, `-`, `[`, `{` or `,`.
+func scalarStartsAt(line string, i int) bool {
+	prev := strings.TrimRight(line[:i], " \t")
+	if prev == "" {
+		return true
+	}
+	return strings.ContainsRune(":-[{,", rune(prev[len(prev)-1]))
+}
+
 func unquoteYAMLScalar(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 {
