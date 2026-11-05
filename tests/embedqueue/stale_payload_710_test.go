@@ -105,7 +105,7 @@ func TestStaleJob_AxisChangeIsNotEmbeddedThroughTheOldAxis(t *testing.T) {
 		t.Fatalf("re-enqueued %d jobs for the updated chunk, want 1", n)
 	}
 	if !runWorkerUntilOrTimeout(t, twoAxisWorker(corpus, broker, textEmbedder, codeEmbedder),
-		3*time.Second, func() bool { return len(textEmbedder.texts()) > 0 }) {
+		workerWaitTimeout, func() bool { return len(textEmbedder.texts()) > 0 }) {
 		t.Fatal("the chunk's current text-axis form was never embedded")
 	}
 	if got := codeEmbedder.texts(); len(got) != 0 {
@@ -175,7 +175,7 @@ func TestStaleJob_UnchangedChunkStillEmbeds(t *testing.T) {
 	textEmbedder := &recordingEmbedder{corpus: corpus}
 	codeEmbedder := &recordingEmbedder{corpus: corpus}
 	if !runWorkerUntilOrTimeout(t, twoAxisWorker(corpus, broker, textEmbedder, codeEmbedder),
-		3*time.Second, func() bool { return len(textEmbedder.texts()) > 0 }) {
+		workerWaitTimeout, func() bool { return len(textEmbedder.texts()) > 0 }) {
 		t.Fatal("an unchanged chunk was never embedded")
 	}
 	if got := textEmbedder.texts(); len(got) != 1 || got[0] != "unchanged text" {
@@ -210,7 +210,7 @@ func TestStaleJob_JobWithoutPayloadIdentityStillEmbeds(t *testing.T) {
 	textEmbedder := &recordingEmbedder{corpus: corpus}
 	codeEmbedder := &recordingEmbedder{corpus: corpus}
 	if !runWorkerUntilOrTimeout(t, twoAxisWorker(corpus, broker, textEmbedder, codeEmbedder),
-		3*time.Second, func() bool { return len(textEmbedder.texts()) > 0 }) {
+		workerWaitTimeout, func() bool { return len(textEmbedder.texts()) > 0 }) {
 		t.Fatal("a job carrying no payload identity was never executed; an unknown hash must not read as stale")
 	}
 }
