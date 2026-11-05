@@ -515,6 +515,12 @@ type Service struct {
 	// nothing and leaves the comparison to the next run.
 	pendingOutputIdentity string
 
+	// reconcileIncomplete is set when a per-document reconcile step failed in
+	// this scan (a retirement, or a translation re-time read or write, #1133).
+	// The scan then leaves the pipeline output identity unrecorded, so the next
+	// scan compares again and retries the step instead of never looking again.
+	reconcileIncomplete bool
+
 	// deferGateDocError suppresses the EAGER per-document status=error marking that
 	// the output quality gate normally applies (recordQualityGateDocError), scoping a
 	// gate rejection to the failing TRACK instead of the whole document (SPEC
@@ -2946,6 +2952,11 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	s.recordContentHash(doc.ContentHash)
 
 	derived := s.deriveDocumentTranslations(ctx, f, doc)
+	// The translations just derived are the last outputs of this document for
+	// the run, so the output reconciliation runs here as it runs after the
+	// generation pass in single-pass mode (#692, #1133): the transcription pass
+	// reconciled before they existed. Same observable result as single-pass.
+	s.reconcileDocumentOutputs(ctx, doc.RelPath)
 	// §8.6.14: the derivation pass is the point where every transcript of the
 	// document for this run exists (source from the transcription pass,
 	// translations just above), so this is where write-back runs under two-phase.
