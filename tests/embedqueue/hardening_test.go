@@ -181,7 +181,7 @@ func TestRunCoordinator_StallSignal(t *testing.T) {
 		if consecutive < 3 {
 			t.Fatalf("OnStall consecutive = %d, want >= 3 (StallThreshold)", consecutive)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(workerWaitTimeout):
 		t.Fatal("OnStall never fired on a sustained enqueue failure")
 	}
 

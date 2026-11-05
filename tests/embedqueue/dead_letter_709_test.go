@@ -188,7 +188,7 @@ func TestDeadLetter_TransientFailureStillGetsItsRetries(t *testing.T) {
 		Logger:        discardLogger(),
 	}
 
-	if !runWorkerUntilOrTimeout(t, worker, 3*time.Second, func() bool {
+	if !runWorkerUntilOrTimeout(t, worker, workerWaitTimeout, func() bool {
 		return len(embedder.texts()) > 0
 	}) {
 		t.Fatal("a chunk that failed twice transiently was never retried to success")
