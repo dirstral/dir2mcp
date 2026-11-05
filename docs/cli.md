@@ -11,7 +11,7 @@
 | `search "<query>"` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `open-file <rel-path>` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
 | `list-files` | Legacy compatibility shim; prefer `dirstral-cli` for client UX |
-| `reindex` | Force full re-ingestion. `--embeddings-only` instead retries just the chunks that failed to embed (see [Recovering from a failed embed run](#recovering-from-a-failed-embed-run)). `--redecode-language-windows` decodes again only the transcript windows stored in another language than the recording's (see `media.stt.redecode_below` in [configuration](configuration.md)) |
+| `reindex` | Force full re-ingestion. `--embeddings-only` instead retries just the chunks that failed to embed (see [Recovering from a failed embed run](#recovering-from-a-failed-embed-run)). `--redecode-language-windows` decodes again only the transcript windows stored in another language than the recording's, and only after a short probe of the window, with no language hint, reports the recording's language (see `media.stt.redecode_below` in [configuration](configuration.md)) |
 | `embed-worker` | Run a standalone distributed embed worker (no MCP serving; requires a Tier-C store + broker) |
 | `export` | Render a transcript as VTT/SRT/TTML subtitles (`export --format vtt\|srt\|ttml <path>`) |
 | `bridge` | Run helper adapters (for example the ElevenLabs webhook bridge) |

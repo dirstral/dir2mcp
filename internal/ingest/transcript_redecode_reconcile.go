@@ -2,12 +2,14 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/provider"
 )
 
 // This file implements the §8.6.13 reconcile pass of spec 0.88.0 (dir2mcp
@@ -18,8 +20,13 @@ import (
 //
 // A stored transcript keeps no per-window decoder report, so the candidates
 // come from the stored text alone: the §8.8 detector runs on the segments of
-// each window core, against the item language. Only the windows whose text
-// the detector assigns to another language, at or above the §8.8 floor, are
+// each window core, against the item language. A window whose text the
+// detector assigns to another language, at or above the §8.8 floor, is only
+// a suspect: the text cannot tell a window the decoder wrote in the wrong
+// language from a passage that is in another language. So the pass first
+// probes the window (spec 0.89.0): it decodes one centred slice of at most
+// media.stt.language_probe_sec with no language hint. Only a window whose
+// probe reports the item language at or above media.stt.redecode_below is
 // decoded again, with the item language as the request language.
 
 // SetReconcileLanguageWindows arms or disarms the §8.6.13 reconcile pass for
@@ -65,7 +72,7 @@ func (s *Service) reconcileStoredRedecode(ctx context.Context, doc model.Documen
 	segs := windowSegments(model.TranscriptResult{Text: hit.text, Words: hit.words}, 0, 0)
 	cands := s.reconcileCandidates(rp, segs, itemLang)
 	if len(cands) == 0 {
-		return s.publishReconciled(doc, paths, hit, hit.text, hit.words, nil)
+		return s.publishReconciled(doc, paths, hit, hit.text, hit.words, nil, true)
 	}
 	return s.redecodeStoredWindows(ctx, doc, content, paths, hit, segs, cands, itemLang)
 }
@@ -114,9 +121,10 @@ func coreText(segs []mergedSegment, core CoverageRange) string {
 	return b.String()
 }
 
-// redecodeStoredWindows stages the audio, decodes each candidate window again
-// with the item language, splices the kept decodes into the stored segments,
-// and publishes the result with its record.
+// redecodeStoredWindows stages the audio, probes each suspect window, decodes
+// again with the item language each window the probe confirms, splices the
+// kept decodes into the stored segments, and publishes the result with its
+// record.
 func (s *Service) redecodeStoredWindows(ctx context.Context, doc model.Document, content []byte, paths transcriptCachePaths, hit cachedTranscript, segs []mergedSegment, cands []reconcileWindow, itemLang string) cachedTranscript {
 	hinted, ok := model.TranscriberForLanguage(s.transcriber, itemLang)
 	if !ok {
@@ -134,31 +142,84 @@ func (s *Service) redecodeStoredWindows(ctx context.Context, doc model.Document,
 		return hit
 	}
 	defer cleanup()
-	plan := windowSchedule{capBytes: sttPayloadCapBytes(s.transcriber), label: "transcription"}
-	var record []model.RedecodedWindow
-	anyKept := false
+	run := reconcileRun{segs: segs}
 	for _, w := range cands {
-		second, kept := s.redecodeWindow(ctx, relPath, tmpPath, hinted, plan, windowReport{span: w.extent})
-		if kept {
-			segs, anyKept = spliceCore(segs, second, w.core), true
-		}
-		s.getLogger().Printf("reconcile %s: window [%d,%d]ms reads as %q at confidence %.2f; decoded again as %q, replaced=%v (SPEC §8.6.13)",
-			doc.RelPath, w.extent.StartMS, w.extent.EndMS, w.lang, w.conf, itemLang, kept)
-		record = append(record, model.RedecodedWindow{
-			StartMS: w.extent.StartMS, EndMS: w.extent.EndMS,
-			FirstLanguage: w.lang, FirstConfidence: w.conf,
-			Language: itemLang, Replaced: kept,
-		})
+		s.reconcileOneWindow(ctx, doc, relPath, tmpPath, hinted, w, itemLang, &run)
 	}
 	if ctx.Err() != nil {
 		return hit
 	}
-	if !anyKept {
-		// No second decode was kept, so the stored text stands byte for byte.
-		return s.publishReconciled(doc, paths, hit, hit.text, hit.words, record)
+	text, words := hit.text, hit.words
+	if run.anyKept {
+		text, words = renderSegments(run.segs)
 	}
-	text, words := renderSegments(segs)
-	return s.publishReconciled(doc, paths, hit, text, words, record)
+	// A probe that failed leaves its window unchecked, so the transcript gets
+	// no redecode_rule and the next armed run checks that window again.
+	return s.publishReconciled(doc, paths, hit, text, words, run.record, !run.probeFailed)
+}
+
+// reconcileRun is the state of the reconcile pass over one transcript: the
+// segments as spliced so far, the record of the windows decoded again, whether
+// any second decode was kept, and whether any probe failed.
+type reconcileRun struct {
+	segs        []mergedSegment
+	record      []model.RedecodedWindow
+	anyKept     bool
+	probeFailed bool
+}
+
+// reconcileOneWindow probes one suspect window and, when the probe confirms
+// the item language, decodes it again with that language and splices a kept
+// decode in. A stored transcript keeps no per-window decoder report, so every
+// window this pass decodes again was probed, and its record names the probe
+// result in first_language and first_confidence (SPEC §8.6.13, 0.89.0). The
+// live rule of transcript_redecode.go records the decoder report instead.
+func (s *Service) reconcileOneWindow(ctx context.Context, doc model.Document, relPath, tmpPath string, hinted model.Transcriber, w reconcileWindow, itemLang string, run *reconcileRun) {
+	lang, conf, err := s.probeWindow(ctx, relPath, tmpPath, w.extent)
+	if err != nil {
+		run.probeFailed = true
+		s.getLogger().Printf("reconcile %s: window [%d,%d]ms reads as %q; the language probe failed (%v); left as recorded (SPEC §8.6.13)",
+			doc.RelPath, w.extent.StartMS, w.extent.EndMS, w.lang, err)
+		return
+	}
+	below := s.cfg.MediaSTTRedecodeBelow
+	if lang != itemLang || conf < below {
+		s.getLogger().Printf("reconcile %s: window [%d,%d]ms reads as %q; the language probe reports %q at confidence %.2f, not %q at media.stt.redecode_below=%v or above; left as recorded (SPEC §8.6.13)",
+			doc.RelPath, w.extent.StartMS, w.extent.EndMS, w.lang, lang, conf, itemLang, below)
+		return
+	}
+	plan := windowSchedule{capBytes: sttPayloadCapBytes(s.transcriber), label: "transcription"}
+	second, kept := s.redecodeWindow(ctx, relPath, tmpPath, hinted, plan, windowReport{span: w.extent})
+	if kept {
+		run.segs, run.anyKept = spliceCore(run.segs, second, w.core), true
+	}
+	s.getLogger().Printf("reconcile %s: window [%d,%d]ms reads as %q; the language probe reports %q at confidence %.2f; decoded again as %q, replaced=%v (SPEC §8.6.13)",
+		doc.RelPath, w.extent.StartMS, w.extent.EndMS, w.lang, lang, conf, itemLang, kept)
+	run.record = append(run.record, model.RedecodedWindow{
+		StartMS: w.extent.StartMS, EndMS: w.extent.EndMS,
+		FirstLanguage: lang, FirstConfidence: conf,
+		Language: itemLang, Replaced: kept,
+	})
+}
+
+// probeWindow decodes, with no language hint, the probe slice centred in the
+// window extent (probeSpan, the slice the §8.2.4 identifier also cuts) and
+// returns the language and the confidence the decoder reported for it. A
+// confidence of 0 means none was reported.
+func (s *Service) probeWindow(ctx context.Context, relPath, tmpPath string, extent CoverageRange) (string, float64, error) {
+	span := s.probeSpan(extent)
+	data, err := s.extractMediaSegment(ctx, tmpPath, span.StartMS, span.EndMS)
+	if err != nil {
+		return "", 0, err
+	}
+	if len(data) == 0 {
+		return "", 0, errors.New("the probe slice is empty")
+	}
+	res, err := s.transcribeResult(ctx, model.TranscriberForAudioDuration(s.transcriber, span.EndMS-span.StartMS), relPath, data)
+	if err != nil {
+		return "", 0, err
+	}
+	return provider.PrimarySubtag(res.Language), res.LanguageConfidence, nil
 }
 
 // spliceCore replaces the stored segments that start inside core with the
@@ -192,12 +253,19 @@ func spliceCore(segs []mergedSegment, second []TranscriptWindow, core CoverageRa
 
 // publishReconciled stamps the record on a copy of the hit and writes the
 // cache entry: the whole entry when the text changed, the coverage sidecar
-// only otherwise. A write that fails still serves the checked transcript; the
-// next armed run checks it again.
-func (s *Service) publishReconciled(doc model.Document, paths transcriptCachePaths, hit cachedTranscript, text string, words []model.TimedWord, record []model.RedecodedWindow) cachedTranscript {
+// only otherwise. mark records redecode_rule, so the next armed run skips the
+// transcript; without it and with nothing to record, the hit is served as it
+// is. A write that fails still serves the checked transcript; the next armed
+// run checks it again.
+func (s *Service) publishReconciled(doc model.Document, paths transcriptCachePaths, hit cachedTranscript, text string, words []model.TimedWord, record []model.RedecodedWindow, mark bool) cachedTranscript {
+	if !mark && len(record) == 0 {
+		return hit
+	}
 	out := hit
 	out.coverage = copyCoverage(hit.coverage)
-	out.coverage.RedecodeRule = model.RedecodeRuleLowConfidence
+	if mark {
+		out.coverage.RedecodeRule = model.RedecodeRuleLowConfidence
+	}
 	out.coverage.RedecodedWindows = record
 	if text == hit.text {
 		s.publishCachedCoverage(paths.coverage, out.coverage)

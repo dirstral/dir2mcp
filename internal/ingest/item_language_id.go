@@ -97,6 +97,20 @@ func (s *Service) transcribeItemRouted(ctx context.Context, relPath string, cont
 	return text, words, cov, rec, derr
 }
 
+// probeSpan is the language probe slice of a span: at most
+// media.stt.language_probe_sec, centred in the span. It is the whole span when
+// the span is not longer than the probe, or when the probe length is not set.
+// It depends only on the span, so it is deterministic. The §8.2.4 identifier
+// and the §8.6.13 reconcile probe both cut it.
+func (s *Service) probeSpan(span CoverageRange) CoverageRange {
+	probeMS := s.cfg.MediaSTTLanguageProbeSec * 1000
+	if probeMS <= 0 || span.EndMS-span.StartMS <= probeMS {
+		return span
+	}
+	mid := span.StartMS + (span.EndMS-span.StartMS)/2
+	return CoverageRange{StartMS: mid - probeMS/2, EndMS: mid + probeMS/2}
+}
+
 // identifyItem asks the §8.2.3 identifier for the item's language on a probe:
 // a centred slice of at most media.stt.language_probe_sec when the recording is
 // longer and can be cut, else the whole audio. The choice depends only on the
@@ -105,10 +119,8 @@ func (s *Service) transcribeItemRouted(ctx context.Context, relPath string, cont
 // floor; a failure is logged and never fails the item (SPEC §8.2.4).
 func (s *Service) identifyItem(ctx context.Context, relPath string, content []byte, tmpPath string, totalMS int) (string, float64, bool) {
 	data := content
-	probeMS := s.cfg.MediaSTTLanguageProbeSec * 1000
-	if probeMS > 0 && totalMS > probeMS {
-		mid := totalMS / 2
-		if cut, err := s.extractMediaSegment(ctx, tmpPath, mid-probeMS/2, mid+probeMS/2); err == nil && len(cut) > 0 {
+	if span := s.probeSpan(CoverageRange{StartMS: 0, EndMS: totalMS}); span.EndMS-span.StartMS < totalMS {
+		if cut, err := s.extractMediaSegment(ctx, tmpPath, span.StartMS, span.EndMS); err == nil && len(cut) > 0 {
 			data = cut
 		}
 	}

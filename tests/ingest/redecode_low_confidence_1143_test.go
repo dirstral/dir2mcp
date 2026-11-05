@@ -45,6 +45,7 @@ type rdReply struct {
 	lang string
 	conf float64
 	text string
+	err  error
 }
 
 // rdTranscriber is a fake STT provider with the optional language-hint
@@ -69,6 +70,9 @@ func (r *rdTranscriber) TranscribeStructured(context.Context, string, []byte) (m
 	defer r.mu.Unlock()
 	r.calls++
 	rep := r.script[r.calls]
+	if rep.err != nil {
+		return model.TranscriptResult{}, rep.err
+	}
 	return model.TranscriptResult{Text: rep.text, Language: rep.lang, LanguageConfidence: rep.conf}, nil
 }
 
@@ -139,6 +143,16 @@ type rdHarness struct {
 	svc   *ingest.Service
 	store *fakeIngestStore
 	logs  *syncBuffer
+
+	mu   sync.Mutex
+	cuts []sttWindowCut
+}
+
+// cutList returns the segments the service asked the stub to cut.
+func (h *rdHarness) cutList() []sttWindowCut {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]sttWindowCut(nil), h.cuts...)
 }
 
 // newRedecodeHarness builds a Service with language detection on and the
@@ -154,7 +168,7 @@ func newRedecodeHarness(t *testing.T, tr model.Transcriber, below float64) *rdHa
 func newRedecodeHarnessIn(t *testing.T, stateDir string, tr model.Transcriber, below float64) *rdHarness {
 	t.Helper()
 	h := &rdHarness{store: &fakeIngestStore{}, logs: &syncBuffer{}}
-	cfg := config.Config{StateDir: stateDir, LanguageDetectionEnabled: true, MediaSTTRedecodeBelow: below}
+	cfg := config.Config{StateDir: stateDir, LanguageDetectionEnabled: true, MediaSTTRedecodeBelow: below, MediaSTTLanguageProbeSec: 30}
 	h.svc = mustNewIngestService(t, cfg, h.store)
 	h.svc.SetTranscriber(tr)
 	h.svc.SetSTTIdentity("whisper", "large-v3")
@@ -163,6 +177,9 @@ func newRedecodeHarnessIn(t *testing.T, stateDir string, tr model.Transcriber, b
 		return time.Duration(rdTotalMS) * time.Millisecond, nil
 	}
 	h.svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+		h.mu.Lock()
+		h.cuts = append(h.cuts, sttWindowCut{startMS: startMS, endMS: endMS})
+		h.mu.Unlock()
 		return make([]byte, (endMS-startMS)/1000+1), nil
 	}
 	return h

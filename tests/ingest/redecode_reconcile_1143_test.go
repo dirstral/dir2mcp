@@ -1,77 +1,191 @@
 package tests
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §8.6.13 reconcile pass (spec 0.88.0, dir2mcp #1143). A transcript
-// stored before the low-confidence rule records no redecode_rule. Armed, the
-// pass finds candidate windows from the stored text alone and decodes again
-// only those windows, with the item language.
+// SPEC §8.6.13 reconcile pass (spec 0.88.0 and 0.89.0, dir2mcp #1143). A
+// transcript stored before the low-confidence rule records no redecode_rule.
+// Armed, the pass finds suspect windows from the stored text alone. Before it
+// decodes a suspect again with the item language, it probes the window: one
+// centred slice of at most media.stt.language_probe_sec (30 s here), decoded
+// with no hint. Only a probe that reports the item language at or above
+// media.stt.redecode_below lets the window be decoded again.
 
-// storeUnmarkedTranscript indexes the #1143 recording with the rule off, so
-// the cache holds a transcript whose window 1 is English and which records no
-// redecode_rule. It returns the shared state dir.
-func storeUnmarkedTranscript(t *testing.T, relPath string) string {
+// rdRussian is a Russian window transcript long enough for the §8.8 detector.
+var rdRussian = "[00:00] Правительство объявило новые правила для школ, и учителя вместе с родителями обсуждают, что изменится осенью.\n" +
+	"[00:30] Синоптики обещают тёплую погоду на выходных, поэтому многие семьи собираются поехать к морю или в горы."
+
+// rdProbeCut is the probe slice of window 1 [0,600000): 30 s centred on 300 s.
+var rdProbeCut = sttWindowCut{startMS: 285_000, endMS: 315_000}
+
+// storeUnmarked indexes a recording with the rule off, so the cache holds a
+// transcript that records no redecode_rule. It returns the shared state dir.
+func storeUnmarked(t *testing.T, relPath string, script map[int]rdReply, want string) string {
 	t.Helper()
 	stateDir := testutil.TempDir(t)
-	first := newRedecodeHarnessIn(t, stateDir, &rdTranscriber{script: jingleScript()}, 0)
+	first := newRedecodeHarnessIn(t, stateDir, &rdTranscriber{script: script}, 0)
 	m := first.run(t, relPath)
-	if m.RedecodeRule != "" || !strings.Contains(first.chunkText(), "Good evening") {
-		t.Fatalf("setup: want an unmarked transcript with English window 1, got rule %q:\n%s", m.RedecodeRule, first.chunkText())
+	if m.RedecodeRule != "" || !strings.Contains(first.chunkText(), want) {
+		t.Fatalf("setup: want an unmarked transcript holding %q, got rule %q:\n%s", want, m.RedecodeRule, first.chunkText())
 	}
 	return stateDir
 }
 
-// TestReconcileRedecode_OnlyTheForeignWindowIsDecodedAgain: the stored text
-// of window 1 is English and the item is Ukrainian, so only window 1 is
-// decoded again, and only with uk.
-func TestReconcileRedecode_OnlyTheForeignWindowIsDecodedAgain(t *testing.T) {
-	t.Parallel()
-	stateDir := storeUnmarkedTranscript(t, "news/stored.mp3")
-	tr := &rdTranscriber{hintText: rdUkHintText}
+// storeUnmarkedTranscript stores the #1143 recording: window 1 English, the
+// item Ukrainian.
+func storeUnmarkedTranscript(t *testing.T, relPath string) string {
+	t.Helper()
+	return storeUnmarked(t, relPath, jingleScript(), "Good evening")
+}
+
+// armedRun runs the armed pass over the stored transcript with the probe
+// answer probe, and returns the harness and the meta.
+func armedRun(t *testing.T, stateDir, relPath string, tr *rdTranscriber) (*rdHarness, redecodeMeta) {
+	t.Helper()
 	h := newRedecodeHarnessIn(t, stateDir, tr, 0.5)
 	h.svc.SetReconcileLanguageWindows(true)
-	m := h.run(t, "news/stored.mp3")
+	return h, h.run(t, relPath)
+}
 
+// assertProbedOnce checks that exactly one unhinted decode ran, on the
+// centred slice of window 1.
+func assertProbedOnce(t *testing.T, h *rdHarness, tr *rdTranscriber) {
+	t.Helper()
+	if n := tr.callCount(); n != 1 {
+		t.Errorf("unhinted decodes = %d, want exactly 1 (the probe)", n)
+	}
+	for _, c := range h.cutList() {
+		if c == rdProbeCut {
+			return
+		}
+	}
+	t.Errorf("no probe cut %+v among %+v", rdProbeCut, h.cutList())
+}
+
+// TestReconcileRedecode_ProbeConfirmsTheJingleWindow: the stored text of
+// window 1 is English, the item is Ukrainian, and the probe reports uk at
+// 0.95. Only window 1 is decoded again, with uk, and the record names the
+// probe.
+func TestReconcileRedecode_ProbeConfirmsTheJingleWindow(t *testing.T) {
+	t.Parallel()
+	stateDir := storeUnmarkedTranscript(t, "news/stored.mp3")
+	tr := &rdTranscriber{script: map[int]rdReply{1: {lang: "uk", conf: 0.95, text: rdUkHintText}}, hintText: rdUkHintText}
+	h, m := armedRun(t, stateDir, "news/stored.mp3", tr)
+
+	assertProbedOnce(t, h, tr)
 	if got := tr.hintCalls(); len(got) != 1 || got[0] != "uk" {
 		t.Fatalf("hinted decodes = %v, want exactly one in uk\nlogs:\n%s", got, h.logs.String())
-	}
-	if n := tr.callCount(); n != 0 {
-		t.Errorf("unhinted decodes = %d, want 0: the pass must not decode the item again", n)
 	}
 	if m.RedecodeRule != "low-confidence" || len(m.RedecodedWindows) != 1 {
 		t.Fatalf("redecode_rule=%q redecoded_windows=%+v, want low-confidence and one entry", m.RedecodeRule, m.RedecodedWindows)
 	}
 	w := m.RedecodedWindows[0]
-	if w.StartMS != 0 || w.EndMS != rdWin1EndMS || w.FirstLanguage != "en" || w.Language != "uk" || !w.Replaced {
-		t.Errorf("redecoded window = %+v, want [0,%d) en -> uk replaced", w, rdWin1EndMS)
+	if w.StartMS != 0 || w.EndMS != rdWin1EndMS || w.FirstLanguage != "uk" || w.FirstConfidence != 0.95 || w.Language != "uk" || !w.Replaced {
+		t.Errorf("redecoded window = %+v, want [0,%d) probe uk@0.95 -> uk replaced", w, rdWin1EndMS)
 	}
 	text := h.chunkText()
 	if !strings.Contains(text, "Доброго вечора") || strings.Contains(text, "Good evening") {
 		t.Errorf("window 1 was not replaced in the index:\n%s", text)
 	}
-	if !strings.Contains(text, "Синоптики") {
+	if !strings.Contains(text, "Синоптики обіцяють") {
 		t.Errorf("windows 2 and 3 were lost:\n%s", text)
 	}
 	assertReconcileIsDone(t, stateDir, tr)
 }
 
 // assertReconcileIsDone runs the pass once more on the same cache: the record
-// is there now, so the run checks nothing and keeps the record.
+// is there now, so the run decodes nothing and keeps the record.
 func assertReconcileIsDone(t *testing.T, stateDir string, tr *rdTranscriber) {
 	t.Helper()
+	calls, hints := tr.callCount(), len(tr.hintCalls())
 	again := newRedecodeHarnessIn(t, stateDir, tr, 0.5)
 	again.svc.SetReconcileLanguageWindows(true)
-	m2 := again.run(t, "news/stored.mp3")
-	if got := tr.hintCalls(); len(got) != 1 {
-		t.Errorf("a marked transcript was decoded again: hints %v", got)
+	m := again.run(t, "news/stored.mp3")
+	if tr.callCount() != calls || len(tr.hintCalls()) != hints {
+		t.Errorf("a marked transcript was decoded again: calls %d -> %d, hints %d -> %d", calls, tr.callCount(), hints, len(tr.hintCalls()))
 	}
-	if m2.RedecodeRule != "low-confidence" || len(m2.RedecodedWindows) != 1 {
-		t.Errorf("the cache lost the record: rule %q windows %+v", m2.RedecodeRule, m2.RedecodedWindows)
+	if m.RedecodeRule != "low-confidence" {
+		t.Errorf("the cache lost the record: rule %q windows %+v", m.RedecodeRule, m.RedecodedWindows)
+	}
+}
+
+// TestReconcileRedecode_RealCodeSwitchIsLeftAlone: a Russian item whose
+// window 1 holds a real Ukrainian answer. The probe reports uk at 0.97, so the
+// window is not forced to Russian. The transcript is unchanged and still
+// records redecode_rule, so the next armed run skips it.
+func TestReconcileRedecode_RealCodeSwitchIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	script := map[int]rdReply{
+		1: {lang: "uk", conf: 0.97, text: rdUkrainian},
+		2: {lang: "ru", conf: 0.99, text: rdRussian},
+		3: {lang: "ru", conf: 0.98, text: rdRussian},
+	}
+	stateDir := storeUnmarked(t, "news/stored.mp3", script, "Синоптики обіцяють")
+	tr := &rdTranscriber{script: map[int]rdReply{1: {lang: "uk", conf: 0.97, text: rdUkrainian}}, hintText: rdUkHintText}
+	h, m := armedRun(t, stateDir, "news/stored.mp3", tr)
+
+	assertProbedOnce(t, h, tr)
+	if got := tr.hintCalls(); len(got) != 0 {
+		t.Fatalf("hinted decodes = %v, want none: a real Ukrainian passage must not be forced to Russian", got)
+	}
+	if m.Language != "ru" {
+		t.Errorf("item language = %q, want ru", m.Language)
+	}
+	if m.RedecodeRule != "low-confidence" || len(m.RedecodedWindows) != 0 {
+		t.Errorf("redecode_rule=%q redecoded_windows=%+v, want low-confidence and no list", m.RedecodeRule, m.RedecodedWindows)
+	}
+	if !strings.Contains(h.chunkText(), "Синоптики обіцяють") {
+		t.Errorf("the Ukrainian window changed:\n%s", h.chunkText())
+	}
+	assertReconcileIsDone(t, stateDir, tr)
+}
+
+// TestReconcileRedecode_ProbeBelowThresholdLeavesTheWindow: the probe reports
+// the item language below redecode_below, so the window stays as recorded.
+func TestReconcileRedecode_ProbeBelowThresholdLeavesTheWindow(t *testing.T) {
+	t.Parallel()
+	stateDir := storeUnmarkedTranscript(t, "news/stored.mp3")
+	tr := &rdTranscriber{script: map[int]rdReply{1: {lang: "uk", conf: 0.3, text: rdUkHintText}}, hintText: rdUkHintText}
+	h, m := armedRun(t, stateDir, "news/stored.mp3", tr)
+
+	assertProbedOnce(t, h, tr)
+	if got := tr.hintCalls(); len(got) != 0 {
+		t.Fatalf("hinted decodes = %v, want none", got)
+	}
+	if m.RedecodeRule != "low-confidence" || len(m.RedecodedWindows) != 0 {
+		t.Errorf("redecode_rule=%q redecoded_windows=%+v, want low-confidence and no list", m.RedecodeRule, m.RedecodedWindows)
+	}
+	if !strings.Contains(h.chunkText(), "Good evening") {
+		t.Errorf("window 1 changed:\n%s", h.chunkText())
+	}
+}
+
+// TestReconcileRedecode_ProbeFailureLeavesTheWindowUnchecked: a probe that
+// fails leaves the window as recorded and records no redecode_rule, so the
+// next armed run checks the window again.
+func TestReconcileRedecode_ProbeFailureLeavesTheWindowUnchecked(t *testing.T) {
+	t.Parallel()
+	stateDir := storeUnmarkedTranscript(t, "news/stored.mp3")
+	tr := &rdTranscriber{script: map[int]rdReply{1: {err: errors.New("probe refused")}}, hintText: rdUkHintText}
+	h, m := armedRun(t, stateDir, "news/stored.mp3", tr)
+
+	assertProbedOnce(t, h, tr)
+	if got := tr.hintCalls(); len(got) != 0 {
+		t.Fatalf("hinted decodes = %v, want none", got)
+	}
+	if m.RedecodeRule != "" || len(m.RedecodedWindows) != 0 {
+		t.Errorf("redecode_rule=%q redecoded_windows=%+v, want neither after a failed probe", m.RedecodeRule, m.RedecodedWindows)
+	}
+	if !strings.Contains(h.chunkText(), "Good evening") {
+		t.Errorf("window 1 changed:\n%s", h.chunkText())
+	}
+	if !strings.Contains(h.logs.String(), "the language probe failed") {
+		t.Errorf("the failed probe was not logged:\n%s", h.logs.String())
 	}
 }
 
@@ -93,19 +207,15 @@ func TestReconcileRedecode_NotArmedServesAsRecorded(t *testing.T) {
 
 // TestReconcileRedecode_NoForeignWindowRecordsTheCheck: a stored transcript
 // whose windows are all in the item language is marked as checked, with no
-// decode.
+// probe and no decode.
 func TestReconcileRedecode_NoForeignWindowRecordsTheCheck(t *testing.T) {
 	t.Parallel()
-	stateDir := testutil.TempDir(t)
 	script := jingleScript()
 	script[1] = rdReply{lang: "uk", conf: 0.9, text: rdUkrainian}
-	first := newRedecodeHarnessIn(t, stateDir, &rdTranscriber{script: script}, 0)
-	first.run(t, "news/clean.mp3")
+	stateDir := storeUnmarked(t, "news/clean.mp3", script, "Синоптики обіцяють")
 
 	tr := &rdTranscriber{hintText: rdUkHintText}
-	h := newRedecodeHarnessIn(t, stateDir, tr, 0.5)
-	h.svc.SetReconcileLanguageWindows(true)
-	m := h.run(t, "news/clean.mp3")
+	_, m := armedRun(t, stateDir, "news/clean.mp3", tr)
 	if len(tr.hintCalls()) != 0 || tr.callCount() != 0 {
 		t.Fatalf("decodes happened on a clean transcript: hints %v, calls %d", tr.hintCalls(), tr.callCount())
 	}
