@@ -214,15 +214,81 @@ func repSource(meta map[string]any) string {
 //   - A native transcript with no per-word timings (BuildBroadcastCues returns
 //     nil) is reflowed too.
 func BuildCuesForSegmentation(chunks []subtitle.TranscriptChunk, segmentation string, isTranslation bool) []subtitle.Cue {
-	if strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
-		if !isTranslation {
-			if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
-				return cues
-			}
+	return BuildCuesWithSource(chunks, segmentation, isTranslation, nil, 0)
+}
+
+// BuildCuesWithSource is BuildCuesForSegmentation with the source speech of a
+// translation (SPEC §8.6.3, "Translated cues follow the source speech",
+// 0.87.0). source holds the chunks of the transcript the translation was made
+// from, and pauseMS is media.subtitles.source_pause_ms. Under broadcast, a
+// translation with no word timings of its own is reflowed against the source
+// word timings, so no translated cue is timed across a source pause. A nil
+// source, or pauseMS <= 0, gives the BuildCuesForSegmentation output. The chunk
+// builder is never affected.
+func BuildCuesWithSource(chunks []subtitle.TranscriptChunk, segmentation string, isTranslation bool, source []subtitle.TranscriptChunk, pauseMS int) []subtitle.Cue {
+	if !strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
+		return subtitle.BuildCues(chunks)
+	}
+	if !isTranslation {
+		if cues := subtitle.BuildBroadcastCues(chunks); cues != nil {
+			return cues
 		}
 		return subtitle.ReflowChunkCues(subtitle.BuildCues(chunks))
 	}
-	return subtitle.BuildCues(chunks)
+	if chunksHaveWords(chunks) {
+		source = nil // §8.6.3: the rule is for a translation with no word timings of its own
+	}
+	return subtitle.ReflowTranslatedCues(subtitle.BuildCues(chunks), source, pauseMS)
+}
+
+// chunksHaveWords reports whether any chunk carries per-word timings.
+func chunksHaveWords(chunks []subtitle.TranscriptChunk) bool {
+	for _, ch := range chunks {
+		if len(ch.Span.Words) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// SourceRepFor returns the transcript a translation was made from: a
+// representation that is not a translation, on the same audio track (meta_json
+// "track", absent = 0), preferring the one whose language is the translation's
+// source_language. ok is false when no such representation exists.
+func SourceRepFor(reps []store.TranscriptRepresentation, translation store.TranscriptRepresentation) (store.TranscriptRepresentation, bool) {
+	meta, _ := parseMeta(translation.MetaJSON)
+	srcLang, _ := meta["source_language"].(string)
+	track := repTrack(meta)
+	var first *store.TranscriptRepresentation
+	for i := range reps {
+		rep := reps[i]
+		if rep.RepID == translation.RepID || RepIsTranslation(rep.MetaJSON) {
+			continue
+		}
+		repMeta, _ := parseMeta(rep.MetaJSON)
+		if repTrack(repMeta) != track {
+			continue
+		}
+		if strings.EqualFold(RepLanguage(rep.MetaJSON), strings.TrimSpace(srcLang)) {
+			return rep, true
+		}
+		if first == nil {
+			first = &reps[i]
+		}
+	}
+	if first == nil {
+		return store.TranscriptRepresentation{}, false
+	}
+	return *first, true
+}
+
+// repTrack reads the 0-based audio track of a transcript from its meta_json
+// (§8.6.12). An absent or malformed value is track 0.
+func repTrack(meta map[string]any) int {
+	if v, ok := meta["track"].(float64); ok {
+		return int(v)
+	}
+	return 0
 }
 
 // Renderer renders a document's stored transcripts under one configuration.
@@ -264,7 +330,7 @@ func (r Renderer) Cues(ctx context.Context, st Store, relPath, lang, segmentatio
 	if !ok {
 		return nil, "", fmt.Errorf("%w: %q lang %q", ErrNoLanguage, relPath, lang)
 	}
-	cues, err := r.cuesForRep(ctx, st, rep, segmentation)
+	cues, err := r.cuesForRep(ctx, st, reps, rep, segmentation)
 	if err != nil {
 		return nil, "", err
 	}
@@ -272,7 +338,40 @@ func (r Renderer) Cues(ctx context.Context, st Store, relPath, lang, segmentatio
 }
 
 // cuesForRep loads one representation's chunks and builds its cleaned cues.
-func (r Renderer) cuesForRep(ctx context.Context, st Store, rep store.TranscriptRepresentation, segmentation string) ([]subtitle.Cue, error) {
+// reps is every transcript of the document, so a translation can be timed
+// against the speech of its source transcript (SPEC §8.6.3).
+func (r Renderer) cuesForRep(ctx context.Context, st Store, reps []store.TranscriptRepresentation, rep store.TranscriptRepresentation, segmentation string) ([]subtitle.Cue, error) {
+	chunks, err := loadChunks(ctx, st, rep)
+	if err != nil {
+		return nil, err
+	}
+	isTranslation := RepIsTranslation(rep.MetaJSON)
+	source, err := r.sourceChunks(ctx, st, reps, rep, segmentation, isTranslation)
+	if err != nil {
+		return nil, err
+	}
+	cues := BuildCuesWithSource(chunks, segmentation, isTranslation, source, r.cfg.MediaSubtitlesSourcePauseMS)
+	return r.pipe.Apply(cues), nil
+}
+
+// sourceChunks loads the chunks of the source transcript of a translation, but
+// only when the source-pause rule can apply: broadcast segmentation, a
+// translation, and media.subtitles.source_pause_ms > 0. Otherwise, or when the
+// document has no source transcript, it returns nil and no extra read is made.
+func (r Renderer) sourceChunks(ctx context.Context, st Store, reps []store.TranscriptRepresentation, rep store.TranscriptRepresentation, segmentation string, isTranslation bool) ([]subtitle.TranscriptChunk, error) {
+	if !isTranslation || r.cfg.MediaSubtitlesSourcePauseMS <= 0 ||
+		!strings.EqualFold(strings.TrimSpace(segmentation), "broadcast") {
+		return nil, nil
+	}
+	src, ok := SourceRepFor(reps, rep)
+	if !ok {
+		return nil, nil
+	}
+	return loadChunks(ctx, st, src)
+}
+
+// loadChunks reads one representation's time-spanned chunks.
+func loadChunks(ctx context.Context, st Store, rep store.TranscriptRepresentation) ([]subtitle.TranscriptChunk, error) {
 	rows, err := st.TranscriptSpanChunks(ctx, rep.RepID)
 	if err != nil {
 		return nil, fmt.Errorf("load transcript chunks: %w", err)
@@ -281,7 +380,7 @@ func (r Renderer) cuesForRep(ctx context.Context, st Store, rep store.Transcript
 	for _, row := range rows {
 		chunks = append(chunks, subtitle.TranscriptChunk{Text: row.Text, Span: row.Span})
 	}
-	return r.pipe.Apply(BuildCuesForSegmentation(chunks, segmentation, RepIsTranslation(rep.MetaJSON))), nil
+	return chunks, nil
 }
 
 // RenderTimed renders the transcript of relPath in lang as "vtt" or "srt" under
