@@ -215,7 +215,7 @@ func TestSharedBroker_EachCorpusWorkerEmbedsItsOwnBytes(t *testing.T) {
 			Logger:        discardLogger(),
 		}
 		go func() {
-			if !runWorkerUntilOrTimeout(t, cfg, 5*time.Second, drained) {
+			if !runWorkerUntilOrTimeout(t, cfg, workerWaitTimeout, drained) {
 				t.Errorf("%s: the shared queue never drained", c.name)
 			}
 			done <- struct{}{}
