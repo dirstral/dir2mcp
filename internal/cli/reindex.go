@@ -258,6 +258,9 @@ func languageWindowReconcileBlocker(cfg config.Config) string {
 	if cfg.MediaSTTRedecodeBelow <= 0 {
 		return "media.stt.redecode_below is 0, so the rule is off"
 	}
+	if !cfg.LanguageDetectionEnabled {
+		return "language_detection_enabled is false, so no recording language is resolved to compare the windows with"
+	}
 	if strings.EqualFold(strings.TrimSpace(cfg.MediaSTTLanguageScope), "window") {
 		return "media.stt.language_scope is window, where the rule does not apply"
 	}

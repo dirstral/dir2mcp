@@ -223,3 +223,42 @@ func TestReconcileRedecode_NoForeignWindowRecordsTheCheck(t *testing.T) {
 		t.Errorf("redecode_rule=%q redecoded_windows=%+v, want low-confidence and no list", m.RedecodeRule, m.RedecodedWindows)
 	}
 }
+
+// TestReconcileRedecode_APartialRunKeepsItsRecord: the first armed run
+// replaces window 1 and its probe of window 3 fails, so it records window 1
+// and no rule. The next armed run checks only window 3 and keeps the record of
+// window 1 beside the new one.
+func TestReconcileRedecode_APartialRunKeepsItsRecord(t *testing.T) {
+	t.Parallel()
+	longUk := rdUkrainian + "\n" + strings.ReplaceAll(rdUkrainian, "[00:", "[01:") + "\n" + strings.ReplaceAll(rdUkrainian, "[00:", "[02:")
+	script := map[int]rdReply{
+		1: {lang: "en", conf: 0.34, text: rdEnglish},
+		2: {lang: "uk", conf: 0.99, text: longUk},
+		3: {lang: "ru", conf: 0.4, text: rdRussian},
+	}
+	stateDir := storeUnmarked(t, "news/stored.mp3", script, "Good evening")
+
+	first := &rdTranscriber{script: map[int]rdReply{
+		1: {lang: "uk", conf: 0.95},
+		2: {err: errors.New("probe refused")},
+	}, hintText: rdUkHintText}
+	_, m1 := armedRun(t, stateDir, "news/stored.mp3", first)
+	if m1.Language != "uk" {
+		t.Fatalf("setup: item language = %q, want uk", m1.Language)
+	}
+	if m1.RedecodeRule != "" || len(m1.RedecodedWindows) != 1 || m1.RedecodedWindows[0].StartMS != 0 {
+		t.Fatalf("first run: rule %q windows %+v, want no rule and window 1 only", m1.RedecodeRule, m1.RedecodedWindows)
+	}
+
+	second := &rdTranscriber{script: map[int]rdReply{1: {lang: "uk", conf: 0.9}}, hintText: rdUkHintText}
+	_, m2 := armedRun(t, stateDir, "news/stored.mp3", second)
+	if second.callCount() != 1 || len(second.hintCalls()) != 1 {
+		t.Errorf("second run: calls %d hints %v, want one probe and one hinted decode", second.callCount(), second.hintCalls())
+	}
+	if m2.RedecodeRule != "low-confidence" || len(m2.RedecodedWindows) != 2 {
+		t.Fatalf("second run: rule %q windows %+v, want low-confidence and both windows", m2.RedecodeRule, m2.RedecodedWindows)
+	}
+	if m2.RedecodedWindows[0].StartMS != 0 || m2.RedecodedWindows[1].StartMS != 1_180_000 {
+		t.Errorf("record = %+v, want window 1 then window 3 in start order", m2.RedecodedWindows)
+	}
+}

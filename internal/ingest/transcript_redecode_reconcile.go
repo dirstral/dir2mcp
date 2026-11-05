@@ -266,7 +266,7 @@ func (s *Service) publishReconciled(doc model.Document, paths transcriptCachePat
 	if mark {
 		out.coverage.RedecodeRule = model.RedecodeRuleLowConfidence
 	}
-	out.coverage.RedecodedWindows = record
+	out.coverage.RedecodedWindows = mergeRedecodedWindows(hit.coverage.RedecodedWindows, record)
 	if text == hit.text {
 		s.publishCachedCoverage(paths.coverage, out.coverage)
 		return out
@@ -275,6 +275,26 @@ func (s *Service) publishReconciled(doc model.Document, paths transcriptCachePat
 	if err := s.publishTranscriptCache(paths, out); err != nil {
 		s.getLogger().Printf("reconcile %s: %v; the next armed run checks it again", doc.RelPath, err)
 	}
+	return out
+}
+
+// mergeRedecodedWindows keeps the entries an earlier run recorded for windows
+// this run did not record again, so a run after a failed probe does not lose
+// the record of a window that was already replaced. The result is in
+// ascending start_ms order (SPEC §8.6.13).
+func mergeRedecodedWindows(prior, current []model.RedecodedWindow) []model.RedecodedWindow {
+	seen := make(map[[2]int]bool, len(current))
+	for _, w := range current {
+		seen[[2]int{w.StartMS, w.EndMS}] = true
+	}
+	var out []model.RedecodedWindow
+	for _, w := range prior {
+		if !seen[[2]int{w.StartMS, w.EndMS}] {
+			out = append(out, w)
+		}
+	}
+	out = append(out, current...)
+	sort.SliceStable(out, func(a, b int) bool { return out[a].StartMS < out[b].StartMS })
 	return out
 }
 

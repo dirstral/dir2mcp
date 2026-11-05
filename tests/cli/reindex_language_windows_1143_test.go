@@ -56,6 +56,7 @@ func TestReindexLanguageWindows_RefusesWhenTheRuleIsOff(t *testing.T) {
 		"threshold 0":  "media:\n  stt:\n    redecode_below: 0\n",
 		"window scope": "media:\n  stt:\n    language_scope: window\n",
 		"pin":          "media:\n  language: uk\n",
+		"no detection": "language_detection_enabled: false\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			code, stderr := runLanguageWindowsReindex(t, cfg)
