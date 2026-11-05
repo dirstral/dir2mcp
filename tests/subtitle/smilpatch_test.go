@@ -96,6 +96,12 @@ func TestPatchSMIL_NoChangeWhenAlreadyCorrect(t *testing.T) {
 	if _, changed, err := subtitle.PatchSMILTextStreams([]byte(livevtt), managedABC, want); err != nil || changed {
 		t.Fatalf("a livevtt-wired SMIL must be left alone: changed=%v err=%v", changed, err)
 	}
+	// A param of another valuetype is not the entry the patch writes.
+	text := strings.Replace(string(once), `value="true" valuetype="data"`, `value="true" valuetype="text"`, 1)
+	fixed, changed, err := subtitle.PatchSMILTextStreams([]byte(text), managedABC, want)
+	if err != nil || !changed || string(fixed) != string(once) {
+		t.Fatalf("valuetype=\"text\" must be rewritten to data: changed=%v err=%v\n%s", changed, err, fixed)
+	}
 }
 
 // TestPatchSMIL_ReplacesStaleManagedEntriesAndKeepsForeignOnes pins that a stale

@@ -168,3 +168,66 @@ func TestSMILPatch_NeverCreatesASMIL(t *testing.T) {
 		t.Fatalf("the TTML must still be written (named after the media's own rendition)")
 	}
 }
+
+// TestSMILPatch_ForeignPathsKeptAndEachChangeBackedUp pins two review fixes: a
+// caption entry in another folder ("other/abc.ttml") is foreign even though its
+// base name matches, and every change gets its own backup, also when two fall
+// in the same second.
+func TestSMILPatch_ForeignPathsKeptAndEachChangeBackedUp(t *testing.T) {
+	t.Parallel()
+	foreign := "      <textstream src=\"mp4:other/abc.ttml\" system-language=\"eng\" />\n"
+	start := strings.Replace(archiveSMIL, "    </switch>\n", foreign+"    </switch>\n", 1)
+	root := smilCorpus(t, start)
+	stateDir := testutil.TempDir(t)
+	st := runSMILCorpus(t, root, nil, stateDir)
+
+	smilPath := filepath.Join(root, "v", "abc.smil")
+	wired := readFile(t, smilPath)
+	if !strings.Contains(wired, foreign) || !strings.Contains(wired, `src="abc_1080p.ttml"`) {
+		t.Fatalf("the foreign entry must be kept and ours added:\n%s", wired)
+	}
+	// Someone strips our entry; the next scan restores it with a second backup.
+	if err := os.WriteFile(smilPath, []byte(start), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSMILCorpus(t, root, st, stateDir)
+	if readFile(t, smilPath) != wired {
+		t.Fatalf("the entry must be restored")
+	}
+	backups := smilBackups(t, root)
+	if len(backups) != 2 {
+		t.Fatalf("each change needs its own backup, got %v", backups)
+	}
+	for _, b := range backups {
+		if readFile(t, b) != start {
+			t.Fatalf("backup %s must hold the SMIL as it was before its change", b)
+		}
+	}
+}
+
+// TestSMILPatch_NothingToLinkDropsOnlyDanglingEntries pins the empty case: when
+// the TTML cannot be written, a working managed entry (its file present) stays,
+// and only a managed entry whose file is missing is removed.
+func TestSMILPatch_NothingToLinkDropsOnlyDanglingEntries(t *testing.T) {
+	t.Parallel()
+	entries := "      <textstream src=\"abc.ttml\" system-language=\"rus,eng\" />\n" +
+		"      <textstream src=\"abc.ru.vtt\" system-language=\"rus\" />\n" +
+		"      <textstream src=\"abc_720p.ttml\" system-language=\"rus,eng\" />\n"
+	root := smilCorpus(t, strings.Replace(archiveSMIL, "    </switch>\n", entries+"    </switch>\n", 1))
+	mustWriteFile(t, filepath.Join(root, "v", "abc.ttml"), []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru"><body><div><p begin="00:00:00.000" end="00:00:02.000">legacy</p></div></body></tt>
+`))
+	// A folder where the TTML should go makes its write fail.
+	if err := os.MkdirAll(filepath.Join(root, "v", "abc_1080p.ttml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runSMILCorpus(t, root, nil, testutil.TempDir(t))
+
+	got := readFile(t, filepath.Join(root, "v", "abc.smil"))
+	if !strings.Contains(got, `src="abc.ttml"`) || !strings.Contains(got, `src="abc.ru.vtt"`) {
+		t.Fatalf("entries whose files exist must be kept:\n%s", got)
+	}
+	if strings.Contains(got, "abc_720p.ttml") || strings.Contains(got, "abc_1080p.ttml") {
+		t.Fatalf("an entry pointing at a missing file must be removed, none added:\n%s", got)
+	}
+}

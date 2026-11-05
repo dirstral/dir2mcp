@@ -794,13 +794,17 @@ What happens to `<stem>.smil` beside the video:
   `<switch>` holding a `<video>`, is left alone and reported as `SMIL_INVALID`
   in the run manifest.
 - **Only managed caption entries change.** Those are entries whose source is the
-  video's own `<stem>.<lang>.vtt`, `<stem>.ttml` or `<stem>_<N>p.ttml`. Any other
+  video's own `<stem>.<lang>.vtt`, `<stem>.ttml` or `<stem>_<N>p.ttml`, named
+  as a bare file beside the SMIL (`other/<stem>.ttml` is not one). Any other
   `<textstream>` is kept. `smil: ttml` adds one entry for the bilingual TTML;
   `smil: vtt` adds one per VTT. An entry is added only for a file that exists.
+  When no caption file exists (for example, the write failed), entries whose
+  file is present are kept and only entries pointing at a missing file go.
 - **Only the caption lines are edited.** Every other byte of the SMIL stays as it
   was, and a SMIL whose entries are already right is not touched, so re-scans
   cause no churn.
-- **Every change is backed up first**, to `<stem>.smil.bak.<YYYYmmdd_HHMMSS>`, and
+- **Every change is backed up first**, to a new `<stem>.smil.bak.<YYYYmmdd_HHMMSS>`
+  (with a `.<n>` suffix if two changes fall in the same second), and
   the new SMIL replaces the old one atomically with the same file permissions. A
   failed write is `SMIL_PATCH_FAILED`; the document stays indexed.
 

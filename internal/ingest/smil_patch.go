@@ -28,7 +28,9 @@ import (
 //   - only the caption entries this pipeline manages for the video are replaced:
 //     `<stem>.<lang>.vtt`, `<stem>.ttml` and `<stem>_<N>p.ttml`; any other
 //     <textstream> is kept;
-//   - entries reference only caption files that exist;
+//   - entries reference only caption files that exist; when none exists (yet,
+//     or because a write failed), managed entries whose file is present are
+//     kept and only those pointing at a missing file are removed;
 //   - before a change the SMIL is copied to `<smil>.bak.<YYYYmmdd_HHMMSS>`, then
 //     replaced atomically with its file mode kept.
 //
@@ -121,10 +123,16 @@ func (s *Service) patchSMIL(plan emitPlan) {
 		return
 	}
 	want := s.smilWantedTextStreams(plan, mode)
+	managed := managedCaptionMatcher(plan)
 	if len(want) == 0 {
-		return // no caption file to reference yet
+		// Nothing to link: never drop a working entry, only dangling ones.
+		dir := filepath.Dir(plan.smil.abs)
+		isManaged := managed
+		managed = func(src string) bool {
+			return isManaged(src) && !smilSiblingExists(dir, subtitle.NormalizeSMILSrc(src))
+		}
 	}
-	out, changed, err := subtitle.PatchSMILTextStreams(plan.smil.data, managedCaptionMatcher(plan), want)
+	out, changed, err := subtitle.PatchSMILTextStreams(plan.smil.data, managed, want)
 	if err != nil {
 		s.markActiveErrored(manifestErrSMILInvalid, manifestErrSMILInvalid+": "+plan.smil.relPath+": "+err.Error())
 		return
@@ -145,10 +153,8 @@ func (s *Service) patchSMIL(plan emitPlan) {
 // the TTML (mode ttml) or one per VTT (mode vtt), for files that exist.
 func (s *Service) smilWantedTextStreams(plan emitPlan, mode string) []subtitle.TextStream {
 	params := s.smilParams()
-	exists := func(name string) bool {
-		_, err := os.Stat(filepath.Join(filepath.Dir(plan.smil.abs), name))
-		return err == nil
-	}
+	dir := filepath.Dir(plan.smil.abs)
+	exists := func(name string) bool { return smilSiblingExists(dir, name) }
 	var want []subtitle.TextStream
 	switch mode {
 	case "ttml":
@@ -198,27 +204,32 @@ func (s *Service) smilLanguageCode(tag string) string {
 	return base.ISO3()
 }
 
+// smilSiblingExists reports whether name, relative to the SMIL's folder, is an
+// existing regular file.
+func smilSiblingExists(dir, name string) bool {
+	info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(name)))
+	return err == nil && info.Mode().IsRegular()
+}
+
 // managedCaptionMatcher reports whether a SMIL <textstream> src is a caption
 // entry this pipeline manages for the document: its VTTs, its group-named TTML,
-// a rendition-named TTML of the same group, or the TTML name in use.
+// a rendition-named TTML of the same group, or the TTML name in use. Only a
+// bare file name beside the SMIL qualifies: "other/abc.ttml" is foreign.
 func managedCaptionMatcher(plan emitPlan) func(string) bool {
 	stem := regexp.QuoteMeta(plan.stem)
 	re := regexp.MustCompile(`(?i)^(?:` + stem + `\.[^./\\]+\.vtt|` + stem + `(?:[_.-]\d{3,4}p)?\.ttml|` +
 		regexp.QuoteMeta(plan.ttmlStem) + `\.ttml)$`)
 	return func(src string) bool {
-		return re.MatchString(path.Base(subtitle.NormalizeSMILSrc(src)))
+		return re.MatchString(strings.TrimPrefix(path.Clean(subtitle.NormalizeSMILSrc(src)), "./"))
 	}
 }
 
 // replaceSMIL backs the SMIL up (livevtt's `<smil>.bak.<ts>` shape) and replaces
-// it atomically with data, keeping its file mode. A backup that cannot be made
-// aborts the change.
+// it atomically with data, keeping its file mode. Every change gets its own
+// backup; one that cannot be made aborts the change.
 func replaceSMIL(t smilTarget, data []byte) error {
-	backup := t.abs + ".bak." + time.Now().Format(smilBackupTimeLayout)
-	if _, err := os.Stat(backup); errors.Is(err, fs.ErrNotExist) {
-		if err := os.WriteFile(backup, t.data, t.mode); err != nil {
-			return fmt.Errorf("backup: %w", err)
-		}
+	if err := backupSMIL(t); err != nil {
+		return fmt.Errorf("backup: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(t.abs), ".dir2mcp-smil-*")
 	if err != nil {
@@ -243,4 +254,35 @@ func replaceSMIL(t smilTarget, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// backupSMIL writes the SMIL's current bytes to a new `<smil>.bak.<ts>` file,
+// adding a `.<n>` suffix when that name is taken (two changes in one second),
+// so an existing backup is never reused or overwritten.
+func backupSMIL(t smilTarget) error {
+	base := t.abs + ".bak." + time.Now().Format(smilBackupTimeLayout)
+	for n := 0; n < 100; n++ {
+		name := base
+		if n > 0 {
+			name = fmt.Sprintf("%s.%d", base, n)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, t.mode)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write(t.data); err != nil {
+			_ = f.Close()
+			_ = os.Remove(name)
+			return err
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(name)
+			return err
+		}
+		return nil
+	}
+	return errors.New("no free backup name")
 }

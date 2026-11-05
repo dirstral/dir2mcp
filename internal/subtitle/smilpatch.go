@@ -40,6 +40,9 @@ type TextStream struct {
 // SMILParam is one <param> child of a <textstream>.
 type SMILParam struct {
 	Name, Value string
+	// ValueType is the parsed valuetype attribute; empty means "data", the
+	// only type the patch writes.
+	ValueType string
 }
 
 // Reasons a SMIL is not patchable. They are stable strings a caller can report.
@@ -200,7 +203,11 @@ func sameTextStreams(a, b []TextStream) bool {
 	key := func(ts TextStream) string {
 		ps := make([]string, 0, len(ts.Params))
 		for _, p := range ts.Params {
-			ps = append(ps, p.Name+"="+p.Value)
+			vt := p.ValueType
+			if vt == "" {
+				vt = "data"
+			}
+			ps = append(ps, p.Name+"="+p.Value+"\x00"+vt)
 		}
 		sort.Strings(ps)
 		return ts.Src + "\x00" + ts.Lang + "\x00" + strings.Join(ps, "\x00")
@@ -283,7 +290,7 @@ func (p *smilParser) onStart(t xml.StartElement, off int64) {
 		}
 		recordSwitchChild(&p.sw, t, off, &p.cur)
 	case p.cur != nil && p.depthSw > 0 && depth == p.depthSw+2 && t.Name.Local == "param":
-		p.cur.ts.Params = append(p.cur.ts.Params, SMILParam{Name: attr(t, "name"), Value: attr(t, "value")})
+		p.cur.ts.Params = append(p.cur.ts.Params, SMILParam{Name: attr(t, "name"), Value: attr(t, "value"), ValueType: attr(t, "valuetype")})
 	}
 }
 
