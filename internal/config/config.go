@@ -1022,6 +1022,26 @@ type Config struct {
 	// mirrors the corpus-relative directory tree under this root. Required for a
 	// source with no writable filesystem (source.kind: s3).
 	MediaSubtitlesEmitDir string
+	// MediaSubtitlesEmitSMIL patches the media's existing SMIL with caption
+	// entries for the written subtitles (config `media.subtitles.emit.smil`,
+	// SPEC §8.6.14): "off" (default), "ttml" (one bilingual TTML entry) or "vtt"
+	// (one entry per VTT). It never creates a SMIL and changes only the caption
+	// entries it manages, backing the file up before any change.
+	MediaSubtitlesEmitSMIL string
+	// MediaSubtitlesEmitSMILParams are <param> children added to each caption
+	// entry, as "name=value" (e.g. "isWowzaCaptionStream=true").
+	MediaSubtitlesEmitSMILParams []string
+	// MediaSubtitlesEmitSMILLanguageCodes selects the system-language form:
+	// "bcp47" (default, e.g. "ru,en") or "iso639_2" (e.g. "rus,eng").
+	MediaSubtitlesEmitSMILLanguageCodes string
+	// MediaSubtitlesEmitTTMLName names the written TTML: "group" (default,
+	// `<stem>.ttml`) or "top_rendition" (`<top rendition stem>.ttml`, from the
+	// SMIL's highest <video>; falls back to the media's own stem).
+	MediaSubtitlesEmitTTMLName string
+	// MediaSubtitlesTTMLSegmentation builds TTML cues as stored transcript
+	// segments ("chunk", default) or re-cut from word timings like VTT/SRT
+	// ("broadcast"), config `media.subtitles.ttml.segmentation`.
+	MediaSubtitlesTTMLSegmentation string
 
 	// The five media.subtitles.* keys below are the editorial cue-cleaning
 	// pipeline. They apply to EVERY exported subtitle format — VTT, SRT and TTML
@@ -1504,138 +1524,143 @@ type fileConfig struct {
 	SecretPatterns  []string
 	DoclingCommand  *string
 
-	IngestDoclingServeURL              *string
-	IngestDoclingTimeoutSec            *int
-	IngestPandocCommand                *string
-	ElevenLabsBaseURL                  *string
-	ElevenLabsTTSVoiceID               *string
-	AllowedOrigins                     []string
-	RAGSystemPrompt                    *string
-	RAGGenerateAnswer                  *bool
-	RAGKDefault                        *int
-	RAGMaxContextChars                 *int
-	RAGOversampleFactor                *int
-	RetrievalHybridEnabled             *bool
-	DedupRetrieval                     *bool
-	RetrievalMinScore                  *float64
-	RetrievalRecencyHalfLife           *time.Duration
-	ContextCompressionEnabled          *bool
-	ContextCompressionTargetRatio      *float64
-	RetrievalAdaptiveEnabled           *bool
-	RetrievalAdaptiveKMin              *int
-	RetrievalAdaptiveKMax              *int
-	RetrievalMMREnabled                *bool
-	RetrievalMMRLambda                 *float64
-	RetrievalHyDEEnabled               *bool
-	RetrievalHyDEMode                  *string
-	RetrievalHyDESuperlative           *bool
-	RAGVerifyFaithfulness              *bool
-	RAGEvidenceThreshold               *string
-	RetrievalContextualEnabled         *bool
-	RetrievalContextualProvider        *string
-	RetrievalContextualModel           *string
-	RetrievalContextualMaxTokens       *int
-	RetrievalContextualPromptVersion   *string
-	RetrievalContextualPrompt          *string
-	CrossLingualEnabled                *bool
-	CrossLingualTargetLangs            []string
-	RetrievalHierarchicalEnabled       *bool
-	RetrievalHierarchicalSourceReps    []string
-	RetrievalHierarchicalLevels        []string
-	RetrievalHierarchicalProvider      *string
-	RetrievalHierarchicalMaxTokens     *int
-	RetrievalHierarchicalPromptVersion *string
-	RetrievalHierarchicalPrompt        *string
-	RerankEnabled                      *bool
-	RerankProvider                     *string
-	CohereAPIKey                       *string
-	CohereBaseURL                      *string
-	RerankModel                        *string
-	RerankCandidatePool                *int
-	ChunkingMaxTokens                  *int
-	ChunkingOverlapTokens              *int
-	IngestGitignore                    *bool
-	IngestFollowSymlinks               *bool
-	IngestMaxFileMB                    *int
-	IngestExcludeDirs                  []string
-	IngestPDFMode                      *string
-	IngestImagesMode                   *string
-	IngestAudioMode                    *string
-	IngestArchivesMode                 *string
-	IngestExtractor                    *string
-	IngestOnUnsupported                *string
-	IngestMediaIdentity                *string
-	IndexBackend                       *string
-	IngestScanCache                    *bool
-	IngestLateChunking                 *bool
-	IngestWatch                        *bool
-	IngestWatchDebounce                *time.Duration
-	STTProvider                        *string
-	STTMistralModel                    *string
-	STTElevenLabsModel                 *string
-	STTElevenLabsLanguageCode          *string
-	RecognizeProvider                  *string
-	RecognizeServeURL                  *string
-	RecognizeServeCommand              *string
-	RecognizeTimeout                   *time.Duration
-	RecognizeTimeoutPerMediaSecond     *float64
-	QualityGatesEnabled                *bool
-	LanguageDetectionEnabled           *bool
-	MediaSidecarsDisabled              *bool
-	MediaVariantsGroup                 *bool
-	MediaVariantsSelect                *string
-	MediaTranslateEnabled              *bool
-	MediaTranslateTargetLangs          []string
-	MediaTranslateEngine               *string
-	MediaTranslateNameHints            *bool
-	MediaTranslateWhisperWindowSec     *int
-	MediaTranslateWindowLines          *int
-	MediaTranslateContextLines         *int
-	MediaFilterWords                   []string
-	MediaSubtitlesTTMLEnabled          *bool
-	MediaSubtitlesTTMLAlignToleranceMS *int
-	MediaSubtitlesSMILEnabled          *bool
-	MediaSubtitlesSegmentation         *string
-	MediaSubtitlesEmitEnabled          *bool
-	MediaSubtitlesEmitFormats          []string
-	MediaSubtitlesEmitLanguages        []string
-	MediaSubtitlesEmitPolicy           *string
-	MediaSubtitlesEmitDir              *string
-	MediaSubtitlesGlossary             []string
-	MediaSubtitlesDropPhrases          []string
-	MediaSubtitlesScrubPhrases         []string
-	MediaSubtitlesCollapseRepeats      *int
-	MediaSubtitlesDropURLs             *bool
-	MediaSubtitlesExpectScript         *string
-	MediaTrimLeadingSilence            *bool
-	MediaSilenceThresholdDB            *float64
-	MediaVAD                           *bool
-	MediaDiarizeEnabled                *bool
-	MediaAudioWindowSec                *int
-	MediaVideoWindowSec                *int
-	MediaTranscriptChunkSec            *int
-	MediaTranscriptChunkGapSec         *int
-	MediaClipMaxDurationMS             *int
-	MediaClipMaxBytes                  *int
-	MediaSTTMaxPayloadMB               *int
-	MediaSTTRequestTimeoutSec          *int
-	MediaSTTLanguageStrict             *bool
-	MediaSTTOnUncoveredLanguage        *string
-	MediaSTTMinCoverage                *float64
-	MediaSTTOnPartialTranscript        *string
-	MediaSTTLanguageScope              *string
-	MediaSTTLanguageIdentifier         *string
-	MediaSTTLanguageProbeSec           *int
-	MediaSTTRequireValidation          *bool
-	MediaSTTOnRouteError               *string
-	MediaSTTRouteRetryAfter            *time.Duration
-	MediaSTTTracks                     []string
-	ElevenLabsAPIKey                   *string
-	ServerTLSCertFile                  *string
-	ServerTLSKeyFile                   *string
-	MediaBatchTwoPhase                 *bool
-	MediaBatchProgress                 *bool
-	MediaBatchManifest                 *string
+	IngestDoclingServeURL               *string
+	IngestDoclingTimeoutSec             *int
+	IngestPandocCommand                 *string
+	ElevenLabsBaseURL                   *string
+	ElevenLabsTTSVoiceID                *string
+	AllowedOrigins                      []string
+	RAGSystemPrompt                     *string
+	RAGGenerateAnswer                   *bool
+	RAGKDefault                         *int
+	RAGMaxContextChars                  *int
+	RAGOversampleFactor                 *int
+	RetrievalHybridEnabled              *bool
+	DedupRetrieval                      *bool
+	RetrievalMinScore                   *float64
+	RetrievalRecencyHalfLife            *time.Duration
+	ContextCompressionEnabled           *bool
+	ContextCompressionTargetRatio       *float64
+	RetrievalAdaptiveEnabled            *bool
+	RetrievalAdaptiveKMin               *int
+	RetrievalAdaptiveKMax               *int
+	RetrievalMMREnabled                 *bool
+	RetrievalMMRLambda                  *float64
+	RetrievalHyDEEnabled                *bool
+	RetrievalHyDEMode                   *string
+	RetrievalHyDESuperlative            *bool
+	RAGVerifyFaithfulness               *bool
+	RAGEvidenceThreshold                *string
+	RetrievalContextualEnabled          *bool
+	RetrievalContextualProvider         *string
+	RetrievalContextualModel            *string
+	RetrievalContextualMaxTokens        *int
+	RetrievalContextualPromptVersion    *string
+	RetrievalContextualPrompt           *string
+	CrossLingualEnabled                 *bool
+	CrossLingualTargetLangs             []string
+	RetrievalHierarchicalEnabled        *bool
+	RetrievalHierarchicalSourceReps     []string
+	RetrievalHierarchicalLevels         []string
+	RetrievalHierarchicalProvider       *string
+	RetrievalHierarchicalMaxTokens      *int
+	RetrievalHierarchicalPromptVersion  *string
+	RetrievalHierarchicalPrompt         *string
+	RerankEnabled                       *bool
+	RerankProvider                      *string
+	CohereAPIKey                        *string
+	CohereBaseURL                       *string
+	RerankModel                         *string
+	RerankCandidatePool                 *int
+	ChunkingMaxTokens                   *int
+	ChunkingOverlapTokens               *int
+	IngestGitignore                     *bool
+	IngestFollowSymlinks                *bool
+	IngestMaxFileMB                     *int
+	IngestExcludeDirs                   []string
+	IngestPDFMode                       *string
+	IngestImagesMode                    *string
+	IngestAudioMode                     *string
+	IngestArchivesMode                  *string
+	IngestExtractor                     *string
+	IngestOnUnsupported                 *string
+	IngestMediaIdentity                 *string
+	IndexBackend                        *string
+	IngestScanCache                     *bool
+	IngestLateChunking                  *bool
+	IngestWatch                         *bool
+	IngestWatchDebounce                 *time.Duration
+	STTProvider                         *string
+	STTMistralModel                     *string
+	STTElevenLabsModel                  *string
+	STTElevenLabsLanguageCode           *string
+	RecognizeProvider                   *string
+	RecognizeServeURL                   *string
+	RecognizeServeCommand               *string
+	RecognizeTimeout                    *time.Duration
+	RecognizeTimeoutPerMediaSecond      *float64
+	QualityGatesEnabled                 *bool
+	LanguageDetectionEnabled            *bool
+	MediaSidecarsDisabled               *bool
+	MediaVariantsGroup                  *bool
+	MediaVariantsSelect                 *string
+	MediaTranslateEnabled               *bool
+	MediaTranslateTargetLangs           []string
+	MediaTranslateEngine                *string
+	MediaTranslateNameHints             *bool
+	MediaTranslateWhisperWindowSec      *int
+	MediaTranslateWindowLines           *int
+	MediaTranslateContextLines          *int
+	MediaFilterWords                    []string
+	MediaSubtitlesTTMLEnabled           *bool
+	MediaSubtitlesTTMLAlignToleranceMS  *int
+	MediaSubtitlesSMILEnabled           *bool
+	MediaSubtitlesSegmentation          *string
+	MediaSubtitlesEmitEnabled           *bool
+	MediaSubtitlesEmitFormats           []string
+	MediaSubtitlesEmitLanguages         []string
+	MediaSubtitlesEmitPolicy            *string
+	MediaSubtitlesEmitDir               *string
+	MediaSubtitlesEmitSMIL              *string
+	MediaSubtitlesEmitSMILParams        []string
+	MediaSubtitlesEmitSMILLanguageCodes *string
+	MediaSubtitlesEmitTTMLName          *string
+	MediaSubtitlesTTMLSegmentation      *string
+	MediaSubtitlesGlossary              []string
+	MediaSubtitlesDropPhrases           []string
+	MediaSubtitlesScrubPhrases          []string
+	MediaSubtitlesCollapseRepeats       *int
+	MediaSubtitlesDropURLs              *bool
+	MediaSubtitlesExpectScript          *string
+	MediaTrimLeadingSilence             *bool
+	MediaSilenceThresholdDB             *float64
+	MediaVAD                            *bool
+	MediaDiarizeEnabled                 *bool
+	MediaAudioWindowSec                 *int
+	MediaVideoWindowSec                 *int
+	MediaTranscriptChunkSec             *int
+	MediaTranscriptChunkGapSec          *int
+	MediaClipMaxDurationMS              *int
+	MediaClipMaxBytes                   *int
+	MediaSTTMaxPayloadMB                *int
+	MediaSTTRequestTimeoutSec           *int
+	MediaSTTLanguageStrict              *bool
+	MediaSTTOnUncoveredLanguage         *string
+	MediaSTTMinCoverage                 *float64
+	MediaSTTOnPartialTranscript         *string
+	MediaSTTLanguageScope               *string
+	MediaSTTLanguageIdentifier          *string
+	MediaSTTLanguageProbeSec            *int
+	MediaSTTRequireValidation           *bool
+	MediaSTTOnRouteError                *string
+	MediaSTTRouteRetryAfter             *time.Duration
+	MediaSTTTracks                      []string
+	ElevenLabsAPIKey                    *string
+	ServerTLSCertFile                   *string
+	ServerTLSKeyFile                    *string
+	MediaBatchTwoPhase                  *bool
+	MediaBatchProgress                  *bool
+	MediaBatchManifest                  *string
 	// session timings expressed as YAML duration strings.  populated by
 	// parseConfigYAML's custom parser via setFileScalarValue rather than the
 	// standard yaml.Unmarshal machinery.  struct tags are therefore omitted
@@ -1693,131 +1718,136 @@ type persistedConfig struct {
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
 	HealthCheckInterval      time.Duration `yaml:"health_check_interval"`
 
-	ElevenLabsBaseURL                  string        `yaml:"elevenlabs_base_url"`
-	ElevenLabsTTSVoiceID               string        `yaml:"elevenlabs_tts_voice_id"`
-	AllowedOrigins                     []string      `yaml:"allowed_origins"`
-	RAGSystemPrompt                    string        `yaml:"rag_system_prompt"`
-	RAGGenerateAnswer                  bool          `yaml:"rag_generate_answer"`
-	RAGKDefault                        int           `yaml:"rag_k_default"`
-	RAGMaxContextChars                 int           `yaml:"rag_max_context_chars"`
-	RAGOversampleFactor                int           `yaml:"rag_oversample_factor"`
-	RetrievalHybridEnabled             bool          `yaml:"retrieval_hybrid_enabled"`
-	DedupRetrieval                     bool          `yaml:"dedup_retrieval"`
-	RetrievalMinScore                  float64       `yaml:"retrieval_min_score"`
-	RetrievalRecencyHalfLife           time.Duration `yaml:"retrieval_recency_half_life"`
-	ContextCompressionEnabled          bool          `yaml:"context_compression_enabled"`
-	ContextCompressionTargetRatio      float64       `yaml:"context_compression_target_ratio"`
-	RetrievalAdaptiveEnabled           bool          `yaml:"retrieval_adaptive_enabled"`
-	RetrievalAdaptiveKMin              int           `yaml:"retrieval_adaptive_k_min"`
-	RetrievalAdaptiveKMax              int           `yaml:"retrieval_adaptive_k_max"`
-	RetrievalMMREnabled                bool          `yaml:"retrieval_mmr_enabled"`
-	RetrievalMMRLambda                 float64       `yaml:"retrieval_mmr_lambda"`
-	RetrievalHyDEEnabled               bool          `yaml:"retrieval_hyde_enabled"`
-	RetrievalHyDEMode                  string        `yaml:"retrieval_hyde_mode"`
-	RetrievalHyDESuperlative           bool          `yaml:"retrieval_hyde_superlative"`
-	RAGVerifyFaithfulness              bool          `yaml:"rag_verify_faithfulness"`
-	RAGEvidenceThreshold               string        `yaml:"rag_evidence_threshold"`
-	RetrievalContextualEnabled         bool          `yaml:"retrieval_contextual_enabled"`
-	RetrievalContextualProvider        string        `yaml:"retrieval_contextual_provider"`
-	RetrievalContextualModel           string        `yaml:"retrieval_contextual_model"`
-	RetrievalContextualMaxTokens       int           `yaml:"retrieval_contextual_max_tokens"`
-	RetrievalContextualPromptVersion   string        `yaml:"retrieval_contextual_prompt_version"`
-	RetrievalContextualPrompt          string        `yaml:"retrieval_contextual_prompt"`
-	CrossLingualEnabled                bool          `yaml:"cross_lingual_enabled"`
-	CrossLingualTargetLangs            []string      `yaml:"cross_lingual_target_langs"`
-	RetrievalHierarchicalEnabled       bool          `yaml:"retrieval_hierarchical_enabled"`
-	RetrievalHierarchicalSourceReps    []string      `yaml:"retrieval_hierarchical_source_reps"`
-	RetrievalHierarchicalLevels        []string      `yaml:"retrieval_hierarchical_levels"`
-	RetrievalHierarchicalProvider      string        `yaml:"retrieval_hierarchical_provider"`
-	RetrievalHierarchicalMaxTokens     int           `yaml:"retrieval_hierarchical_max_tokens"`
-	RetrievalHierarchicalPromptVersion string        `yaml:"retrieval_hierarchical_prompt_version"`
-	RetrievalHierarchicalPrompt        string        `yaml:"retrieval_hierarchical_prompt"`
-	RerankEnabled                      bool          `yaml:"rerank_enabled"`
-	RerankProvider                     string        `yaml:"rerank_provider"`
-	CohereBaseURL                      string        `yaml:"cohere_base_url"`
-	RerankModel                        string        `yaml:"rerank_model"`
-	RerankCandidatePool                int           `yaml:"rerank_candidate_pool"`
-	ChunkingMaxTokens                  int           `yaml:"chunking_max_tokens"`
-	ChunkingOverlapTokens              int           `yaml:"chunking_overlap_tokens"`
-	IngestGitignore                    bool          `yaml:"ingest_gitignore"`
-	IngestFollowSymlinks               bool          `yaml:"ingest_follow_symlinks"`
-	IngestMaxFileMB                    int           `yaml:"ingest_max_file_mb"`
-	IngestDoclingTimeoutSec            int           `yaml:"ingest_docling_timeout_sec"`
-	IngestExcludeDirs                  []string      `yaml:"ingest_exclude_dirs"`
-	IngestPDFMode                      string        `yaml:"ingest_pdf_mode"`
-	IngestImagesMode                   string        `yaml:"ingest_images_mode"`
-	IngestAudioMode                    string        `yaml:"ingest_audio_mode"`
-	IngestArchivesMode                 string        `yaml:"ingest_archives_mode"`
-	IngestExtractor                    string        `yaml:"ingest_extractor"`
-	IngestOnUnsupported                string        `yaml:"ingest_on_unsupported"`
-	IngestMediaIdentity                string        `yaml:"ingest_media_identity"`
-	IndexBackend                       string        `yaml:"index_backend"`
-	IngestScanCache                    bool          `yaml:"ingest_scan_cache"`
-	IngestLateChunking                 bool          `yaml:"ingest_late_chunking"`
-	IngestWatch                        bool          `yaml:"ingest_watch"`
-	IngestWatchDebounce                time.Duration `yaml:"ingest_watch_debounce"`
-	STTProvider                        string        `yaml:"stt_provider"`
-	STTMistralModel                    string        `yaml:"stt_mistral_model"`
-	STTElevenLabsModel                 string        `yaml:"stt_elevenlabs_model"`
-	STTElevenLabsLanguageCode          string        `yaml:"stt_elevenlabs_language_code"`
-	RecognizeProvider                  string        `yaml:"recognize_provider"`
-	RecognizeServeURL                  string        `yaml:"recognize_serve_url"`
-	RecognizeServeCommand              string        `yaml:"recognize_serve_command"`
-	RecognizeTimeout                   time.Duration `yaml:"recognize_timeout"`
-	RecognizeTimeoutPerMediaSecond     float64       `yaml:"recognize_timeout_per_media_second"`
-	QualityGatesEnabled                bool          `yaml:"quality_gates_enabled"`
-	LanguageDetectionEnabled           bool          `yaml:"language_detection_enabled"`
-	MediaSidecarsDisabled              bool          `yaml:"media_sidecars_disabled"`
-	MediaVariantsGroup                 bool          `yaml:"media_variants_group"`
-	MediaVariantsSelect                string        `yaml:"media_variants_select"`
-	MediaTranslateEnabled              bool          `yaml:"media_translate_enabled"`
-	MediaTranslateTargetLangs          []string      `yaml:"media_translate_target_langs"`
-	MediaTranslateEngine               string        `yaml:"media_translate_engine"`
-	MediaTranslateNameHints            bool          `yaml:"media_translate_name_hints"`
-	MediaTranslateWhisperWindowSec     int           `yaml:"media_translate_whisper_window_sec"`
-	MediaTranslateWindowLines          int           `yaml:"media_translate_window_lines"`
-	MediaTranslateContextLines         int           `yaml:"media_translate_context_lines"`
-	MediaFilterWords                   []string      `yaml:"media_filter_words"`
-	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
-	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
-	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
-	MediaSubtitlesSegmentation         string        `yaml:"media_subtitles_segmentation"`
-	MediaSubtitlesEmitEnabled          bool          `yaml:"media_subtitles_emit_enabled"`
-	MediaSubtitlesEmitFormats          []string      `yaml:"media_subtitles_emit_formats"`
-	MediaSubtitlesEmitLanguages        []string      `yaml:"media_subtitles_emit_languages"`
-	MediaSubtitlesEmitPolicy           string        `yaml:"media_subtitles_emit_policy"`
-	MediaSubtitlesEmitDir              string        `yaml:"media_subtitles_emit_dir"`
-	MediaSubtitlesGlossary             []string      `yaml:"media_subtitles_glossary"`
-	MediaSubtitlesDropPhrases          []string      `yaml:"media_subtitles_drop_phrases"`
-	MediaSubtitlesScrubPhrases         []string      `yaml:"media_subtitles_scrub_phrases"`
-	MediaSubtitlesCollapseRepeats      int           `yaml:"media_subtitles_collapse_repeats"`
-	MediaSubtitlesDropURLs             bool          `yaml:"media_subtitles_drop_urls"`
-	MediaSubtitlesExpectScript         string        `yaml:"media_subtitles_expect_script"`
-	MediaTrimLeadingSilence            bool          `yaml:"media_trim_leading_silence"`
-	MediaSilenceThresholdDB            float64       `yaml:"media_silence_threshold_db"`
-	MediaVAD                           bool          `yaml:"media_vad"`
-	MediaAudioWindowSec                int           `yaml:"media_audio_window_sec"`
-	MediaVideoWindowSec                int           `yaml:"media_video_window_sec"`
-	MediaTranscriptChunkSec            int           `yaml:"media_transcript_chunk_sec"`
-	MediaTranscriptChunkGapSec         int           `yaml:"media_transcript_chunk_gap_sec"`
-	MediaClipMaxDurationMS             int           `yaml:"media_clip_max_duration_ms"`
-	MediaClipMaxBytes                  int           `yaml:"media_clip_max_bytes"`
-	MediaSTTMaxPayloadMB               int           `yaml:"media_stt_max_payload_mb"`
-	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
-	MediaSTTLanguageStrict             bool          `yaml:"media_stt_language_strict"`
-	MediaSTTOnUncoveredLanguage        string        `yaml:"media_stt_on_uncovered_language"`
-	MediaSTTMinCoverage                float64       `yaml:"media_stt_min_coverage"`
-	MediaSTTOnPartialTranscript        string        `yaml:"media_stt_on_partial_transcript"`
-	MediaSTTLanguageScope              string        `yaml:"media_stt_language_scope"`
-	MediaSTTLanguageIdentifier         string        `yaml:"media_stt_language_identifier"`
-	MediaSTTLanguageProbeSec           int           `yaml:"media_stt_language_probe_sec"`
-	MediaSTTRequireValidation          bool          `yaml:"media_stt_require_validation"`
-	MediaSTTOnRouteError               string        `yaml:"media_stt_on_route_error"`
-	MediaSTTRouteRetryAfter            time.Duration `yaml:"media_stt_route_retry_after"`
-	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
-	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
-	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
-	MediaBatchManifest                 string        `yaml:"media_batch_manifest"`
+	ElevenLabsBaseURL                   string        `yaml:"elevenlabs_base_url"`
+	ElevenLabsTTSVoiceID                string        `yaml:"elevenlabs_tts_voice_id"`
+	AllowedOrigins                      []string      `yaml:"allowed_origins"`
+	RAGSystemPrompt                     string        `yaml:"rag_system_prompt"`
+	RAGGenerateAnswer                   bool          `yaml:"rag_generate_answer"`
+	RAGKDefault                         int           `yaml:"rag_k_default"`
+	RAGMaxContextChars                  int           `yaml:"rag_max_context_chars"`
+	RAGOversampleFactor                 int           `yaml:"rag_oversample_factor"`
+	RetrievalHybridEnabled              bool          `yaml:"retrieval_hybrid_enabled"`
+	DedupRetrieval                      bool          `yaml:"dedup_retrieval"`
+	RetrievalMinScore                   float64       `yaml:"retrieval_min_score"`
+	RetrievalRecencyHalfLife            time.Duration `yaml:"retrieval_recency_half_life"`
+	ContextCompressionEnabled           bool          `yaml:"context_compression_enabled"`
+	ContextCompressionTargetRatio       float64       `yaml:"context_compression_target_ratio"`
+	RetrievalAdaptiveEnabled            bool          `yaml:"retrieval_adaptive_enabled"`
+	RetrievalAdaptiveKMin               int           `yaml:"retrieval_adaptive_k_min"`
+	RetrievalAdaptiveKMax               int           `yaml:"retrieval_adaptive_k_max"`
+	RetrievalMMREnabled                 bool          `yaml:"retrieval_mmr_enabled"`
+	RetrievalMMRLambda                  float64       `yaml:"retrieval_mmr_lambda"`
+	RetrievalHyDEEnabled                bool          `yaml:"retrieval_hyde_enabled"`
+	RetrievalHyDEMode                   string        `yaml:"retrieval_hyde_mode"`
+	RetrievalHyDESuperlative            bool          `yaml:"retrieval_hyde_superlative"`
+	RAGVerifyFaithfulness               bool          `yaml:"rag_verify_faithfulness"`
+	RAGEvidenceThreshold                string        `yaml:"rag_evidence_threshold"`
+	RetrievalContextualEnabled          bool          `yaml:"retrieval_contextual_enabled"`
+	RetrievalContextualProvider         string        `yaml:"retrieval_contextual_provider"`
+	RetrievalContextualModel            string        `yaml:"retrieval_contextual_model"`
+	RetrievalContextualMaxTokens        int           `yaml:"retrieval_contextual_max_tokens"`
+	RetrievalContextualPromptVersion    string        `yaml:"retrieval_contextual_prompt_version"`
+	RetrievalContextualPrompt           string        `yaml:"retrieval_contextual_prompt"`
+	CrossLingualEnabled                 bool          `yaml:"cross_lingual_enabled"`
+	CrossLingualTargetLangs             []string      `yaml:"cross_lingual_target_langs"`
+	RetrievalHierarchicalEnabled        bool          `yaml:"retrieval_hierarchical_enabled"`
+	RetrievalHierarchicalSourceReps     []string      `yaml:"retrieval_hierarchical_source_reps"`
+	RetrievalHierarchicalLevels         []string      `yaml:"retrieval_hierarchical_levels"`
+	RetrievalHierarchicalProvider       string        `yaml:"retrieval_hierarchical_provider"`
+	RetrievalHierarchicalMaxTokens      int           `yaml:"retrieval_hierarchical_max_tokens"`
+	RetrievalHierarchicalPromptVersion  string        `yaml:"retrieval_hierarchical_prompt_version"`
+	RetrievalHierarchicalPrompt         string        `yaml:"retrieval_hierarchical_prompt"`
+	RerankEnabled                       bool          `yaml:"rerank_enabled"`
+	RerankProvider                      string        `yaml:"rerank_provider"`
+	CohereBaseURL                       string        `yaml:"cohere_base_url"`
+	RerankModel                         string        `yaml:"rerank_model"`
+	RerankCandidatePool                 int           `yaml:"rerank_candidate_pool"`
+	ChunkingMaxTokens                   int           `yaml:"chunking_max_tokens"`
+	ChunkingOverlapTokens               int           `yaml:"chunking_overlap_tokens"`
+	IngestGitignore                     bool          `yaml:"ingest_gitignore"`
+	IngestFollowSymlinks                bool          `yaml:"ingest_follow_symlinks"`
+	IngestMaxFileMB                     int           `yaml:"ingest_max_file_mb"`
+	IngestDoclingTimeoutSec             int           `yaml:"ingest_docling_timeout_sec"`
+	IngestExcludeDirs                   []string      `yaml:"ingest_exclude_dirs"`
+	IngestPDFMode                       string        `yaml:"ingest_pdf_mode"`
+	IngestImagesMode                    string        `yaml:"ingest_images_mode"`
+	IngestAudioMode                     string        `yaml:"ingest_audio_mode"`
+	IngestArchivesMode                  string        `yaml:"ingest_archives_mode"`
+	IngestExtractor                     string        `yaml:"ingest_extractor"`
+	IngestOnUnsupported                 string        `yaml:"ingest_on_unsupported"`
+	IngestMediaIdentity                 string        `yaml:"ingest_media_identity"`
+	IndexBackend                        string        `yaml:"index_backend"`
+	IngestScanCache                     bool          `yaml:"ingest_scan_cache"`
+	IngestLateChunking                  bool          `yaml:"ingest_late_chunking"`
+	IngestWatch                         bool          `yaml:"ingest_watch"`
+	IngestWatchDebounce                 time.Duration `yaml:"ingest_watch_debounce"`
+	STTProvider                         string        `yaml:"stt_provider"`
+	STTMistralModel                     string        `yaml:"stt_mistral_model"`
+	STTElevenLabsModel                  string        `yaml:"stt_elevenlabs_model"`
+	STTElevenLabsLanguageCode           string        `yaml:"stt_elevenlabs_language_code"`
+	RecognizeProvider                   string        `yaml:"recognize_provider"`
+	RecognizeServeURL                   string        `yaml:"recognize_serve_url"`
+	RecognizeServeCommand               string        `yaml:"recognize_serve_command"`
+	RecognizeTimeout                    time.Duration `yaml:"recognize_timeout"`
+	RecognizeTimeoutPerMediaSecond      float64       `yaml:"recognize_timeout_per_media_second"`
+	QualityGatesEnabled                 bool          `yaml:"quality_gates_enabled"`
+	LanguageDetectionEnabled            bool          `yaml:"language_detection_enabled"`
+	MediaSidecarsDisabled               bool          `yaml:"media_sidecars_disabled"`
+	MediaVariantsGroup                  bool          `yaml:"media_variants_group"`
+	MediaVariantsSelect                 string        `yaml:"media_variants_select"`
+	MediaTranslateEnabled               bool          `yaml:"media_translate_enabled"`
+	MediaTranslateTargetLangs           []string      `yaml:"media_translate_target_langs"`
+	MediaTranslateEngine                string        `yaml:"media_translate_engine"`
+	MediaTranslateNameHints             bool          `yaml:"media_translate_name_hints"`
+	MediaTranslateWhisperWindowSec      int           `yaml:"media_translate_whisper_window_sec"`
+	MediaTranslateWindowLines           int           `yaml:"media_translate_window_lines"`
+	MediaTranslateContextLines          int           `yaml:"media_translate_context_lines"`
+	MediaFilterWords                    []string      `yaml:"media_filter_words"`
+	MediaSubtitlesTTMLEnabled           bool          `yaml:"media_subtitles_ttml_enabled"`
+	MediaSubtitlesTTMLAlignToleranceMS  int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
+	MediaSubtitlesSMILEnabled           bool          `yaml:"media_subtitles_smil_enabled"`
+	MediaSubtitlesSegmentation          string        `yaml:"media_subtitles_segmentation"`
+	MediaSubtitlesEmitEnabled           bool          `yaml:"media_subtitles_emit_enabled"`
+	MediaSubtitlesEmitFormats           []string      `yaml:"media_subtitles_emit_formats"`
+	MediaSubtitlesEmitLanguages         []string      `yaml:"media_subtitles_emit_languages"`
+	MediaSubtitlesEmitPolicy            string        `yaml:"media_subtitles_emit_policy"`
+	MediaSubtitlesEmitDir               string        `yaml:"media_subtitles_emit_dir"`
+	MediaSubtitlesEmitSMIL              string        `yaml:"media_subtitles_emit_smil"`
+	MediaSubtitlesEmitSMILParams        []string      `yaml:"media_subtitles_emit_smil_params"`
+	MediaSubtitlesEmitSMILLanguageCodes string        `yaml:"media_subtitles_emit_smil_language_codes"`
+	MediaSubtitlesEmitTTMLName          string        `yaml:"media_subtitles_emit_ttml_name"`
+	MediaSubtitlesTTMLSegmentation      string        `yaml:"media_subtitles_ttml_segmentation"`
+	MediaSubtitlesGlossary              []string      `yaml:"media_subtitles_glossary"`
+	MediaSubtitlesDropPhrases           []string      `yaml:"media_subtitles_drop_phrases"`
+	MediaSubtitlesScrubPhrases          []string      `yaml:"media_subtitles_scrub_phrases"`
+	MediaSubtitlesCollapseRepeats       int           `yaml:"media_subtitles_collapse_repeats"`
+	MediaSubtitlesDropURLs              bool          `yaml:"media_subtitles_drop_urls"`
+	MediaSubtitlesExpectScript          string        `yaml:"media_subtitles_expect_script"`
+	MediaTrimLeadingSilence             bool          `yaml:"media_trim_leading_silence"`
+	MediaSilenceThresholdDB             float64       `yaml:"media_silence_threshold_db"`
+	MediaVAD                            bool          `yaml:"media_vad"`
+	MediaAudioWindowSec                 int           `yaml:"media_audio_window_sec"`
+	MediaVideoWindowSec                 int           `yaml:"media_video_window_sec"`
+	MediaTranscriptChunkSec             int           `yaml:"media_transcript_chunk_sec"`
+	MediaTranscriptChunkGapSec          int           `yaml:"media_transcript_chunk_gap_sec"`
+	MediaClipMaxDurationMS              int           `yaml:"media_clip_max_duration_ms"`
+	MediaClipMaxBytes                   int           `yaml:"media_clip_max_bytes"`
+	MediaSTTMaxPayloadMB                int           `yaml:"media_stt_max_payload_mb"`
+	MediaSTTRequestTimeoutSec           int           `yaml:"media_stt_request_timeout_sec"`
+	MediaSTTLanguageStrict              bool          `yaml:"media_stt_language_strict"`
+	MediaSTTOnUncoveredLanguage         string        `yaml:"media_stt_on_uncovered_language"`
+	MediaSTTMinCoverage                 float64       `yaml:"media_stt_min_coverage"`
+	MediaSTTOnPartialTranscript         string        `yaml:"media_stt_on_partial_transcript"`
+	MediaSTTLanguageScope               string        `yaml:"media_stt_language_scope"`
+	MediaSTTLanguageIdentifier          string        `yaml:"media_stt_language_identifier"`
+	MediaSTTLanguageProbeSec            int           `yaml:"media_stt_language_probe_sec"`
+	MediaSTTRequireValidation           bool          `yaml:"media_stt_require_validation"`
+	MediaSTTOnRouteError                string        `yaml:"media_stt_on_route_error"`
+	MediaSTTRouteRetryAfter             time.Duration `yaml:"media_stt_route_retry_after"`
+	MediaSTTTracks                      []string      `yaml:"media_stt_tracks"`
+	MediaBatchTwoPhase                  bool          `yaml:"media_batch_two_phase"`
+	MediaBatchProgress                  bool          `yaml:"media_batch_progress"`
+	MediaBatchManifest                  string        `yaml:"media_batch_manifest"`
 	// MediaDiarizeEnabled is the tri-state diarization opt (SPEC §8.6.8): a
 	// *bool so the snapshot can round-trip omitted (nil) vs. false vs. true
 	// without collapsing the auto/off distinction.
@@ -2108,6 +2138,12 @@ func Default() Config {
 		MediaSubtitlesEmitLanguages: nil,
 		MediaSubtitlesEmitPolicy:    DefaultMediaSubtitlesEmitPolicy,
 		MediaSubtitlesEmitDir:       "",
+		// SMIL caption patch and TTML naming/segmentation (SPEC §8.6.14): off and
+		// unchanged by default.
+		MediaSubtitlesEmitSMIL:              "off",
+		MediaSubtitlesEmitSMILLanguageCodes: "bcp47",
+		MediaSubtitlesEmitTTMLName:          "group",
+		MediaSubtitlesTTMLSegmentation:      "chunk",
 		// Export-time cue cleaning (clean_srt.py port) is OFF by default: no
 		// glossary rewrites, no phrase drops, no repetition-collapse (< 2
 		// disables), no URL drop.
@@ -2163,155 +2199,160 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 	}
 
 	return persistedConfig{
-		RootDir:                            cfg.RootDir,
-		StateDir:                           cfg.StateDir,
-		ListenAddr:                         cfg.ListenAddr,
-		MCPPath:                            cfg.MCPPath,
-		ProtocolVersion:                    cfg.ProtocolVersion,
-		Public:                             cfg.Public,
-		AuthMode:                           cfg.AuthMode,
-		ServerName:                         cfg.ServerName,
-		RateLimitRPS:                       cfg.RateLimitRPS,
-		RateLimitBurst:                     cfg.RateLimitBurst,
-		TrustedProxies:                     append([]string(nil), cfg.TrustedProxies...),
-		PathExcludes:                       append([]string(nil), cfg.PathExcludes...),
-		SecretPatterns:                     append([]string(nil), cfg.SecretPatterns...),
-		DoclingCommand:                     cfg.DoclingCommand,
-		DoclingServeURL:                    cfg.IngestDoclingServeURL,
-		PandocCommand:                      cfg.IngestPandocCommand,
-		SessionInactivityTimeout:           cfg.SessionInactivityTimeout,
-		SessionMaxLifetime:                 cfg.SessionMaxLifetime,
-		HealthCheckInterval:                cfg.HealthCheckInterval,
-		ElevenLabsBaseURL:                  cfg.ElevenLabsBaseURL,
-		ElevenLabsTTSVoiceID:               cfg.ElevenLabsTTSVoiceID,
-		AllowedOrigins:                     append([]string(nil), cfg.AllowedOrigins...),
-		RAGSystemPrompt:                    cfg.RAGSystemPrompt,
-		RAGGenerateAnswer:                  cfg.RAGGenerateAnswer,
-		RAGKDefault:                        cfg.RAGKDefault,
-		RAGMaxContextChars:                 cfg.RAGMaxContextChars,
-		RAGOversampleFactor:                cfg.RAGOversampleFactor,
-		RetrievalHybridEnabled:             cfg.RetrievalHybridEnabled,
-		DedupRetrieval:                     cfg.DedupRetrieval,
-		RetrievalMinScore:                  cfg.RetrievalMinScore,
-		RetrievalRecencyHalfLife:           cfg.RetrievalRecencyHalfLife,
-		ContextCompressionEnabled:          cfg.ContextCompressionEnabled,
-		ContextCompressionTargetRatio:      cfg.ContextCompressionTargetRatio,
-		RetrievalAdaptiveEnabled:           cfg.RetrievalAdaptiveEnabled,
-		RetrievalAdaptiveKMin:              cfg.RetrievalAdaptiveKMin,
-		RetrievalAdaptiveKMax:              cfg.RetrievalAdaptiveKMax,
-		RetrievalMMREnabled:                cfg.RetrievalMMREnabled,
-		RetrievalMMRLambda:                 cfg.RetrievalMMRLambda,
-		RetrievalHyDEEnabled:               cfg.RetrievalHyDEEnabled,
-		RetrievalHyDEMode:                  cfg.RetrievalHyDEMode,
-		RetrievalHyDESuperlative:           cfg.RetrievalHyDESuperlative,
-		RAGVerifyFaithfulness:              cfg.RAGVerifyFaithfulness,
-		RAGEvidenceThreshold:               cfg.RAGEvidenceThreshold,
-		RetrievalContextualEnabled:         cfg.RetrievalContextualEnabled,
-		RetrievalContextualProvider:        cfg.RetrievalContextualProvider,
-		RetrievalContextualModel:           cfg.RetrievalContextualModel,
-		RetrievalContextualMaxTokens:       cfg.RetrievalContextualMaxTokens,
-		RetrievalContextualPromptVersion:   cfg.RetrievalContextualPromptVersion,
-		RetrievalContextualPrompt:          cfg.RetrievalContextualPrompt,
-		CrossLingualEnabled:                cfg.CrossLingualEnabled,
-		CrossLingualTargetLangs:            append([]string(nil), cfg.CrossLingualTargetLangs...),
-		RetrievalHierarchicalEnabled:       cfg.RetrievalHierarchicalEnabled,
-		RetrievalHierarchicalSourceReps:    append([]string(nil), cfg.RetrievalHierarchicalSourceReps...),
-		RetrievalHierarchicalLevels:        append([]string(nil), cfg.RetrievalHierarchicalLevels...),
-		RetrievalHierarchicalProvider:      cfg.RetrievalHierarchicalProvider,
-		RetrievalHierarchicalMaxTokens:     cfg.RetrievalHierarchicalMaxTokens,
-		RetrievalHierarchicalPromptVersion: cfg.RetrievalHierarchicalPromptVersion,
-		RetrievalHierarchicalPrompt:        cfg.RetrievalHierarchicalPrompt,
-		RerankEnabled:                      rerankEnabledEffective(cfg),
-		RerankProvider:                     cfg.RerankProvider,
-		CohereBaseURL:                      cfg.CohereBaseURL,
-		RerankModel:                        cfg.RerankModel,
-		RerankCandidatePool:                cfg.RerankCandidatePool,
-		ChunkingMaxTokens:                  cfg.ChunkingMaxTokens,
-		ChunkingOverlapTokens:              cfg.ChunkingOverlapTokens,
-		IngestGitignore:                    cfg.IngestGitignore,
-		IngestFollowSymlinks:               cfg.IngestFollowSymlinks,
-		IngestMaxFileMB:                    cfg.IngestMaxFileMB,
-		IngestDoclingTimeoutSec:            cfg.IngestDoclingTimeoutSec,
-		IngestExcludeDirs:                  append([]string(nil), cfg.IngestExcludeDirs...),
-		IngestPDFMode:                      cfg.IngestPDFMode,
-		IngestImagesMode:                   cfg.IngestImagesMode,
-		IngestAudioMode:                    cfg.IngestAudioMode,
-		IngestArchivesMode:                 cfg.IngestArchivesMode,
-		IngestExtractor:                    cfg.IngestExtractor,
-		IngestOnUnsupported:                cfg.IngestOnUnsupported,
-		IngestMediaIdentity:                cfg.IngestMediaIdentity,
-		IndexBackend:                       cfg.IndexBackend,
-		IngestScanCache:                    cfg.IngestScanCache,
-		IngestLateChunking:                 cfg.IngestLateChunking,
-		IngestWatch:                        cfg.IngestWatch,
-		IngestWatchDebounce:                cfg.IngestWatchDebounce,
-		STTProvider:                        cfg.STTProvider,
-		STTMistralModel:                    cfg.STTMistralModel,
-		STTElevenLabsModel:                 cfg.STTElevenLabsModel,
-		STTElevenLabsLanguageCode:          cfg.STTElevenLabsLanguageCode,
-		RecognizeProvider:                  cfg.RecognizeProvider,
-		RecognizeServeURL:                  cfg.RecognizeServeURL,
-		RecognizeServeCommand:              cfg.RecognizeServeCommand,
-		RecognizeTimeout:                   cfg.RecognizeTimeout,
-		RecognizeTimeoutPerMediaSecond:     cfg.RecognizeTimeoutPerMediaSecond,
-		QualityGatesEnabled:                cfg.QualityGatesEnabled,
-		LanguageDetectionEnabled:           cfg.LanguageDetectionEnabled,
-		MediaSidecarsDisabled:              cfg.MediaSidecarsDisabled,
-		MediaVariantsGroup:                 cfg.MediaVariantsGroup,
-		MediaVariantsSelect:                cfg.MediaVariantsSelect,
-		MediaTranslateEnabled:              cfg.MediaTranslateEnabled,
-		MediaTranslateTargetLangs:          append([]string(nil), cfg.MediaTranslateTargetLangs...),
-		MediaTranslateEngine:               cfg.MediaTranslateEngine,
-		MediaTranslateNameHints:            cfg.MediaTranslateNameHints,
-		MediaTranslateWhisperWindowSec:     cfg.MediaTranslateWhisperWindowSec,
-		MediaTranslateWindowLines:          cfg.MediaTranslateWindowLines,
-		MediaTranslateContextLines:         cfg.MediaTranslateContextLines,
-		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
-		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
-		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
-		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
-		MediaSubtitlesSegmentation:         cfg.MediaSubtitlesSegmentation,
-		MediaSubtitlesEmitEnabled:          cfg.MediaSubtitlesEmitEnabled,
-		MediaSubtitlesEmitFormats:          append([]string(nil), cfg.MediaSubtitlesEmitFormats...),
-		MediaSubtitlesEmitLanguages:        append([]string(nil), cfg.MediaSubtitlesEmitLanguages...),
-		MediaSubtitlesEmitPolicy:           cfg.MediaSubtitlesEmitPolicy,
-		MediaSubtitlesEmitDir:              cfg.MediaSubtitlesEmitDir,
-		MediaSubtitlesGlossary:             append([]string(nil), cfg.MediaSubtitlesGlossary...),
-		MediaSubtitlesDropPhrases:          append([]string(nil), cfg.MediaSubtitlesDropPhrases...),
-		MediaSubtitlesScrubPhrases:         append([]string(nil), cfg.MediaSubtitlesScrubPhrases...),
-		MediaSubtitlesCollapseRepeats:      cfg.MediaSubtitlesCollapseRepeats,
-		MediaSubtitlesDropURLs:             cfg.MediaSubtitlesDropURLs,
-		MediaSubtitlesExpectScript:         cfg.MediaSubtitlesExpectScript,
-		MediaTrimLeadingSilence:            cfg.MediaTrimLeadingSilence,
-		MediaSilenceThresholdDB:            cfg.MediaSilenceThresholdDB,
-		MediaVAD:                           cfg.MediaVAD,
-		MediaDiarizeEnabled:                copyBoolPtr(cfg.MediaDiarizeEnabled),
-		MediaAudioWindowSec:                cfg.MediaAudioWindowSec,
-		MediaVideoWindowSec:                cfg.MediaVideoWindowSec,
-		MediaTranscriptChunkSec:            cfg.MediaTranscriptChunkSec,
-		MediaTranscriptChunkGapSec:         cfg.MediaTranscriptChunkGapSec,
-		MediaClipMaxDurationMS:             cfg.MediaClipMaxDurationMS,
-		MediaClipMaxBytes:                  cfg.MediaClipMaxBytes,
-		MediaSTTMaxPayloadMB:               cfg.MediaSTTMaxPayloadMB,
-		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
-		MediaSTTLanguageStrict:             cfg.MediaSTTLanguageStrict,
-		MediaSTTOnUncoveredLanguage:        cfg.MediaSTTOnUncoveredLanguage,
-		MediaSTTMinCoverage:                cfg.MediaSTTMinCoverage,
-		MediaSTTOnPartialTranscript:        cfg.MediaSTTOnPartialTranscript,
-		MediaSTTLanguageScope:              cfg.MediaSTTLanguageScope,
-		MediaSTTLanguageIdentifier:         cfg.MediaSTTLanguageIdentifier,
-		MediaSTTLanguageProbeSec:           cfg.MediaSTTLanguageProbeSec,
-		MediaSTTRequireValidation:          cfg.MediaSTTRequireValidation,
-		MediaSTTOnRouteError:               cfg.MediaSTTOnRouteError,
-		MediaSTTRouteRetryAfter:            cfg.MediaSTTRouteRetryAfter,
-		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
-		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
-		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
-		X402Mode:                           cfg.X402.Mode,
-		X402FacilitatorURL:                 cfg.X402.FacilitatorURL,
-		MediaBatchTwoPhase:                 cfg.MediaBatchTwoPhase,
-		MediaBatchProgress:                 cfg.MediaBatchProgress,
-		MediaBatchManifest:                 cfg.MediaBatchManifest,
+		RootDir:                             cfg.RootDir,
+		StateDir:                            cfg.StateDir,
+		ListenAddr:                          cfg.ListenAddr,
+		MCPPath:                             cfg.MCPPath,
+		ProtocolVersion:                     cfg.ProtocolVersion,
+		Public:                              cfg.Public,
+		AuthMode:                            cfg.AuthMode,
+		ServerName:                          cfg.ServerName,
+		RateLimitRPS:                        cfg.RateLimitRPS,
+		RateLimitBurst:                      cfg.RateLimitBurst,
+		TrustedProxies:                      append([]string(nil), cfg.TrustedProxies...),
+		PathExcludes:                        append([]string(nil), cfg.PathExcludes...),
+		SecretPatterns:                      append([]string(nil), cfg.SecretPatterns...),
+		DoclingCommand:                      cfg.DoclingCommand,
+		DoclingServeURL:                     cfg.IngestDoclingServeURL,
+		PandocCommand:                       cfg.IngestPandocCommand,
+		SessionInactivityTimeout:            cfg.SessionInactivityTimeout,
+		SessionMaxLifetime:                  cfg.SessionMaxLifetime,
+		HealthCheckInterval:                 cfg.HealthCheckInterval,
+		ElevenLabsBaseURL:                   cfg.ElevenLabsBaseURL,
+		ElevenLabsTTSVoiceID:                cfg.ElevenLabsTTSVoiceID,
+		AllowedOrigins:                      append([]string(nil), cfg.AllowedOrigins...),
+		RAGSystemPrompt:                     cfg.RAGSystemPrompt,
+		RAGGenerateAnswer:                   cfg.RAGGenerateAnswer,
+		RAGKDefault:                         cfg.RAGKDefault,
+		RAGMaxContextChars:                  cfg.RAGMaxContextChars,
+		RAGOversampleFactor:                 cfg.RAGOversampleFactor,
+		RetrievalHybridEnabled:              cfg.RetrievalHybridEnabled,
+		DedupRetrieval:                      cfg.DedupRetrieval,
+		RetrievalMinScore:                   cfg.RetrievalMinScore,
+		RetrievalRecencyHalfLife:            cfg.RetrievalRecencyHalfLife,
+		ContextCompressionEnabled:           cfg.ContextCompressionEnabled,
+		ContextCompressionTargetRatio:       cfg.ContextCompressionTargetRatio,
+		RetrievalAdaptiveEnabled:            cfg.RetrievalAdaptiveEnabled,
+		RetrievalAdaptiveKMin:               cfg.RetrievalAdaptiveKMin,
+		RetrievalAdaptiveKMax:               cfg.RetrievalAdaptiveKMax,
+		RetrievalMMREnabled:                 cfg.RetrievalMMREnabled,
+		RetrievalMMRLambda:                  cfg.RetrievalMMRLambda,
+		RetrievalHyDEEnabled:                cfg.RetrievalHyDEEnabled,
+		RetrievalHyDEMode:                   cfg.RetrievalHyDEMode,
+		RetrievalHyDESuperlative:            cfg.RetrievalHyDESuperlative,
+		RAGVerifyFaithfulness:               cfg.RAGVerifyFaithfulness,
+		RAGEvidenceThreshold:                cfg.RAGEvidenceThreshold,
+		RetrievalContextualEnabled:          cfg.RetrievalContextualEnabled,
+		RetrievalContextualProvider:         cfg.RetrievalContextualProvider,
+		RetrievalContextualModel:            cfg.RetrievalContextualModel,
+		RetrievalContextualMaxTokens:        cfg.RetrievalContextualMaxTokens,
+		RetrievalContextualPromptVersion:    cfg.RetrievalContextualPromptVersion,
+		RetrievalContextualPrompt:           cfg.RetrievalContextualPrompt,
+		CrossLingualEnabled:                 cfg.CrossLingualEnabled,
+		CrossLingualTargetLangs:             append([]string(nil), cfg.CrossLingualTargetLangs...),
+		RetrievalHierarchicalEnabled:        cfg.RetrievalHierarchicalEnabled,
+		RetrievalHierarchicalSourceReps:     append([]string(nil), cfg.RetrievalHierarchicalSourceReps...),
+		RetrievalHierarchicalLevels:         append([]string(nil), cfg.RetrievalHierarchicalLevels...),
+		RetrievalHierarchicalProvider:       cfg.RetrievalHierarchicalProvider,
+		RetrievalHierarchicalMaxTokens:      cfg.RetrievalHierarchicalMaxTokens,
+		RetrievalHierarchicalPromptVersion:  cfg.RetrievalHierarchicalPromptVersion,
+		RetrievalHierarchicalPrompt:         cfg.RetrievalHierarchicalPrompt,
+		RerankEnabled:                       rerankEnabledEffective(cfg),
+		RerankProvider:                      cfg.RerankProvider,
+		CohereBaseURL:                       cfg.CohereBaseURL,
+		RerankModel:                         cfg.RerankModel,
+		RerankCandidatePool:                 cfg.RerankCandidatePool,
+		ChunkingMaxTokens:                   cfg.ChunkingMaxTokens,
+		ChunkingOverlapTokens:               cfg.ChunkingOverlapTokens,
+		IngestGitignore:                     cfg.IngestGitignore,
+		IngestFollowSymlinks:                cfg.IngestFollowSymlinks,
+		IngestMaxFileMB:                     cfg.IngestMaxFileMB,
+		IngestDoclingTimeoutSec:             cfg.IngestDoclingTimeoutSec,
+		IngestExcludeDirs:                   append([]string(nil), cfg.IngestExcludeDirs...),
+		IngestPDFMode:                       cfg.IngestPDFMode,
+		IngestImagesMode:                    cfg.IngestImagesMode,
+		IngestAudioMode:                     cfg.IngestAudioMode,
+		IngestArchivesMode:                  cfg.IngestArchivesMode,
+		IngestExtractor:                     cfg.IngestExtractor,
+		IngestOnUnsupported:                 cfg.IngestOnUnsupported,
+		IngestMediaIdentity:                 cfg.IngestMediaIdentity,
+		IndexBackend:                        cfg.IndexBackend,
+		IngestScanCache:                     cfg.IngestScanCache,
+		IngestLateChunking:                  cfg.IngestLateChunking,
+		IngestWatch:                         cfg.IngestWatch,
+		IngestWatchDebounce:                 cfg.IngestWatchDebounce,
+		STTProvider:                         cfg.STTProvider,
+		STTMistralModel:                     cfg.STTMistralModel,
+		STTElevenLabsModel:                  cfg.STTElevenLabsModel,
+		STTElevenLabsLanguageCode:           cfg.STTElevenLabsLanguageCode,
+		RecognizeProvider:                   cfg.RecognizeProvider,
+		RecognizeServeURL:                   cfg.RecognizeServeURL,
+		RecognizeServeCommand:               cfg.RecognizeServeCommand,
+		RecognizeTimeout:                    cfg.RecognizeTimeout,
+		RecognizeTimeoutPerMediaSecond:      cfg.RecognizeTimeoutPerMediaSecond,
+		QualityGatesEnabled:                 cfg.QualityGatesEnabled,
+		LanguageDetectionEnabled:            cfg.LanguageDetectionEnabled,
+		MediaSidecarsDisabled:               cfg.MediaSidecarsDisabled,
+		MediaVariantsGroup:                  cfg.MediaVariantsGroup,
+		MediaVariantsSelect:                 cfg.MediaVariantsSelect,
+		MediaTranslateEnabled:               cfg.MediaTranslateEnabled,
+		MediaTranslateTargetLangs:           append([]string(nil), cfg.MediaTranslateTargetLangs...),
+		MediaTranslateEngine:                cfg.MediaTranslateEngine,
+		MediaTranslateNameHints:             cfg.MediaTranslateNameHints,
+		MediaTranslateWhisperWindowSec:      cfg.MediaTranslateWhisperWindowSec,
+		MediaTranslateWindowLines:           cfg.MediaTranslateWindowLines,
+		MediaTranslateContextLines:          cfg.MediaTranslateContextLines,
+		MediaFilterWords:                    append([]string(nil), cfg.MediaFilterWords...),
+		MediaSubtitlesTTMLEnabled:           cfg.MediaSubtitlesTTMLEnabled,
+		MediaSubtitlesTTMLAlignToleranceMS:  cfg.MediaSubtitlesTTMLAlignToleranceMS,
+		MediaSubtitlesSMILEnabled:           cfg.MediaSubtitlesSMILEnabled,
+		MediaSubtitlesSegmentation:          cfg.MediaSubtitlesSegmentation,
+		MediaSubtitlesEmitEnabled:           cfg.MediaSubtitlesEmitEnabled,
+		MediaSubtitlesEmitFormats:           append([]string(nil), cfg.MediaSubtitlesEmitFormats...),
+		MediaSubtitlesEmitLanguages:         append([]string(nil), cfg.MediaSubtitlesEmitLanguages...),
+		MediaSubtitlesEmitPolicy:            cfg.MediaSubtitlesEmitPolicy,
+		MediaSubtitlesEmitDir:               cfg.MediaSubtitlesEmitDir,
+		MediaSubtitlesEmitSMIL:              cfg.MediaSubtitlesEmitSMIL,
+		MediaSubtitlesEmitSMILParams:        append([]string(nil), cfg.MediaSubtitlesEmitSMILParams...),
+		MediaSubtitlesEmitSMILLanguageCodes: cfg.MediaSubtitlesEmitSMILLanguageCodes,
+		MediaSubtitlesEmitTTMLName:          cfg.MediaSubtitlesEmitTTMLName,
+		MediaSubtitlesTTMLSegmentation:      cfg.MediaSubtitlesTTMLSegmentation,
+		MediaSubtitlesGlossary:              append([]string(nil), cfg.MediaSubtitlesGlossary...),
+		MediaSubtitlesDropPhrases:           append([]string(nil), cfg.MediaSubtitlesDropPhrases...),
+		MediaSubtitlesScrubPhrases:          append([]string(nil), cfg.MediaSubtitlesScrubPhrases...),
+		MediaSubtitlesCollapseRepeats:       cfg.MediaSubtitlesCollapseRepeats,
+		MediaSubtitlesDropURLs:              cfg.MediaSubtitlesDropURLs,
+		MediaSubtitlesExpectScript:          cfg.MediaSubtitlesExpectScript,
+		MediaTrimLeadingSilence:             cfg.MediaTrimLeadingSilence,
+		MediaSilenceThresholdDB:             cfg.MediaSilenceThresholdDB,
+		MediaVAD:                            cfg.MediaVAD,
+		MediaDiarizeEnabled:                 copyBoolPtr(cfg.MediaDiarizeEnabled),
+		MediaAudioWindowSec:                 cfg.MediaAudioWindowSec,
+		MediaVideoWindowSec:                 cfg.MediaVideoWindowSec,
+		MediaTranscriptChunkSec:             cfg.MediaTranscriptChunkSec,
+		MediaTranscriptChunkGapSec:          cfg.MediaTranscriptChunkGapSec,
+		MediaClipMaxDurationMS:              cfg.MediaClipMaxDurationMS,
+		MediaClipMaxBytes:                   cfg.MediaClipMaxBytes,
+		MediaSTTMaxPayloadMB:                cfg.MediaSTTMaxPayloadMB,
+		MediaSTTRequestTimeoutSec:           cfg.MediaSTTRequestTimeoutSec,
+		MediaSTTLanguageStrict:              cfg.MediaSTTLanguageStrict,
+		MediaSTTOnUncoveredLanguage:         cfg.MediaSTTOnUncoveredLanguage,
+		MediaSTTMinCoverage:                 cfg.MediaSTTMinCoverage,
+		MediaSTTOnPartialTranscript:         cfg.MediaSTTOnPartialTranscript,
+		MediaSTTLanguageScope:               cfg.MediaSTTLanguageScope,
+		MediaSTTLanguageIdentifier:          cfg.MediaSTTLanguageIdentifier,
+		MediaSTTLanguageProbeSec:            cfg.MediaSTTLanguageProbeSec,
+		MediaSTTRequireValidation:           cfg.MediaSTTRequireValidation,
+		MediaSTTOnRouteError:                cfg.MediaSTTOnRouteError,
+		MediaSTTRouteRetryAfter:             cfg.MediaSTTRouteRetryAfter,
+		MediaSTTTracks:                      append([]string(nil), cfg.MediaSTTTracks...),
+		ServerTLSCertFile:                   cfg.ServerTLSCertFile,
+		ServerTLSKeyFile:                    cfg.ServerTLSKeyFile,
+		X402Mode:                            cfg.X402.Mode,
+		X402FacilitatorURL:                  cfg.X402.FacilitatorURL,
+		MediaBatchTwoPhase:                  cfg.MediaBatchTwoPhase,
+		MediaBatchProgress:                  cfg.MediaBatchProgress,
+		MediaBatchManifest:                  cfg.MediaBatchManifest,
 		// token intentionally omitted to avoid persisting secrets
 		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
 		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
@@ -3378,6 +3419,28 @@ func applyMediaSubtitlesEmitFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesEmitDir != nil {
 		cfg.MediaSubtitlesEmitDir = *fc.MediaSubtitlesEmitDir
 	}
+	applyMediaSubtitlesSMILFileParsed(cfg, fc)
+}
+
+// applyMediaSubtitlesSMILFileParsed overlays the SMIL caption patch and TTML
+// naming/segmentation keys (SPEC §8.6.14). Split out to keep the emit overlay
+// within the cyclomatic budget.
+func applyMediaSubtitlesSMILFileParsed(cfg *Config, fc fileConfig) {
+	if fc.MediaSubtitlesEmitSMIL != nil {
+		cfg.MediaSubtitlesEmitSMIL = *fc.MediaSubtitlesEmitSMIL
+	}
+	if fc.MediaSubtitlesEmitSMILParams != nil {
+		cfg.MediaSubtitlesEmitSMILParams = normalizeStringSlice(fc.MediaSubtitlesEmitSMILParams)
+	}
+	if fc.MediaSubtitlesEmitSMILLanguageCodes != nil {
+		cfg.MediaSubtitlesEmitSMILLanguageCodes = *fc.MediaSubtitlesEmitSMILLanguageCodes
+	}
+	if fc.MediaSubtitlesEmitTTMLName != nil {
+		cfg.MediaSubtitlesEmitTTMLName = *fc.MediaSubtitlesEmitTTMLName
+	}
+	if fc.MediaSubtitlesTTMLSegmentation != nil {
+		cfg.MediaSubtitlesTTMLSegmentation = *fc.MediaSubtitlesTTMLSegmentation
+	}
 }
 
 func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
@@ -3761,212 +3824,217 @@ func nearestSectionPrefix(sectionByIndent map[int]string, indent int) string {
 // configKeyAliases maps legacy/alternate key spellings to their canonical form.
 // Keys not present in the map are returned unchanged by canonicalizeConfigKey.
 var configKeyAliases = map[string]string{
-	"server.listen":                           "listen_addr",
-	"server.mcp_path":                         "mcp_path",
-	"server.name":                             "server_name",
-	"server.protocol_version":                 "protocol_version",
-	"server.public":                           "public",
-	"security.auth.mode":                      "auth_mode",
-	"security.allowed_origins":                "allowed_origins",
-	"security.path_excludes":                  "path_excludes",
-	"ingest.exclude_dirs":                     "ingest_exclude_dirs",
-	"security.secret_patterns":                "secret_patterns",
-	"docling.command":                         "docling_command",
-	"ingest.docling.command":                  "docling_command",
-	"docling.serve_url":                       "docling_serve_url",
-	"ingest.docling.serve_url":                "docling_serve_url",
-	"pandoc.command":                          "pandoc_command",
-	"ingest.pandoc.command":                   "pandoc_command",
-	"stt.elevenlabs.api_key":                  "elevenlabs_api_key",
-	"secrets.elevenlabs_api_key":              "elevenlabs_api_key",
-	"secrets.x402_facilitator_url":            "x402_facilitator_url",
-	"rag_generate_answer":                     "rag.generate_answer",
-	"generate_answer":                         "rag.generate_answer",
-	"rag_k_default":                           "rag.k_default",
-	"k_default":                               "rag.k_default",
-	"rag_system_prompt":                       "rag.system_prompt",
-	"system_prompt":                           "rag.system_prompt",
-	"rag_max_context_chars":                   "rag.max_context_chars",
-	"max_context_chars":                       "rag.max_context_chars",
-	"rag_oversample_factor":                   "rag.oversample_factor",
-	"oversample_factor":                       "rag.oversample_factor",
-	"retrieval_hybrid_enabled":                "retrieval.hybrid.enabled",
-	"hybrid_enabled":                          "retrieval.hybrid.enabled",
-	"dedup_retrieval":                         "dedup.retrieval",
-	"retrieval_min_score":                     "retrieval.min_score",
-	"min_score":                               "retrieval.min_score",
-	"retrieval_recency_half_life":             "retrieval.recency_half_life",
-	"recency_half_life":                       "retrieval.recency_half_life",
-	"context_compression_enabled":             "retrieval.context_compression.enabled",
-	"context_compression":                     "retrieval.context_compression.enabled",
-	"context_compression_target_ratio":        "retrieval.context_compression.target_ratio",
-	"retrieval_adaptive_enabled":              "retrieval.adaptive.enabled",
-	"adaptive_enabled":                        "retrieval.adaptive.enabled",
-	"retrieval_adaptive_k_min":                "retrieval.adaptive.k_min",
-	"adaptive_k_min":                          "retrieval.adaptive.k_min",
-	"retrieval_adaptive_k_max":                "retrieval.adaptive.k_max",
-	"adaptive_k_max":                          "retrieval.adaptive.k_max",
-	"retrieval_mmr_enabled":                   "retrieval.mmr.enabled",
-	"mmr_enabled":                             "retrieval.mmr.enabled",
-	"retrieval_mmr_lambda":                    "retrieval.mmr.lambda",
-	"mmr_lambda":                              "retrieval.mmr.lambda",
-	"retrieval_hyde_enabled":                  "retrieval.hyde.enabled",
-	"hyde_enabled":                            "retrieval.hyde.enabled",
-	"retrieval_hyde_mode":                     "retrieval.hyde.mode",
-	"hyde_mode":                               "retrieval.hyde.mode",
-	"retrieval_hyde_superlative":              "retrieval.hyde.superlative",
-	"hyde_superlative":                        "retrieval.hyde.superlative",
-	"rag_verify_faithfulness":                 "rag.verify_faithfulness",
-	"verify_faithfulness":                     "rag.verify_faithfulness",
-	"rag_evidence_threshold":                  "rag.evidence_threshold",
-	"evidence_threshold":                      "rag.evidence_threshold",
-	"retrieval_contextual_enabled":            "retrieval.contextual.enabled",
-	"contextual_enabled":                      "retrieval.contextual.enabled",
-	"retrieval_contextual_provider":           "retrieval.contextual.provider",
-	"retrieval_contextual_model":              "retrieval.contextual.model",
-	"retrieval_contextual_max_tokens":         "retrieval.contextual.max_tokens",
-	"retrieval_contextual_prompt_version":     "retrieval.contextual.prompt_version",
-	"retrieval_contextual_prompt":             "retrieval.contextual.prompt",
-	"cross_lingual_enabled":                   "retrieval.cross_lingual.enabled",
-	"cross_lingual":                           "retrieval.cross_lingual.enabled",
-	"cross_lingual_target_langs":              "retrieval.cross_lingual.target_langs",
-	"retrieval_hierarchical_enabled":          "retrieval.hierarchical.enabled",
-	"hierarchical_enabled":                    "retrieval.hierarchical.enabled",
-	"retrieval_hierarchical_source_reps":      "retrieval.hierarchical.source_reps",
-	"retrieval_hierarchical_levels":           "retrieval.hierarchical.levels",
-	"retrieval_hierarchical_provider":         "retrieval.hierarchical.provider",
-	"retrieval_hierarchical_max_tokens":       "retrieval.hierarchical.max_tokens",
-	"retrieval_hierarchical_prompt_version":   "retrieval.hierarchical.prompt_version",
-	"retrieval_hierarchical_prompt":           "retrieval.hierarchical.prompt",
-	"rerank_enabled":                          "rerank.enabled",
-	"rerank.cohere.api_key":                   "cohere_api_key",
-	"rerank.cohere.base_url":                  "cohere_base_url",
-	"rerank.cohere.model":                     "rerank_model",
-	"rerank.provider":                         "rerank_provider",
-	"rerank.model":                            "rerank_model",
-	"rerank_candidate_pool":                   "rerank.candidate_pool",
-	"chunking_max_tokens":                     "chunking.max_tokens",
-	"chunking_overlap_tokens":                 "chunking.overlap_tokens",
-	"ingest_gitignore":                        "ingest.gitignore",
-	"gitignore":                               "ingest.gitignore",
-	"ingest_follow_symlinks":                  "ingest.follow_symlinks",
-	"follow_symlinks":                         "ingest.follow_symlinks",
-	"ingest_max_file_mb":                      "ingest.max_file_mb",
-	"ingest_docling_timeout_sec":              "ingest.docling.timeout_sec",
-	"docling.timeout_sec":                     "ingest.docling.timeout_sec",
-	"max_file_mb":                             "ingest.max_file_mb",
-	"ingest_scan_cache":                       "ingest.scan_cache",
-	"scan_cache":                              "ingest.scan_cache",
-	"ingest_late_chunking":                    "ingest.late_chunking",
-	"late_chunking":                           "ingest.late_chunking",
-	"ingest_watch":                            "ingest.watch",
-	"ingest_watch_debounce":                   "ingest.watch_debounce",
-	"ingest_pdf_mode":                         "ingest.pdf.mode",
-	"pdf_mode":                                "ingest.pdf.mode",
-	"ingest_images_mode":                      "ingest.images.mode",
-	"images_mode":                             "ingest.images.mode",
-	"ingest_audio_mode":                       "ingest.audio.mode",
-	"audio_mode":                              "ingest.audio.mode",
-	"ingest_archives_mode":                    "ingest.archives.mode",
-	"archives_mode":                           "ingest.archives.mode",
-	"ingest_extractor":                        "ingest.extractor",
-	"extractor":                               "ingest.extractor",
-	"ingest_on_unsupported":                   "ingest.on_unsupported",
-	"ingest_media_identity":                   "ingest.media_identity",
-	"on_unsupported":                          "ingest.on_unsupported",
-	"index_backend":                           "index.backend",
-	"backend":                                 "index.backend",
-	"media_variants_group":                    "media.variants.group",
-	"media_variants_select":                   "media.variants.select",
-	"media_translate_enabled":                 "media.translate.enabled",
-	"media_translate_target_langs":            "media.translate.target_langs",
-	"media_translate_engine":                  "media.translate.engine",
-	"media_translate_name_hints":              "media.translate.name_hints",
-	"media_translate_whisper_window_sec":      "media.translate.whisper_window_sec",
-	"media_translate_window_lines":            "media.translate.window_lines",
-	"media_translate_context_lines":           "media.translate.context_lines",
-	"media_filter_words":                      "media.filter_words",
-	"filter_words":                            "media.filter_words",
-	"media_subtitles_ttml_enabled":            "media.subtitles.ttml.enabled",
-	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
-	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
-	"media_subtitles_segmentation":            "media.subtitles.segmentation",
-	"media_subtitles_emit_enabled":            "media.subtitles.emit.enabled",
-	"media_subtitles_emit_formats":            "media.subtitles.emit.formats",
-	"media_subtitles_emit_languages":          "media.subtitles.emit.languages",
-	"media_subtitles_emit_policy":             "media.subtitles.emit.policy",
-	"media_subtitles_emit_dir":                "media.subtitles.emit.dir",
-	"media_subtitles_glossary":                "media.subtitles.glossary",
-	"media_subtitles_drop_phrases":            "media.subtitles.drop_phrases",
-	"media_subtitles_scrub_phrases":           "media.subtitles.scrub_phrases",
-	"media_subtitles_collapse_repeats":        "media.subtitles.collapse_repeats",
-	"media_subtitles_drop_urls":               "media.subtitles.drop_urls",
-	"media_subtitles_expect_script":           "media.subtitles.expect_script",
-	"media_trim_leading_silence":              "media.trim_leading_silence",
-	"media_silence_threshold_db":              "media.silence_threshold_db",
-	"media_vad":                               "media.vad",
-	"media_diarize_enabled":                   "media.diarize.enabled",
-	"media_audio_window_sec":                  "media.audio_window_sec",
-	"media_video_window_sec":                  "media.video_window_sec",
-	"media_transcript_chunk_sec":              "media.transcript_chunk_sec",
-	"media_transcript_chunk_gap_sec":          "media.transcript_chunk_gap_sec",
-	"media_clip_max_duration_ms":              "media.clip.max_duration_ms",
-	"media_clip_max_bytes":                    "media.clip.max_bytes",
-	"media_stt_max_payload_mb":                "media.stt.max_payload_mb",
-	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
-	"media_stt_language_strict":               "media.stt.language_strict",
-	"media_stt_on_uncovered_language":         "media.stt.on_uncovered_language",
-	"media_stt_min_coverage":                  "media.stt.min_coverage",
-	"media_stt_on_partial_transcript":         "media.stt.on_partial_transcript",
-	"media_stt_language_scope":                "media.stt.language_scope",
-	"media_stt_language_identifier":           "media.stt.language_identifier",
-	"media_stt_language_probe_sec":            "media.stt.language_probe_sec",
-	"media_stt_require_validation":            "media.stt.require_validation",
-	"media_stt_on_route_error":                "media.stt.on_route_error",
-	"media_stt_route_retry_after":             "media.stt.route_retry_after",
-	"media_stt_tracks":                        "media.stt.tracks",
-	"stt_provider":                            "stt.provider",
-	"stt_mistral_model":                       "stt.mistral.model",
-	"stt_elevenlabs_model":                    "stt.elevenlabs.model",
-	"stt_elevenlabs_language_code":            "stt.elevenlabs.language_code",
-	"elevenlabs_language_code":                "stt.elevenlabs.language_code",
-	"server_tls_cert_file":                    "server.tls.cert_file",
-	"tls_cert_file":                           "server.tls.cert_file",
-	"cert_file":                               "server.tls.cert_file",
-	"server.tls.cert":                         "server.tls.cert_file",
-	"server_tls_key_file":                     "server.tls.key_file",
-	"tls_key_file":                            "server.tls.key_file",
-	"key_file":                                "server.tls.key_file",
-	"server.tls.key":                          "server.tls.key_file",
-	"x402.mode":                               "x402_mode",
-	"x402.facilitator_url":                    "x402_facilitator_url",
-	"x402.resource_base_url":                  "x402_resource_base_url",
-	"x402.facilitator_token":                  "x402_facilitator_token",
-	"x402.route_policy.tools_call.enabled":    "x402_tools_call_enabled",
-	"x402.route_policy.tools_call.price":      "x402_price_atomic",
-	"x402.route_policy.tools_call.network":    "x402_network",
-	"x402.route_policy.tools_call.scheme":     "x402_scheme",
-	"x402.route_policy.tools_call.asset":      "x402_asset",
-	"x402.route_policy.tools_call.pay_to":     "x402_pay_to",
-	"source.kind":                             "source_kind",
-	"source.s3.bucket":                        "source_s3_bucket",
-	"source.s3.prefix":                        "source_s3_prefix",
-	"source.s3.region":                        "source_s3_region",
-	"source.s3.endpoint":                      "source_s3_endpoint",
-	"index.qdrant.url":                        "qdrant_url",
-	"index.qdrant.collection":                 "qdrant_collection",
-	"index.qdrant.api_key":                    "qdrant_api_key",
-	"index.pgvector.dsn":                      "index_pgvector_dsn",
-	"index.pgvector.schema":                   "index_pgvector_schema",
-	"index.pgvector.table":                    "index_pgvector_table",
-	"distributed_embed.enabled":               "distributed_embed_enabled",
-	"distributed_embed.broker":                "distributed_embed_broker",
-	"distributed_embed.sqlite_path":           "distributed_embed_sqlite_path",
-	"distributed_embed.broker_url":            "distributed_embed_broker_url",
-	"distributed_embed.max_attempts":          "distributed_embed_max_attempts",
-	"media_batch_two_phase":                   "media.batch.two_phase",
-	"media_batch_progress":                    "media.batch.progress",
-	"media_batch_manifest":                    "media.batch.manifest",
+	"server.listen":                            "listen_addr",
+	"server.mcp_path":                          "mcp_path",
+	"server.name":                              "server_name",
+	"server.protocol_version":                  "protocol_version",
+	"server.public":                            "public",
+	"security.auth.mode":                       "auth_mode",
+	"security.allowed_origins":                 "allowed_origins",
+	"security.path_excludes":                   "path_excludes",
+	"ingest.exclude_dirs":                      "ingest_exclude_dirs",
+	"security.secret_patterns":                 "secret_patterns",
+	"docling.command":                          "docling_command",
+	"ingest.docling.command":                   "docling_command",
+	"docling.serve_url":                        "docling_serve_url",
+	"ingest.docling.serve_url":                 "docling_serve_url",
+	"pandoc.command":                           "pandoc_command",
+	"ingest.pandoc.command":                    "pandoc_command",
+	"stt.elevenlabs.api_key":                   "elevenlabs_api_key",
+	"secrets.elevenlabs_api_key":               "elevenlabs_api_key",
+	"secrets.x402_facilitator_url":             "x402_facilitator_url",
+	"rag_generate_answer":                      "rag.generate_answer",
+	"generate_answer":                          "rag.generate_answer",
+	"rag_k_default":                            "rag.k_default",
+	"k_default":                                "rag.k_default",
+	"rag_system_prompt":                        "rag.system_prompt",
+	"system_prompt":                            "rag.system_prompt",
+	"rag_max_context_chars":                    "rag.max_context_chars",
+	"max_context_chars":                        "rag.max_context_chars",
+	"rag_oversample_factor":                    "rag.oversample_factor",
+	"oversample_factor":                        "rag.oversample_factor",
+	"retrieval_hybrid_enabled":                 "retrieval.hybrid.enabled",
+	"hybrid_enabled":                           "retrieval.hybrid.enabled",
+	"dedup_retrieval":                          "dedup.retrieval",
+	"retrieval_min_score":                      "retrieval.min_score",
+	"min_score":                                "retrieval.min_score",
+	"retrieval_recency_half_life":              "retrieval.recency_half_life",
+	"recency_half_life":                        "retrieval.recency_half_life",
+	"context_compression_enabled":              "retrieval.context_compression.enabled",
+	"context_compression":                      "retrieval.context_compression.enabled",
+	"context_compression_target_ratio":         "retrieval.context_compression.target_ratio",
+	"retrieval_adaptive_enabled":               "retrieval.adaptive.enabled",
+	"adaptive_enabled":                         "retrieval.adaptive.enabled",
+	"retrieval_adaptive_k_min":                 "retrieval.adaptive.k_min",
+	"adaptive_k_min":                           "retrieval.adaptive.k_min",
+	"retrieval_adaptive_k_max":                 "retrieval.adaptive.k_max",
+	"adaptive_k_max":                           "retrieval.adaptive.k_max",
+	"retrieval_mmr_enabled":                    "retrieval.mmr.enabled",
+	"mmr_enabled":                              "retrieval.mmr.enabled",
+	"retrieval_mmr_lambda":                     "retrieval.mmr.lambda",
+	"mmr_lambda":                               "retrieval.mmr.lambda",
+	"retrieval_hyde_enabled":                   "retrieval.hyde.enabled",
+	"hyde_enabled":                             "retrieval.hyde.enabled",
+	"retrieval_hyde_mode":                      "retrieval.hyde.mode",
+	"hyde_mode":                                "retrieval.hyde.mode",
+	"retrieval_hyde_superlative":               "retrieval.hyde.superlative",
+	"hyde_superlative":                         "retrieval.hyde.superlative",
+	"rag_verify_faithfulness":                  "rag.verify_faithfulness",
+	"verify_faithfulness":                      "rag.verify_faithfulness",
+	"rag_evidence_threshold":                   "rag.evidence_threshold",
+	"evidence_threshold":                       "rag.evidence_threshold",
+	"retrieval_contextual_enabled":             "retrieval.contextual.enabled",
+	"contextual_enabled":                       "retrieval.contextual.enabled",
+	"retrieval_contextual_provider":            "retrieval.contextual.provider",
+	"retrieval_contextual_model":               "retrieval.contextual.model",
+	"retrieval_contextual_max_tokens":          "retrieval.contextual.max_tokens",
+	"retrieval_contextual_prompt_version":      "retrieval.contextual.prompt_version",
+	"retrieval_contextual_prompt":              "retrieval.contextual.prompt",
+	"cross_lingual_enabled":                    "retrieval.cross_lingual.enabled",
+	"cross_lingual":                            "retrieval.cross_lingual.enabled",
+	"cross_lingual_target_langs":               "retrieval.cross_lingual.target_langs",
+	"retrieval_hierarchical_enabled":           "retrieval.hierarchical.enabled",
+	"hierarchical_enabled":                     "retrieval.hierarchical.enabled",
+	"retrieval_hierarchical_source_reps":       "retrieval.hierarchical.source_reps",
+	"retrieval_hierarchical_levels":            "retrieval.hierarchical.levels",
+	"retrieval_hierarchical_provider":          "retrieval.hierarchical.provider",
+	"retrieval_hierarchical_max_tokens":        "retrieval.hierarchical.max_tokens",
+	"retrieval_hierarchical_prompt_version":    "retrieval.hierarchical.prompt_version",
+	"retrieval_hierarchical_prompt":            "retrieval.hierarchical.prompt",
+	"rerank_enabled":                           "rerank.enabled",
+	"rerank.cohere.api_key":                    "cohere_api_key",
+	"rerank.cohere.base_url":                   "cohere_base_url",
+	"rerank.cohere.model":                      "rerank_model",
+	"rerank.provider":                          "rerank_provider",
+	"rerank.model":                             "rerank_model",
+	"rerank_candidate_pool":                    "rerank.candidate_pool",
+	"chunking_max_tokens":                      "chunking.max_tokens",
+	"chunking_overlap_tokens":                  "chunking.overlap_tokens",
+	"ingest_gitignore":                         "ingest.gitignore",
+	"gitignore":                                "ingest.gitignore",
+	"ingest_follow_symlinks":                   "ingest.follow_symlinks",
+	"follow_symlinks":                          "ingest.follow_symlinks",
+	"ingest_max_file_mb":                       "ingest.max_file_mb",
+	"ingest_docling_timeout_sec":               "ingest.docling.timeout_sec",
+	"docling.timeout_sec":                      "ingest.docling.timeout_sec",
+	"max_file_mb":                              "ingest.max_file_mb",
+	"ingest_scan_cache":                        "ingest.scan_cache",
+	"scan_cache":                               "ingest.scan_cache",
+	"ingest_late_chunking":                     "ingest.late_chunking",
+	"late_chunking":                            "ingest.late_chunking",
+	"ingest_watch":                             "ingest.watch",
+	"ingest_watch_debounce":                    "ingest.watch_debounce",
+	"ingest_pdf_mode":                          "ingest.pdf.mode",
+	"pdf_mode":                                 "ingest.pdf.mode",
+	"ingest_images_mode":                       "ingest.images.mode",
+	"images_mode":                              "ingest.images.mode",
+	"ingest_audio_mode":                        "ingest.audio.mode",
+	"audio_mode":                               "ingest.audio.mode",
+	"ingest_archives_mode":                     "ingest.archives.mode",
+	"archives_mode":                            "ingest.archives.mode",
+	"ingest_extractor":                         "ingest.extractor",
+	"extractor":                                "ingest.extractor",
+	"ingest_on_unsupported":                    "ingest.on_unsupported",
+	"ingest_media_identity":                    "ingest.media_identity",
+	"on_unsupported":                           "ingest.on_unsupported",
+	"index_backend":                            "index.backend",
+	"backend":                                  "index.backend",
+	"media_variants_group":                     "media.variants.group",
+	"media_variants_select":                    "media.variants.select",
+	"media_translate_enabled":                  "media.translate.enabled",
+	"media_translate_target_langs":             "media.translate.target_langs",
+	"media_translate_engine":                   "media.translate.engine",
+	"media_translate_name_hints":               "media.translate.name_hints",
+	"media_translate_whisper_window_sec":       "media.translate.whisper_window_sec",
+	"media_translate_window_lines":             "media.translate.window_lines",
+	"media_translate_context_lines":            "media.translate.context_lines",
+	"media_filter_words":                       "media.filter_words",
+	"filter_words":                             "media.filter_words",
+	"media_subtitles_ttml_enabled":             "media.subtitles.ttml.enabled",
+	"media_subtitles_ttml_align_tolerance_ms":  "media.subtitles.ttml.align_tolerance_ms",
+	"media_subtitles_smil_enabled":             "media.subtitles.smil.enabled",
+	"media_subtitles_segmentation":             "media.subtitles.segmentation",
+	"media_subtitles_emit_enabled":             "media.subtitles.emit.enabled",
+	"media_subtitles_emit_formats":             "media.subtitles.emit.formats",
+	"media_subtitles_emit_languages":           "media.subtitles.emit.languages",
+	"media_subtitles_emit_policy":              "media.subtitles.emit.policy",
+	"media_subtitles_emit_dir":                 "media.subtitles.emit.dir",
+	"media_subtitles_emit_smil":                "media.subtitles.emit.smil",
+	"media_subtitles_emit_smil_params":         "media.subtitles.emit.smil_params",
+	"media_subtitles_emit_smil_language_codes": "media.subtitles.emit.smil_language_codes",
+	"media_subtitles_emit_ttml_name":           "media.subtitles.emit.ttml_name",
+	"media_subtitles_ttml_segmentation":        "media.subtitles.ttml.segmentation",
+	"media_subtitles_glossary":                 "media.subtitles.glossary",
+	"media_subtitles_drop_phrases":             "media.subtitles.drop_phrases",
+	"media_subtitles_scrub_phrases":            "media.subtitles.scrub_phrases",
+	"media_subtitles_collapse_repeats":         "media.subtitles.collapse_repeats",
+	"media_subtitles_drop_urls":                "media.subtitles.drop_urls",
+	"media_subtitles_expect_script":            "media.subtitles.expect_script",
+	"media_trim_leading_silence":               "media.trim_leading_silence",
+	"media_silence_threshold_db":               "media.silence_threshold_db",
+	"media_vad":                                "media.vad",
+	"media_diarize_enabled":                    "media.diarize.enabled",
+	"media_audio_window_sec":                   "media.audio_window_sec",
+	"media_video_window_sec":                   "media.video_window_sec",
+	"media_transcript_chunk_sec":               "media.transcript_chunk_sec",
+	"media_transcript_chunk_gap_sec":           "media.transcript_chunk_gap_sec",
+	"media_clip_max_duration_ms":               "media.clip.max_duration_ms",
+	"media_clip_max_bytes":                     "media.clip.max_bytes",
+	"media_stt_max_payload_mb":                 "media.stt.max_payload_mb",
+	"media_stt_request_timeout_sec":            "media.stt.request_timeout_sec",
+	"media_stt_language_strict":                "media.stt.language_strict",
+	"media_stt_on_uncovered_language":          "media.stt.on_uncovered_language",
+	"media_stt_min_coverage":                   "media.stt.min_coverage",
+	"media_stt_on_partial_transcript":          "media.stt.on_partial_transcript",
+	"media_stt_language_scope":                 "media.stt.language_scope",
+	"media_stt_language_identifier":            "media.stt.language_identifier",
+	"media_stt_language_probe_sec":             "media.stt.language_probe_sec",
+	"media_stt_require_validation":             "media.stt.require_validation",
+	"media_stt_on_route_error":                 "media.stt.on_route_error",
+	"media_stt_route_retry_after":              "media.stt.route_retry_after",
+	"media_stt_tracks":                         "media.stt.tracks",
+	"stt_provider":                             "stt.provider",
+	"stt_mistral_model":                        "stt.mistral.model",
+	"stt_elevenlabs_model":                     "stt.elevenlabs.model",
+	"stt_elevenlabs_language_code":             "stt.elevenlabs.language_code",
+	"elevenlabs_language_code":                 "stt.elevenlabs.language_code",
+	"server_tls_cert_file":                     "server.tls.cert_file",
+	"tls_cert_file":                            "server.tls.cert_file",
+	"cert_file":                                "server.tls.cert_file",
+	"server.tls.cert":                          "server.tls.cert_file",
+	"server_tls_key_file":                      "server.tls.key_file",
+	"tls_key_file":                             "server.tls.key_file",
+	"key_file":                                 "server.tls.key_file",
+	"server.tls.key":                           "server.tls.key_file",
+	"x402.mode":                                "x402_mode",
+	"x402.facilitator_url":                     "x402_facilitator_url",
+	"x402.resource_base_url":                   "x402_resource_base_url",
+	"x402.facilitator_token":                   "x402_facilitator_token",
+	"x402.route_policy.tools_call.enabled":     "x402_tools_call_enabled",
+	"x402.route_policy.tools_call.price":       "x402_price_atomic",
+	"x402.route_policy.tools_call.network":     "x402_network",
+	"x402.route_policy.tools_call.scheme":      "x402_scheme",
+	"x402.route_policy.tools_call.asset":       "x402_asset",
+	"x402.route_policy.tools_call.pay_to":      "x402_pay_to",
+	"source.kind":                              "source_kind",
+	"source.s3.bucket":                         "source_s3_bucket",
+	"source.s3.prefix":                         "source_s3_prefix",
+	"source.s3.region":                         "source_s3_region",
+	"source.s3.endpoint":                       "source_s3_endpoint",
+	"index.qdrant.url":                         "qdrant_url",
+	"index.qdrant.collection":                  "qdrant_collection",
+	"index.qdrant.api_key":                     "qdrant_api_key",
+	"index.pgvector.dsn":                       "index_pgvector_dsn",
+	"index.pgvector.schema":                    "index_pgvector_schema",
+	"index.pgvector.table":                     "index_pgvector_table",
+	"distributed_embed.enabled":                "distributed_embed_enabled",
+	"distributed_embed.broker":                 "distributed_embed_broker",
+	"distributed_embed.sqlite_path":            "distributed_embed_sqlite_path",
+	"distributed_embed.broker_url":             "distributed_embed_broker_url",
+	"distributed_embed.max_attempts":           "distributed_embed_max_attempts",
+	"media_batch_two_phase":                    "media.batch.two_phase",
+	"media_batch_progress":                     "media.batch.progress",
+	"media_batch_manifest":                     "media.batch.manifest",
 
 	// Recognition (design 0004). These underscore spellings are what the snapshot
 	// writer emits — and therefore what `dir2mcp config init` puts in the
@@ -4493,7 +4561,29 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 
 // setMediaStringFileScalar assigns media.* string keys onto the fileConfig. Split
 // out of setIngestStringFileScalar so each stays within the cyclomatic budget.
+// setMediaSubtitlesSMILStringFileScalar assigns the SMIL caption patch and TTML
+// naming/segmentation string keys (SPEC §8.6.14), returning true when key
+// matched. Split out of setMediaStringFileScalar for the cyclomatic budget.
+func setMediaSubtitlesSMILStringFileScalar(cfg *fileConfig, key, value string) bool {
+	switch key {
+	case "media.subtitles.emit.smil":
+		cfg.MediaSubtitlesEmitSMIL = strPtr(value)
+	case "media.subtitles.emit.smil_language_codes":
+		cfg.MediaSubtitlesEmitSMILLanguageCodes = strPtr(value)
+	case "media.subtitles.emit.ttml_name":
+		cfg.MediaSubtitlesEmitTTMLName = strPtr(value)
+	case "media.subtitles.ttml.segmentation":
+		cfg.MediaSubtitlesTTMLSegmentation = strPtr(value)
+	default:
+		return false
+	}
+	return true
+}
+
 func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
+	if setMediaSubtitlesSMILStringFileScalar(cfg, key, value) {
+		return
+	}
 	switch key {
 	case "media.variants.select":
 		cfg.MediaVariantsSelect = strPtr(value)
@@ -4607,6 +4697,8 @@ func setMediaSubtitlesEmitFileListValue(cfg *fileConfig, key, value string) bool
 		appendConfigListValue(&cfg.MediaSubtitlesEmitFormats, value)
 	case "media.subtitles.emit.languages":
 		appendConfigListValue(&cfg.MediaSubtitlesEmitLanguages, value)
+	case "media.subtitles.emit.smil_params":
+		appendConfigListValue(&cfg.MediaSubtitlesEmitSMILParams, value)
 	default:
 		return false
 	}
@@ -4636,7 +4728,7 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "media.subtitles.emit.smil_params", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -4809,6 +4901,11 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("media_subtitles_emit_languages", cfg.MediaSubtitlesEmitLanguages)
 	writeScalar("media_subtitles_emit_policy", cfg.MediaSubtitlesEmitPolicy)
 	writeScalar("media_subtitles_emit_dir", cfg.MediaSubtitlesEmitDir)
+	writeScalar("media_subtitles_emit_smil", cfg.MediaSubtitlesEmitSMIL)
+	writeList("media_subtitles_emit_smil_params", cfg.MediaSubtitlesEmitSMILParams)
+	writeScalar("media_subtitles_emit_smil_language_codes", cfg.MediaSubtitlesEmitSMILLanguageCodes)
+	writeScalar("media_subtitles_emit_ttml_name", cfg.MediaSubtitlesEmitTTMLName)
+	writeScalar("media_subtitles_ttml_segmentation", cfg.MediaSubtitlesTTMLSegmentation)
 	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
 	writeList("media_subtitles_drop_phrases", cfg.MediaSubtitlesDropPhrases)
 	writeList("media_subtitles_scrub_phrases", cfg.MediaSubtitlesScrubPhrases)
@@ -5386,6 +5483,7 @@ func (c *Config) Validate() error {
 		c.validateMediaTranslate,
 		c.validateMediaSubtitles,
 		c.validateMediaSubtitlesEmit,
+		c.validateMediaSubtitlesSMIL,
 		c.validateMediaDiarize,
 		c.validateNumericBounds,
 		c.validateIngestExcludeDirs,
@@ -5837,6 +5935,49 @@ func (c *Config) validateMediaSubtitles() error {
 // canonical values; the two hard gates — ttml needs the TTML surface, an object
 // store needs an output root — apply only when write-back is enabled, because
 // an unused surface must never make a configuration invalid.
+// validateMediaSubtitlesSMIL normalizes and gates the SMIL caption patch and
+// TTML naming/segmentation keys (SPEC §8.6.14). The enums and the param syntax
+// are checked always; the cross-key gates apply only when the patch is on: it
+// edits the SMIL beside the media, so it needs write-back on, beside the media
+// (no emit.dir), and the format it references among the written formats.
+func (c *Config) validateMediaSubtitlesSMIL() error {
+	enums := []struct {
+		key      string
+		val      *string
+		fallback string
+		allowed  []string
+	}{
+		{"media.subtitles.emit.smil", &c.MediaSubtitlesEmitSMIL, "off", []string{"off", "ttml", "vtt"}},
+		{"media.subtitles.emit.smil_language_codes", &c.MediaSubtitlesEmitSMILLanguageCodes, "bcp47", []string{"bcp47", "iso639_2"}},
+		{"media.subtitles.emit.ttml_name", &c.MediaSubtitlesEmitTTMLName, "group", []string{"group", "top_rendition"}},
+		{"media.subtitles.ttml.segmentation", &c.MediaSubtitlesTTMLSegmentation, "chunk", []string{"chunk", "broadcast"}},
+	}
+	for _, e := range enums {
+		normalized, err := normalizeClosedEnum(e.key, *e.val, e.fallback, e.allowed)
+		if err != nil {
+			return err
+		}
+		*e.val = normalized
+	}
+	for _, p := range c.MediaSubtitlesEmitSMILParams {
+		if name, _, ok := strings.Cut(p, "="); !ok || strings.TrimSpace(name) == "" {
+			return fmt.Errorf("media.subtitles.emit.smil_params entry %q must be name=value", p)
+		}
+	}
+	if c.MediaSubtitlesEmitSMIL == "off" || !c.MediaSubtitlesEmitEnabled {
+		return nil
+	}
+	if c.MediaSubtitlesEmitDir != "" {
+		return errors.New("CONFIG_INVALID: media.subtitles.emit.smil patches the SMIL beside the media, so it " +
+			"requires media.subtitles.emit.dir to be empty (SPEC §8.6.14)")
+	}
+	if !slices.Contains(c.MediaSubtitlesEmitFormats, c.MediaSubtitlesEmitSMIL) {
+		return fmt.Errorf("CONFIG_INVALID: media.subtitles.emit.smil=%s requires %s in media.subtitles.emit.formats (SPEC §8.6.14)",
+			c.MediaSubtitlesEmitSMIL, c.MediaSubtitlesEmitSMIL)
+	}
+	return nil
+}
+
 func (c *Config) validateMediaSubtitlesEmit() error {
 	policy, err := normalizeClosedEnum("media.subtitles.emit.policy", c.MediaSubtitlesEmitPolicy,
 		DefaultMediaSubtitlesEmitPolicy, []string{"if_missing", "refresh"})

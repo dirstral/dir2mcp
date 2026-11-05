@@ -337,6 +337,7 @@ func (s *Service) emitSubtitles(ctx context.Context, doc model.Document) {
 		primary:   s.primaryTranscriptLanguage(reps),
 		secondary: s.emitSecondaryLanguage(reps),
 	}
+	s.planSMIL(&plan)
 	for _, format := range sortedCopy(s.cfg.MediaSubtitlesEmitFormats) {
 		if format == "ttml" {
 			s.emitTTML(ctx, ts, as, renderer, plan)
@@ -346,6 +347,7 @@ func (s *Service) emitSubtitles(ctx context.Context, doc model.Document) {
 			s.emitTimed(ctx, ts, as, renderer, plan, format, lang)
 		}
 	}
+	s.patchSMIL(plan)
 }
 
 // emitPlan is the per-document input to the per-artifact writers.
@@ -360,6 +362,11 @@ type emitPlan struct {
 	// primary/secondary are the TTML languages: the source transcript and the
 	// first configured translation target the document has (empty = none).
 	primary, secondary string
+	// ttmlStem names the written TTML: stem, or the SMIL's top rendition under
+	// media.subtitles.emit.ttml_name=top_rendition (§8.6.14).
+	ttmlStem string
+	// smil is the media's SMIL as read for naming and patching (§8.6.14).
+	smil smilTarget
 }
 
 // emitTargetWritable reports whether there is a filesystem to write into: the
@@ -591,7 +598,7 @@ func (s *Service) emitTTML(ctx context.Context, ts subexport.Store, as emittedAr
 	if _, present := plan.bound["ttml"]; present {
 		return
 	}
-	relOut := emitRelPath(plan.doc, plan.stem, "", ".ttml")
+	relOut := emitRelPath(plan.doc, plan.ttmlStem, "", ".ttml")
 	if s.ownedArtifactKept(ctx, as, plan, relOut, "ttml", "") {
 		return
 	}
@@ -762,7 +769,9 @@ func (s *Service) artifactWriteDue(ctx context.Context, plan emitPlan, relOut, a
 	case exists:
 		// A file at the target name that did not bind as a sidecar (excluded by
 		// path_excludes, or a shape §8.6.4 refuses). Not ours: never overwrite.
-		s.getLogger().Printf("subtitle write-back: %s exists and was not written by dir2mcp; leaving it untouched", relOut)
+		s.foreignTargetOnce.Do(func() {
+			s.getLogger().Printf("subtitle write-back: %s exists and was not written by dir2mcp; leaving it untouched (further such files are not logged)", relOut)
+		})
 		return false
 	}
 	return true

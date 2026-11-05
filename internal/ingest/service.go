@@ -437,6 +437,10 @@ type Service struct {
 	emitRenderer     *subexport.Renderer
 	emitRendererOnce sync.Once
 	emitWarnOnce     sync.Once
+	// foreignTargetOnce limits the "exists and was not written by dir2mcp" note
+	// to one line per process: on an archive whose files predate write-back it
+	// would otherwise repeat for every document on every scan.
+	foreignTargetOnce sync.Once
 
 	// batch holds the optional per-scan batch-ergonomics state (SPEC §8.6.11):
 	// the JSONL run manifest writer and the side-channel progress reporter. It is
