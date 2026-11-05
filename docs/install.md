@@ -235,7 +235,7 @@ Pick the row that matches how you run `dir2mcp`:
 ## Build from source
 
 The [two-minute path](../README.md#try-it-in-two-minutes) uses the Homebrew build. To build
-it yourself you need Go 1.26.9 or later ([go.dev/dl](https://go.dev/dl/)) and `make`.
+it yourself you need Go 1.26.10 or later ([go.dev/dl](https://go.dev/dl/)) and `make`.
 An older Go 1.26 downloads the right toolchain by itself, unless you set
 `GOTOOLCHAIN=local`.
 
