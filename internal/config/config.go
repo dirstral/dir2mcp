@@ -1313,6 +1313,13 @@ type Config struct {
 	// CONFIG_INVALID. Under on_route_error: fail a fallback result is stale on
 	// every run, so the interval does not apply there.
 	MediaSTTRouteRetryAfter time.Duration
+	// MediaSTTRedecodeBelow is the confidence below which a window decoded in
+	// another language than the item's is decoded again with the item language
+	// (config `media.stt.redecode_below`, SPEC §8.6.13, spec 0.88.0, dir2mcp
+	// #1143). It applies only under language_scope: item with no pin and no
+	// identifier hint. Default 0.5. 0 turns the rule off. A value outside [0,1]
+	// is CONFIG_INVALID.
+	MediaSTTRedecodeBelow float64
 	// mediaSTTRouteRetryAfterEnvErr keeps an env value that is not a duration,
 	// so Validate reports it as CONFIG_INVALID instead of a warning.
 	mediaSTTRouteRetryAfterEnvErr string
@@ -1640,6 +1647,7 @@ type fileConfig struct {
 	MediaSTTRequireValidation          *bool
 	MediaSTTOnRouteError               *string
 	MediaSTTRouteRetryAfter            *time.Duration
+	MediaSTTRedecodeBelow              *float64
 	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
@@ -1826,6 +1834,7 @@ type persistedConfig struct {
 	MediaSTTRequireValidation          bool          `yaml:"media_stt_require_validation"`
 	MediaSTTOnRouteError               string        `yaml:"media_stt_on_route_error"`
 	MediaSTTRouteRetryAfter            time.Duration `yaml:"media_stt_route_retry_after"`
+	MediaSTTRedecodeBelow              float64       `yaml:"media_stt_redecode_below"`
 	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
@@ -2093,6 +2102,7 @@ func Default() Config {
 		MediaSTTLanguageProbeSec:    30,
 		MediaSTTOnRouteError:        routeErrorFail,
 		MediaSTTRouteRetryAfter:     DefaultMediaSTTRouteRetryAfter,
+		MediaSTTRedecodeBelow:       DefaultMediaSTTRedecodeBelow,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2317,6 +2327,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTRequireValidation:          cfg.MediaSTTRequireValidation,
 		MediaSTTOnRouteError:               cfg.MediaSTTOnRouteError,
 		MediaSTTRouteRetryAfter:            cfg.MediaSTTRouteRetryAfter,
+		MediaSTTRedecodeBelow:              cfg.MediaSTTRedecodeBelow,
 		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
@@ -3367,6 +3378,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTRouteRetryAfter != nil {
 		cfg.MediaSTTRouteRetryAfter = *fc.MediaSTTRouteRetryAfter
 	}
+	if fc.MediaSTTRedecodeBelow != nil {
+		cfg.MediaSTTRedecodeBelow = *fc.MediaSTTRedecodeBelow
+	}
 	if fc.MediaSTTTracks != nil {
 		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
@@ -3951,6 +3965,7 @@ var configKeyAliases = map[string]string{
 	"media_stt_require_validation":            "media.stt.require_validation",
 	"media_stt_on_route_error":                "media.stt.on_route_error",
 	"media_stt_route_retry_after":             "media.stt.route_retry_after",
+	"media_stt_redecode_below":                "media.stt.redecode_below",
 	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
@@ -4266,6 +4281,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.RetrievalMMRLambda
 	case "media.stt.min_coverage":
 		target = &cfg.MediaSTTMinCoverage
+	case "media.stt.redecode_below":
+		target = &cfg.MediaSTTRedecodeBelow
 	case "recognize.timeout_per_media_second":
 		target = &cfg.RecognizeTimeoutPerMediaSecond
 	default:
@@ -4876,6 +4893,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("media_stt_require_validation", cfg.MediaSTTRequireValidation)
 	writeScalar("media_stt_on_route_error", cfg.MediaSTTOnRouteError)
 	writeScalar("media_stt_route_retry_after", cfg.MediaSTTRouteRetryAfter.String())
+	writeScalar("media_stt_redecode_below", strconv.FormatFloat(cfg.MediaSTTRedecodeBelow, 'f', -1, 64))
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -5479,6 +5497,7 @@ func (c *Config) Validate() error {
 		c.validateSTTLanguageIdentifier,
 		c.validateMediaSTTOnRouteError,
 		c.validateMediaSTTRouteRetryAfter,
+		c.validateMediaSTTRedecodeBelow,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -6365,6 +6384,20 @@ func (c *Config) validateMediaSTTOnRouteError() error {
 		return fmt.Errorf("CONFIG_INVALID: media.stt.on_route_error must be one of fail, default: %q", c.MediaSTTOnRouteError)
 	}
 	c.MediaSTTOnRouteError = v
+	return nil
+}
+
+// DefaultMediaSTTRedecodeBelow is the default media.stt.redecode_below (SPEC
+// §8.6.13, spec 0.88.0).
+const DefaultMediaSTTRedecodeBelow = 0.5
+
+// validateMediaSTTRedecodeBelow rejects a media.stt.redecode_below outside
+// [0,1], or one that is not a finite number (SPEC §8.6.13, spec 0.88.0).
+func (c *Config) validateMediaSTTRedecodeBelow() error {
+	v := c.MediaSTTRedecodeBelow
+	if v < 0 || v > 1 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return fmt.Errorf("CONFIG_INVALID: media.stt.redecode_below must be within [0,1]: %v", v)
+	}
 	return nil
 }
 

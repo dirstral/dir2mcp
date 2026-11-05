@@ -67,7 +67,7 @@ func (s *Service) transcribeItemRouted(ctx context.Context, relPath string, cont
 	tmpPath, cleanup, err := stageMediaTemp(content, filepath.Ext(relPath))
 	if err != nil {
 		s.getLogger().Printf("item language identification %s: stage failed (%v); decoding on the default profile", relPath, err)
-		text, words, cov, derr := s.transcribeStructuredWindowed(ctx, relPath, content, def.stt)
+		text, words, cov, derr := s.transcribeStructuredWindowed(ctx, relPath, content, def.stt, true)
 		return text, words, cov, nil, derr
 	}
 	defer cleanup()
@@ -75,7 +75,7 @@ func (s *Service) transcribeItemRouted(ctx context.Context, relPath string, cont
 
 	tag, conf, ok := s.identifyItem(ctx, relPath, content, tmpPath, totalMS)
 	if !ok {
-		text, words, cov, derr := s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, def.stt)
+		text, words, cov, derr := s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, def.stt, true)
 		return text, words, cov, nil, derr
 	}
 	route, rerr := s.routeForLanguage(tag)
@@ -85,14 +85,14 @@ func (s *Service) transcribeItemRouted(ctx context.Context, relPath string, cont
 	}
 	rec := &itemRoute{Language: tag, Confidence: conf, Route: route.route, Uncovered: !routeCovers(route, tag)}
 	s.getLogger().Printf("item language identification %s: identifier %q resolved %q; route %q decodes (SPEC §8.2.4)", relPath, s.identifier.route, tag, route.route)
-	text, words, cov, derr := s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, route.stt)
+	text, words, cov, derr := s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, route.stt, false)
 	if derr != nil && s.routeErrorFallback && route.route != def.route {
 		// SPEC §8.2.4: one more decode, on the default profile, and the record
 		// names the candidate that failed. The default's own failure is the
 		// item's failure.
 		s.getLogger().Printf("item language identification %s: route %q failed: %v; decoding once on the default profile %q (media.stt.on_route_error=default, SPEC §8.2.4)", relPath, route.route, derr, def.route)
 		rec.FallbackFrom, rec.Route, rec.Uncovered = route.route, def.route, !routeCovers(def, tag)
-		text, words, cov, derr = s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, def.stt)
+		text, words, cov, derr = s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, def.stt, false)
 	}
 	return text, words, cov, rec, derr
 }

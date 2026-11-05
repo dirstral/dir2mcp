@@ -387,6 +387,34 @@ func TranscriberForAudioDuration(stt Transcriber, audioMS int) Transcriber {
 	return stt
 }
 
+// LanguageHintTranscriber is an OPTIONAL capability a Transcriber MAY implement
+// to decode one request with a given request language (SPEC §8.6.13, the
+// low-confidence re-decode of spec 0.88.0). ForLanguage returns the transcriber
+// to use for a request in lang, a BCP-47 primary subtag. It keeps the route and
+// the model: only the language hint changes.
+//
+// Implementations MUST NOT mutate the receiver (one client serves concurrent
+// documents). They return a copy that carries the hint.
+type LanguageHintTranscriber interface {
+	Transcriber
+	ForLanguage(lang string) Transcriber
+}
+
+// TranscriberForLanguage returns the transcriber to use for one request in
+// lang. ok is false when the transcriber cannot take a language hint, or when
+// lang is empty: the caller then has no way to ask for the language.
+func TranscriberForLanguage(stt Transcriber, lang string) (Transcriber, bool) {
+	hinted, ok := stt.(LanguageHintTranscriber)
+	if !ok || lang == "" {
+		return stt, false
+	}
+	out := hinted.ForLanguage(lang)
+	if out == nil {
+		return stt, false
+	}
+	return out, true
+}
+
 // RecognizedAnnotation is one time-ranged statement a recognition backend
 // makes about a media file's content (design 0004 §5). StartMS/EndMS are
 // absolute offsets from the start of the media.
