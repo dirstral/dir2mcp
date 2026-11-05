@@ -3640,6 +3640,15 @@ func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bo
 		setFileListValue(cfg, key, value)
 		return nil
 	}
+	// media.language and its aliases (media.stt.language, media_language) all
+	// canonicalize to one key. Two spellings with different values would leave
+	// the pin to file order, so a mismatch is CONFIG_INVALID (SPEC §8.8, spec
+	// 0.85.0, #1136). The comparison ignores case: BCP-47 tags are
+	// case-insensitive.
+	if key == "media.language" && cfg.MediaLanguage != nil &&
+		!strings.EqualFold(strings.TrimSpace(*cfg.MediaLanguage), strings.TrimSpace(value)) {
+		return fmt.Errorf("CONFIG_INVALID: media.language is set more than once with different values (%q and %q); media.stt.language and media_language are aliases of media.language", *cfg.MediaLanguage, value)
+	}
 	if err := setFileScalarValue(cfg, key, value); err != nil {
 		return err
 	}

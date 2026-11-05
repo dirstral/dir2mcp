@@ -167,3 +167,24 @@ func TestMediaLanguage_InvalidInFileIsConfigInvalid(t *testing.T) {
 		t.Fatalf("LoadFile = %v, want CONFIG_INVALID", err)
 	}
 }
+
+// TestMediaLanguage_AliasConflictIsConfigInvalid: media.language and its alias
+// media.stt.language with different values would leave the pin to file order,
+// so the load fails (SPEC §8.8, spec 0.85.0).
+func TestMediaLanguage_AliasConflictIsConfigInvalid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	writeFile(t, path, "media:\n  language: uk\n  stt:\n    language: ru\n")
+	if _, err := config.LoadFile(path); err == nil || !strings.Contains(err.Error(), "CONFIG_INVALID") {
+		t.Fatalf("LoadFile = %v, want CONFIG_INVALID for media.language uk vs media.stt.language ru", err)
+	}
+}
+
+// TestMediaLanguage_AliasSameValueIsAccepted: both spellings with the same tag,
+// in another case, are one pin.
+func TestMediaLanguage_AliasSameValueIsAccepted(t *testing.T) {
+	cfg := loadCfg(t, whisperProfileYAML+"media:\n  language: uk\n  stt:\n    language: UK\n")
+	if !strings.EqualFold(cfg.MediaLanguage, "uk") {
+		t.Fatalf("MediaLanguage = %q, want uk", cfg.MediaLanguage)
+	}
+	noUnknownKeyWarning(t, cfg)
+}

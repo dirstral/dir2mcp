@@ -765,10 +765,16 @@ the transcript's derivation identity, and the transcript record
 (`media.stt.language_identifier`, and per-window detection under
 `language_scope: window`). A profile's own `stt_language` is more specific and
 wins for that profile. `media.stt.language` is an alias, for operators who look
-for the pin beside the other `media.stt.language_*` keys. A value that is not a
-BCP-47 tag (`ukrainian`, `fa_IR`) is `CONFIG_INVALID`. Setting or changing the
-pin changes the derivation identity, so the next run transcribes the media
-again (spec 8.8, 0.85.0).
+for the pin beside the other `media.stt.language_*` keys. If you set both keys,
+the values must be equal (case does not matter); different values are
+`CONFIG_INVALID`. A value that is not a BCP-47 tag (`ukrainian`, `fa_IR`) is
+`CONFIG_INVALID`.
+
+Setting or changing the pin changes the derivation identity, so the next run
+transcribes the media again (spec 8.8, 0.85.0). A detected language is not part
+of that identity, so on a corpus indexed without a pin, adding one re-transcribes
+**every** media item. Plan the STT (GPU) time for a full pass before you pin a
+large indexed archive, or try the pin on a small copy first.
 
 ### Recognition: how long one media file may take
 
