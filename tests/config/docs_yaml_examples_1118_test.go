@@ -89,34 +89,6 @@ func firstContentLine(body string) string {
 	return ""
 }
 
-// stripTrailingYAMLComments removes a ` #` trailing comment from each line,
-// outside quotes. The flat config parser keeps such a comment as part of the
-// scalar value (a known gap, reported separately from #1118), and most docs
-// examples annotate values that way. The validation test strips them so it
-// checks what each example sets, not how it is annotated.
-func stripTrailingYAMLComments(body string) string {
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		var quote rune
-		for j, r := range line {
-			switch {
-			case quote != 0:
-				if r == quote {
-					quote = 0
-				}
-			case r == '"' || r == '\'':
-				quote = r
-			case r == '#' && j > 0 && line[j-1] == ' ' && strings.TrimSpace(line[:j]) != "":
-				lines[i] = strings.TrimRight(line[:j], " ")
-			}
-			if lines[i] != line {
-				break
-			}
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
 func loadDocsYAML(t *testing.T, body string) error {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
@@ -144,7 +116,7 @@ func TestDocsYAMLExamples_PassConfigValidation(t *testing.T) {
 			continue
 		}
 		checked++
-		if err := loadDocsYAML(t, stripTrailingYAMLComments(ex.body)); err != nil {
+		if err := loadDocsYAML(t, ex.body); err != nil {
 			t.Errorf("%s:%d: docs YAML example fails config validation: %v", ex.file, ex.line, err)
 		}
 	}

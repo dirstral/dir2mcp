@@ -13,6 +13,14 @@ A key that no setting claims does not fail the load. `dir2mcp up` prints one war
 names every unrecognized key, then starts, so a typo or a stale key from an older release
 is reported instead of being dropped in silence.
 
+Comments follow YAML. A `#` at the start of a line, or after a space or tab
+outside quotes, starts a comment, so `key: value  # note` reads as `value`. A `#`
+with no space before it (`a#b`) or inside quotes (`"Team #1"`) is part of the
+value. Quote the whole value when it contains ` #`, so that the value starts with
+the quote: `name: "Team #1"`. Written without quotes, `name: Team #1` reads as
+`Team`, and in `name: Team "A #1"` the quotes are part of a plain value, so
+`#1"` is still a comment. Before #1142 the comment was kept in the value.
+
 #### Chunking keys
 
 ```yaml
