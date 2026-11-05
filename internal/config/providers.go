@@ -556,6 +556,29 @@ func validLanguageSubtag(key string) bool {
 	return true
 }
 
+// validLanguageTag reports whether tag has the shape of a BCP-47 language tag
+// (RFC 5646 §2.1): a valid primary subtag and, after each hyphen, a non-empty
+// subtag of at most 8 ASCII letters or digits. An empty subtag (`uk-`, `pt--BR`)
+// is rejected. It is a shape check only; no registry lookup is made.
+func validLanguageTag(tag string) bool {
+	parts := strings.Split(tag, "-")
+	if !validLanguageSubtag(parts[0]) {
+		return false
+	}
+	for _, sub := range parts[1:] {
+		if len(sub) < 1 || len(sub) > 8 {
+			return false
+		}
+		for i := 0; i < len(sub); i++ {
+			c := sub[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func parseProvidersDoc(raw []byte) (providersDoc, error) {
 	var doc providersDoc
 	sub := extractProvidersSubtree(raw)

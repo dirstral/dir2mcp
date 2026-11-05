@@ -131,6 +131,10 @@ func TestMediaLanguage_Validation(t *testing.T) {
 		{value: "ukrainian", wantErr: true},
 		{value: "fa_IR", wantErr: true},
 		{value: "u", wantErr: true},
+		{value: "uk-", wantErr: true},
+		{value: "pt--BR", wantErr: true},
+		{value: "zh-Hant-TW"},
+		{value: "es-419"},
 	} {
 		cfg := config.Default()
 		cfg.MediaLanguage = tc.value

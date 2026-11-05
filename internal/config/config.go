@@ -6339,16 +6339,17 @@ func (c *Config) validateMediaSTTRouteRetryAfter() error {
 }
 
 // validateMediaLanguage checks the media.language pin (SPEC §8.8, #1136): empty
-// is no pin; otherwise the value must be a BCP-47 tag whose primary subtag is 2
-// to 8 ASCII letters (`uk`, `pt-BR`). A pin that can never match a language
-// (`ukrainian`, `fa_IR`) is CONFIG_INVALID rather than a silent no-op. The tag
+// is no pin; otherwise the value must have the shape of a BCP-47 tag: a primary
+// subtag of 2 to 8 ASCII letters and, after each hyphen, a subtag of 1 to 8
+// ASCII letters or digits (`uk`, `pt-BR`). A pin that can never match a language
+// (`ukrainian`, `fa_IR`, `uk-`) is CONFIG_INVALID rather than a silent no-op. The tag
 // is kept as written (trimmed): it is what the transcription request carries.
 func (c *Config) validateMediaLanguage() error {
 	c.MediaLanguage = strings.TrimSpace(c.MediaLanguage)
 	if c.MediaLanguage == "" {
 		return nil
 	}
-	if !validLanguageSubtag(provider.PrimarySubtag(c.MediaLanguage)) {
+	if !validLanguageTag(c.MediaLanguage) {
 		return fmt.Errorf("CONFIG_INVALID: media.language %q is not a BCP-47 language tag (the primary subtag must be 2 to 8 ASCII letters, e.g. uk or pt-BR)", c.MediaLanguage)
 	}
 	return nil
