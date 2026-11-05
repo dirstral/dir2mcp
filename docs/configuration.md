@@ -224,8 +224,9 @@ each script it knows in the question and in the answer: Latin, Cyrillic, Greek, 
 Hebrew, Devanagari, Han, Hiragana, Katakana, Hangul, Georgian, Armenian, Thai, Bengali,
 Tamil and Ethiopic. A text in another script has no clear script, so the check does not
 run on it. Han, Hiragana and Katakana count as one script. Only the answer's own words
-count: citation tags, link URLs, code and passages in quotation marks do not, so an English
-answer that quotes a Russian document is still an English answer.
+count: a `Sources:` footer, citation tags, link URLs, code and passages in quotation
+marks do not, so an English answer that quotes a Russian document is still an English
+answer.
 When both have a clear script and the two differ, for example a Chinese answer to an
 English question, the server asks the model for the answer once more, with an instruction
 that names the script of the question. The second answer replaces the first only when it

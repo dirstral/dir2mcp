@@ -240,28 +240,56 @@ var codeSpanRe = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
 // answerScript names the writing system (scriptFamily) of an answer's own prose,
 // or "" when that prose has no dominant one.
 //
-// Four kinds of text are removed first, because none of them is the answer's
-// own words: code (a Russian answer about a code corpus can hold a long Latin
-// code block), citation tags (they carry file names), URLs (link destinations,
-// autolinks and bare URLs) and quoted passages. The prompt lets a quote keep
-// its own spelling, so an English answer that quotes a long Cyrillic passage is
-// an English answer and must not be sent back to be rewritten.
+// Five kinds of text are removed first, because none of them is the answer's
+// own words: a model-written attribution footer, code (a Russian answer about a
+// code corpus can hold a long Latin code block), URLs (link destinations,
+// autolinks and bare URLs), quoted passages and citation tags (they carry file
+// names). The prompt lets a quote keep its own spelling, so an English answer
+// that quotes a long Cyrillic passage is an English answer and must not be sent
+// back to be rewritten.
 //
-// Only a bracket that names a document is removed (the same parse §9.4.1 uses).
-// A bracket that holds prose, such as a markdown link label, is answer text and
+// The footer goes first, through stripSourcesFooter, the same function the
+// §9.4.1 post-processor runs later. This check runs BEFORE that post-processing,
+// so without it an English "Sources:" block under a Chinese answer could add
+// enough Latin letters to hide the mismatch.
+//
+// Only a bracket that is a citation tag is removed (see isScriptCitationTag). A
+// bracket that holds prose, such as a markdown link label, is answer text and
 // keeps its vote.
 func answerScript(answer string) string {
-	text := codeSpanRe.ReplaceAllString(answer, " ")
+	text := stripSourcesFooter(answer)
+	text = codeSpanRe.ReplaceAllString(text, " ")
 	text = markdownLinkTargetRe.ReplaceAllString(text, "]")
 	text = bareURLRe.ReplaceAllString(text, " ")
 	text = quotedPassageRe.ReplaceAllString(text, " ")
 	text = inlineCitationRe.ReplaceAllStringFunc(text, func(match string) string {
-		if inlineCitationTagPath(match) == "" {
+		if !isScriptCitationTag(match) {
 			return match
 		}
 		return " "
 	})
 	return dominantFamily(text)
+}
+
+// citationLocatorRe matches the inside of a bracket that is a SPEC §9.3 tag by
+// its locator: a path token followed by ":L<digit>", "#p=<digit>" or
+// "@t=<digit>". The path may be a root-level name with no "/" and no
+// extension, such as "LICENSE:L1-L3".
+var citationLocatorRe = regexp.MustCompile(`^[^\s\[\]]+?(?::L\d|#p=\d|@t=\d)`)
+
+// isScriptCitationTag reports whether one inlineCitationRe match is a citation
+// tag for the script count: a §9.3 tag by its locator, or a bracketed path the
+// §9.4.1 parse accepts (a "/" or a file extension). A bracket that is neither,
+// such as "[README]" or a markdown link label, is answer text.
+func isScriptCitationTag(match string) bool {
+	if inlineCitationTagPath(match) != "" {
+		return true
+	}
+	inner := strings.TrimSpace(match)
+	if len(inner) < 2 {
+		return false
+	}
+	return citationLocatorRe.MatchString(strings.TrimSpace(inner[1 : len(inner)-1]))
 }
 
 // answerScriptMismatch reports whether the answer is clearly written in another

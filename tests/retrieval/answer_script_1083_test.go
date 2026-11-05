@@ -267,6 +267,25 @@ func TestScript1083_Mismatch(t *testing.T) {
 			"Ответ находится здесь: <https://example.com/this-is-a-long-english-only-documentation-path>", false},
 		{"inline code does not vote", "Как сервер проверяет заголовок авторизации?",
 			"Сервер вызывает `subtle.ConstantTimeCompare(headerValue, expectedTokenValue)` для токена.", false},
+		// The check runs before the §9.4.1 post-processing, so a model-written
+		// Sources: footer is removed first. Its titles must not tip the verdict
+		// in either direction.
+		{"an english footer under a han answer does not hide the mismatch", "What is the 16th century known as the start of?",
+			"16世纪被称为法国宗教战争开始的时期。\n\nSources:\n" +
+				"- [Black_Death.md] (The Black Death and the French Wars of Religion)\n" +
+				"- [Wars.md] (French Wars of Religion overview)", true},
+		{"a han footer under an english answer is not a mismatch", "What is the 16th century known as the start of?",
+			"Religious wars began then.\n\nSources:\n" +
+				"- [Black_Death.md] (黑死病与法国宗教战争的漫长历史以及它们对欧洲社会的深远影响)\n" +
+				"- [Wars.md] (法国宗教战争概述与十六世纪欧洲的宗教冲突和政治变迁)\n" +
+				"- [Europe.md] (十六世纪欧洲宗教改革运动的起源发展及其对各国政治格局的长期影响)", false},
+		// A §9.3 tag is a tag by its locator, even on a root-level path with
+		// no "/" and no extension.
+		{"root-level tags with a locator do not vote", "What is the 16th century known as the start of?",
+			"宗教战争开始的时期。[LICENSE:L1-L3] [CHANGELOG:L10-L20] [CONTRIBUTING:L5-L9]", true},
+		// A bracket with no locator and no path shape is answer text.
+		{"a bracket with no locator keeps its vote", "What is the 16th century known as the start of?",
+			"答案在这里很清楚明白。[README] [CONTRIBUTING] [CHANGELOG] [ROADMAP]", false},
 		{"short answer has no verdict", "What is the 16th century known as the start of?", "是。", false},
 		{"question with no clear script", "Крым Crimea Крым Crimea", hanAnswer1083, false},
 	}
