@@ -226,6 +226,14 @@ type transcriptMeta struct {
 	// RouteFallbackSkipReason says why the last due route-fallback retry could
 	// not run (a host problem, not a route failure). Absent when it ran.
 	RouteFallbackSkipReason string `json:"route_fallback_skip_reason,omitempty"`
+	// RedecodedWindows lists the windows of an item-scoped windowed decode
+	// that the §8.6.13 low-confidence rule decoded again (spec 0.88.0), in
+	// ascending start_ms order. RedecodeRule is "low-confidence" whenever the
+	// rule ran, so "checked, none" differs from "not checked". Neither joins
+	// the derivation identity (§8.6.7). Both are absent when the rule did not
+	// run.
+	RedecodedWindows []model.RedecodedWindow `json:"redecoded_windows,omitempty"`
+	RedecodeRule     string                  `json:"redecode_rule,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

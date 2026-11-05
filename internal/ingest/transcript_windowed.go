@@ -398,8 +398,10 @@ func sttPayloadCapBytes(stt model.Transcriber) int {
 // `[mm:ss] text` contract, so a cached transcript stays valid either way.
 //
 // stt is the transcriber that decodes: the configured default, or the route the
-// §8.2.4 identifier selected for the item.
-func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath string, content []byte, stt model.Transcriber) (string, []model.TimedWord, *TranscriptCoverage, error) {
+// §8.2.4 identifier selected for the item. unhinted is false when an
+// identifier result routed the item: the §8.6.13 low-confidence rule then does
+// not run (see decodeWindowedTranscript).
+func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath string, content []byte, stt model.Transcriber, unhinted bool) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if len(content) == 0 {
 		return withoutCoverage(s.transcribeWith(ctx, stt, relPath, content))
 	}
@@ -412,7 +414,7 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 	}
 	defer cleanup()
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
-	return s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, stt)
+	return s.decodeStagedTranscript(ctx, relPath, content, tmpPath, totalMS, stt, unhinted)
 }
 
 // decodeStagedTranscript is the half of transcribeStructuredWindowed after the
@@ -420,7 +422,8 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 // overlapping windows otherwise. It is split out so the §8.2.4 item route can
 // stage the media once, probe it for the identifier, and then decode it on the
 // selected route (and once more on the default profile when that route fails).
-func (s *Service) decodeStagedTranscript(ctx context.Context, relPath string, content []byte, tmpPath string, totalMS int, stt model.Transcriber) (string, []model.TimedWord, *TranscriptCoverage, error) {
+// unhinted is passed through to decodeWindowedTranscript.
+func (s *Service) decodeStagedTranscript(ctx context.Context, relPath string, content []byte, tmpPath string, totalMS int, stt model.Transcriber, unhinted bool) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	capBytes := sttPayloadCapBytes(stt)
 	windowMS := STTWindowMS(totalMS, len(content), capBytes)
 	if windowMS <= 0 {
@@ -446,7 +449,7 @@ func (s *Service) decodeStagedTranscript(ctx context.Context, relPath string, co
 		return withoutCoverage(
 			s.transcribeWith(ctx, model.TranscriberForAudioDuration(stt, totalMS), relPath, content))
 	}
-	text, words, coverage, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, stt, totalMS, windowMS, "transcription")
+	text, words, coverage, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, stt, totalMS, windowMS, "transcription", unhinted)
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		// ffmpeg is what SLICES the audio. When it is missing, or cannot cut this
@@ -534,7 +537,7 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	// transcript; §8.6.13 scopes the recorded coverage to the authoritative source
 	// transcript, so the coverage is dropped here and the decode is otherwise
 	// unchanged (issue #961).
-	text, words, _, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate")
+	text, words, _, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		s.getLogger().Printf("windowed translate %s: the audio cannot be sliced (%v); decoding in one pass", doc.RelPath, err)
@@ -548,7 +551,11 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 // names the operation in logs ("transcription" or "translate"); it is the only
 // difference between the two callers, because a translate decode returns the same
 // segment/word shape a transcription does.
-func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, totalMS, windowMS int, label string) (string, []model.TimedWord, *TranscriptCoverage, error) {
+//
+// unhinted is true when nothing hints the decode language: no §8.2.4 identifier
+// result routed the item. Only then does the §8.6.13 low-confidence rule run on
+// an item-scoped transcription (spec 0.88.0).
+func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, totalMS, windowMS int, label string, unhinted bool) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	overlapMS := TranscriptWindowOverlapMS(windowMS)
 	stepMS := windowMS - overlapMS
 	if stepMS <= 0 {
@@ -563,27 +570,35 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 			return s.extractMediaSegment(ctx, tmpPath, startMS, endMS)
 		}
 	}
-	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, windowSchedule{
+	plan := windowSchedule{
 		totalMS:  totalMS,
 		windowMS: windowMS,
 		stepMS:   stepMS,
 		capBytes: sttPayloadCapBytes(stt),
 		label:    label,
-	}, st)
+	}
+	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, plan, st)
 	if err != nil {
 		return "", nil, nil, err
 	}
 	// One progress line per document: how much of the recording actually decoded.
 	s.getLogger().Printf("windowed %s %s: %d/%d windows decoded (window %ds, overlap %ds, duration %ds)",
 		label, relPath, stats.decoded, stats.attempted, windowMS/1000, overlapMS/1000, totalMS/1000)
-	text, words := MergeTranscriptWindows(windows, stepMS)
 	// §8.6.13: the counts and the decoded ranges leave this function instead of
 	// dying in the log line above, so the transcript representation can record what
 	// it does and does not cover.
 	if st != nil {
+		text, words := MergeTranscriptWindows(windows, stepMS)
 		return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), windowMS), nil
 	}
-	return text, words, withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS), nil
+	var rd redecodeOutcome
+	if unhinted && label == "transcription" {
+		windows, rd = s.redecodeLowConfidenceWindows(ctx, relPath, tmpPath, stt, plan, windows, stats.reports)
+	}
+	text, words := MergeTranscriptWindows(windows, stepMS)
+	coverage := withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS)
+	rd.stamp(coverage)
+	return text, words, coverage, nil
 }
 
 // windowSchedule is the plan for one windowed decode: the recording length, the
@@ -613,6 +628,9 @@ type windowStats struct {
 	// firstQualityReason is the §8.6.6 reason of the first window refused as
 	// quality_gate, carried onto the coverage record for the terminal status.
 	firstQualityReason string
+	// reports are the decoder's language reports of the decoded windows under
+	// item scope, in schedule order, for the §8.6.13 low-confidence rule.
+	reports []windowReport
 }
 
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
@@ -665,6 +683,8 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		}
 		stats.decoded++
 		stats.ranges = append(stats.ranges, wd.covered...)
+		wd.report.first, wd.report.count = len(windows), len(wd.decoded)
+		stats.reports = append(stats.reports, wd.report)
 		windows = append(windows, wd.decoded...)
 	}
 	if err := allWindowsFailed(relPath, plan, stats, firstDecodeErr, firstCutErr); err != nil {
@@ -723,8 +743,10 @@ func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath st
 		}
 		return s.decodeWindowScoped(ctx, relPath, pieces, plan, core, st), nil
 	}
-	decoded, covered, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
-	return windowDecode{decoded: decoded, covered: covered, err: decodeErr}, nil
+	decoded, covered, results, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
+	lang, conf := decoderReport(results)
+	return windowDecode{decoded: decoded, covered: covered, err: decodeErr,
+		report: windowReport{span: CoverageRange{StartMS: start, EndMS: end}, lang: lang, conf: conf}}, nil
 }
 
 // decodeWindowPieces decodes every piece of one scheduled window and returns the
@@ -736,40 +758,30 @@ func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath st
 // refused without reaching the server. Skipping it costs the same audio and says
 // exactly why, and when every window ends this way the document fails with that
 // reason instead of a generic refusal.
-func (s *Service) decodeWindowPieces(ctx context.Context, relPath string, stt model.Transcriber, pieces []windowPiece, plan windowSchedule) ([]TranscriptWindow, []CoverageRange, error) {
+//
+// Each request is sized to the audio its piece carries (decodePieces), so a window
+// that decodes slowly is waited out instead of cut off (#962). The full results
+// come back too: the §8.6.13 low-confidence rule reads the language and the
+// confidence the decoder reported for the window.
+func (s *Service) decodeWindowPieces(ctx context.Context, relPath string, stt model.Transcriber, pieces []windowPiece, plan windowSchedule) ([]TranscriptWindow, []CoverageRange, []pieceResult, error) {
+	results, firstErr := s.decodePieces(ctx, relPath, stt, pieces, plan)
+	out, covered := resultWindows(results)
+	return out, covered, results, firstErr
+}
+
+// resultWindows converts decoded pieces into merge input and coverage ranges.
+// The piece's whole span counts as covered, not the span its segments happen to
+// fill: a decoded window with a silent tail was still LISTENED to, and reporting
+// the silence as an uncovered gap would misread "nothing was said" as "nothing
+// was transcribed", which is the exact confusion §8.6.13 exists to remove.
+func resultWindows(results []pieceResult) ([]TranscriptWindow, []CoverageRange) {
 	var out []TranscriptWindow
 	var covered []CoverageRange
-	var firstErr error
-	for _, p := range pieces {
-		if plan.capBytes > 0 && len(p.data) > plan.capBytes {
-			err := fmt.Errorf("%s window [%d,%d]ms is %d bytes after %d splits, over the provider cap of %d bytes",
-				plan.label, p.startMS, p.endMS, len(p.data), maxWindowSplits, plan.capBytes)
-			if firstErr == nil {
-				firstErr = err
-			}
-			s.getLogger().Printf("windowed %s: skip window of %s: %v (raise the provider payload cap or re-encode the media)", plan.label, relPath, err)
-			continue
-		}
-		// Size the request to the audio this piece carries, so a window that decodes
-		// slowly (a hard language, a busy GPU, CPU inference) is waited out instead
-		// of cut off at a constant and left as a hole in the transcript (#962).
-		text, words, err := s.transcribeWith(ctx, model.TranscriberForAudioDuration(stt, p.endMS-p.startMS), relPath, p.data)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			s.getLogger().Printf("windowed %s: skip window [%d,%d]ms of %s: %v", plan.label, p.startMS, p.endMS, relPath, err)
-			continue
-		}
-		out = append(out, TranscriptWindow{StartMS: p.startMS, Res: model.TranscriptResult{Text: text, Words: words}})
-		// The piece's whole span counts as covered, not the span its segments
-		// happen to fill: a decoded window with a silent tail was still LISTENED to,
-		// and reporting the silence as an uncovered gap would misread "nothing was
-		// said" as "nothing was transcribed", which is the exact confusion §8.6.13
-		// exists to remove.
-		covered = append(covered, CoverageRange{StartMS: p.startMS, EndMS: p.endMS})
+	for _, r := range results {
+		out = append(out, TranscriptWindow{StartMS: r.piece.startMS, Res: model.TranscriptResult{Text: r.res.Text, Words: r.res.Words}})
+		covered = append(covered, CoverageRange{StartMS: r.piece.startMS, EndMS: r.piece.endMS})
 	}
-	return out, covered, firstErr
+	return out, covered
 }
 
 // windowPiece is one slice of staged audio ready to send: the absolute range it

@@ -168,6 +168,9 @@ type windowDecode struct {
 	// quality_gate, for the log and the terminal-status message.
 	qualityReason string
 	err           error
+	// report is the decoder's language report for the window under item
+	// scope (§8.6.13 low-confidence rule). Zero under window scope.
+	report windowReport
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.

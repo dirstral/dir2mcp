@@ -428,7 +428,7 @@ func (s *Service) retryItemFallback(ctx context.Context, doc model.Document, con
 		var text string
 		var words []model.TimedWord
 		var cov *TranscriptCoverage
-		text, words, cov, err = s.transcribeStructuredWindowed(ctx, relPath, audio, route.stt)
+		text, words, cov, err = s.transcribeStructuredWindowed(ctx, relPath, audio, route.stt, false)
 		if err == nil {
 			out := cachedTranscript{text: normalizeTranscriptNewlines(text), words: words, coverage: cov,
 				route: &itemRoute{Language: rec.Language, Confidence: rec.Confidence, Route: route.route, Uncovered: !routeCovers(route, rec.Language)}}
@@ -475,7 +475,7 @@ func (s *Service) itemRetryFailed(ctx context.Context, doc model.Document, relPa
 	now := s.nowUTC()
 	if v.ProducerChanged {
 		def := s.defaultRoute()
-		text, words, cov, err := s.transcribeStructuredWindowed(ctx, relPath, audio, def.stt)
+		text, words, cov, err := s.transcribeStructuredWindowed(ctx, relPath, audio, def.stt, false)
 		if err != nil {
 			s.getLogger().Printf("route fallback retry %s: candidate %q failed again (%v) and the default profile %q failed too (TRANSCRIBE_FAILED: %v) (SPEC §8.2.4)", doc.RelPath, cand, cause, def.route, err)
 			return fallbackRetry{err: fmt.Errorf("%w: %w: transcribe %s on the default profile %q: %w", ErrTranscriptProviderFailure, errRouteFallbackRetired, doc.RelPath, def.route, err)}
