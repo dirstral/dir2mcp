@@ -813,7 +813,7 @@ providers:
     embed_text_model: nomic-embed-text
     embed_code_model: nomic-embed-text
     chat_model: llama3.1                  # answers + translation stay local
-  local-stt:                              # self-hosted Whisper/WhisperX
+  whisper:                                # self-hosted Whisper/WhisperX: overrides the built-in `whisper` profile
     kind: whisper                         # base_url is the host ROOT (/v1/audio/transcriptions is appended)
     base_url: http://127.0.0.1:9001
     stt_model: large-v3
@@ -822,13 +822,16 @@ model:
     provider: local-llm                   # reindex-bound (the embed identity includes it)
   chat:
     provider: local-llm
-stt_provider: local-stt                   # STT uses the legacy selector
+# STT uses the legacy selector. It takes a built-in name (auto, whisper, ...),
+# not a profile name, so the `whisper` profile above is overridden in place.
+stt_provider: whisper
 ingest:
-  extractor: docling                      # local structured extraction; do NOT fall back to cloud OCR
+  # Local structured extraction; do NOT fall back to cloud OCR.
+  extractor: docling
 ```
 
 Notes:
-- **Transcription is optional.** A folder with no audio or video needs no speech server: drop the `local-stt` profile and the `stt_provider` line, and transcription stays off (the default selector is `auto`, which turns STT on only when an eligible profile exists).
+- **Transcription is optional.** A folder with no audio or video needs no speech server: drop the `whisper` profile and the `stt_provider` line, and transcription stays off (the default selector is `auto`, which turns STT on only when an eligible profile exists).
 - **Document extraction:** use local `docling` (the `dir2mcp-full` track bundles it) or a self-hosted [docling-serve](#docling-extraction-over-http-docling-serve). Avoid `extractor: auto`, whose last fallback is cloud Mistral OCR — pin `extractor: docling` (or `docling-serve`, or `off`) so no page image is ever uploaded. For a self-hosted OCR endpoint instead, bind `model.ocr.provider` to a `kind: mistral` `/v1/ocr` profile (see below).
 - **Verify, don't infer:** run `dir2mcp doctor` — its **egress** row must report `no third-party egress: all resolved providers target local/loopback or private/LAN endpoints`. If it names any public host, that capability is still leaving the machine.
 - A trusted-LAN endpoint may be **credential-less** (omit `api_key`); loopback, private-range, `.local`/`.internal`, and single-label LAN hosts all count as no-egress.
@@ -857,7 +860,8 @@ model:
     provider: gpu-embed      # reindex-bound (the embed identity includes it)
   ocr:
     provider: gpu-ocr        # omit to keep the hosted mistral-ocr default
-stt_provider: whisper        # STT uses the legacy selector
+# STT uses the legacy selector: a built-in name, not a profile name.
+stt_provider: whisper
 ```
 
 - **Capability mapping** (which route serves each capability, spec §8.5): embed → `POST {base_url}/v1/embeddings`; chat → `/v1/chat/completions`; STT → `/v1/audio/transcriptions` (endpoint-dependent, validated at first use). **OCR has no OpenAI analog** — bind it only to a `kind: mistral` `/v1/ocr` endpoint (or use [docling-serve](#docling-extraction-over-http-docling-serve)); binding `model.ocr.provider` to a `kind: openai` profile is rejected as `CONFIG_INVALID`.
@@ -868,18 +872,26 @@ stt_provider: whisper        # STT uses the legacy selector
 - **A checkpoint per language, chosen before the recording is decoded.** A local whisper server selects its checkpoint by the `model` field of the request, so a per-language fine-tune is one `kind: whisper` profile per checkpoint (`stt_model` names it) and one `language_providers` entry per language; the default profile decodes every other language. Under the default `language_scope: item` the route needs the recording's language before transcription, which `media.stt.language_identifier` now gives it (spec 8.2.4): the identifier hears a centred probe of at most `language_probe_sec`, its answer selects the first eligible candidate for that language, and an answer that is empty, below the confidence floor, or an error leaves the recording on the default profile exactly as before. The transcript records `language_identifier`, `language_scope`, `language_routes` and, when the identifier answered, the language it heard (`language_source: detected`) and `route`, the profile that decoded; `provider`/`model` keep naming the default profile, and `language_routes` carries the model each route binds. `media.stt.on_route_error` (`fail|default`, default `fail`) says what a failing checkpoint does: `fail` keeps the failed window or recording; `default` decodes the same audio once more on the default profile and records the failed candidate (`route_fallback_from` on the transcript, `fallback_from` on the window's `coverage.languages` entry), never silently. A fallback transcript is provisional (spec 8.2.4, 0.82.0): it holds text from a model you did not choose for that language, so it is decoded again on its route. It records `route_fallback_at` (when the fallback text was decoded or last retried, RFC 3339 UTC) and `route_fallback_by` (the `<profile>|<model>` of the default profile that decoded it), and the transcript cache keeps both. Under `default` a fallback transcript is retried once it is older than `media.stt.route_retry_after` (a duration, default `24h`; `0` retries on every run; a negative value or one that is not a duration is `CONFIG_INVALID`; env `DIR2MCP_MEDIA_STT_ROUTE_RETRY_AFTER`). A retry decodes the recording once on its route (under `window` scope only the windows that fell back, spliced into the cached transcript in place; under `item` scope on the route for the recorded language, without asking the identifier again). When the route works, its text replaces the fallback text and the record goes. When it fails again, the cached fallback text stays, `route_fallback_at` moves to the retry time, and the default profile is not asked again. Under `fail` a cached fallback transcript is decoded again on every run: when the route still fails, the recording fails (`TRANSCRIBE_FAILED`) or the window becomes a failed window, and the fallback text leaves the index. The cache keeps that text, and a dropped window is recorded on the transcript (`route_fallback_dropped`), so the recording is decoded again on the next run: a repaired checkpoint takes over, and a return to `default` indexes the cached fallback text again. Under `fail` this has a cost: a route that stays broken decodes those windows (and fails those recordings) again on every run, and `dir2mcp doctor` counts the transcripts that hold such windows. A retry that cannot run because of the host (the audio cannot be extracted, staged or cut, or the decode schedule no longer matches the cached record, beyond a 1 second difference in length) is not a route failure. Under `default` the cached fallback text stays indexed, `route_fallback_at` moves to the time of the attempt so it waits one interval, and `route_fallback_skip_reason` records why as a short class (`audio_extract_failed`, `no_audio_track`, `stage_failed`, `probe_failed`, `cut_failed`, `schedule_mismatch`; the full error goes to the log); `doctor` counts these. Under `fail` the fallback text may not be served, so the recording or window is treated as when the route fails. A cancelled run changes nothing. After a producer change, a window whose route and new default profile both fail has no valid text left: it is recorded as dropped and retried on its route when due. A `route_fallback_at` more than 5 minutes in the future is treated as due. A fallback transcript whose `route_fallback_by` is absent or names another default profile is decoded again on the next run under both policies. A transcript with no fallback record is never decoded again for this reason, so a change of policy re-derives only fallback transcripts. To retry every fallback transcript now, run `DIR2MCP_MEDIA_STT_ROUTE_RETRY_AFTER=0 dir2mcp reindex`. A pinned corpus keeps the failed recording: the pin asserts the route. A `language_providers` key must be a BCP-47 language tag (`fa`, `pt-BR`): a primary subtag of 2 to 8 letters, so `fa_IR` or `f` is `CONFIG_INVALID`. `dir2mcp doctor` lists the resolved table as `stt_routes`: the identifier, each language's candidates with the model each binds and whether `require_validation` keeps it eligible, the `on_route_error` policy and `route_retry_after`, and how many transcripts hold a route-fallback result with the time the next one is due ("due on the next run" when one has no time or names another default profile, the interval is `0`, or the policy is `fail`; "no route-fallback transcripts" when there are none); a language whose candidates are all ineligible is a warning naming the default profile that decodes it. Example:
 
   ```yaml
-  stt_provider: whisper               # the default checkpoint
+  # The default checkpoint: the built-in `whisper` profile, overridden below.
+  stt_provider: whisper
   providers:
     whisper: {kind: whisper, base_url: http://gpu:9001, stt_model: large-v3}
     lid:     {kind: whisper, base_url: http://gpu:9001, stt_model: large-v3}   # identifier: only its language report is used
-    ckpt-fa: {kind: whisper, base_url: http://gpu:9001, stt_model: my-org/whisper-fa, stt_languages: [fa],
-              stt_validation: [{language: fa, method: wer, sample: 100 read sentences, score: "13.3", date: 2026-10-06}]}
+    ckpt-fa:
+      kind: whisper
+      base_url: http://gpu:9001
+      stt_model: my-org/whisper-fa
+      stt_languages: [fa]
+      stt_validation:
+        - {language: fa, method: wer, sample: 100 read sentences, score: "13.3", date: 2026-10-06}
   media:
     stt:
       language_identifier: lid
       language_providers: {fa: ckpt-fa}
-      on_route_error: default         # a failing checkpoint falls back once to large-v3, recorded
-      route_retry_after: 24h          # the checkpoint decodes a fallback transcript again after a day
+      # A failing checkpoint falls back once to large-v3, recorded.
+      on_route_error: default
+      # The checkpoint decodes a fallback transcript again after a day.
+      route_retry_after: 24h
   ```
 
 ### Late chunking with a self-hosted TEI server (`kind: tei`)
