@@ -559,21 +559,53 @@ func validLanguageSubtag(key string) bool {
 // validLanguageTag reports whether tag has the shape of a BCP-47 language tag
 // (RFC 5646 §2.1): a valid primary subtag and, after each hyphen, a non-empty
 // subtag of at most 8 ASCII letters or digits. An empty subtag (`uk-`, `pt--BR`)
-// is rejected. It is a shape check only; no registry lookup is made.
+// is rejected. A singleton (a one-character subtag) must be followed by at
+// least one subtag: 2 to 8 characters after an extension singleton (`en-u-ca`),
+// 1 to 8 after the private-use `x` (`en-x-a`). So `en-u`, `en-x` and `en-u-x`
+// are rejected. It is a shape check only; no registry lookup is made.
 func validLanguageTag(tag string) bool {
 	parts := strings.Split(tag, "-")
 	if !validLanguageSubtag(parts[0]) {
 		return false
 	}
-	for _, sub := range parts[1:] {
-		if len(sub) < 1 || len(sub) > 8 {
+	rest := parts[1:]
+	for i, sub := range rest {
+		if !alnumSubtag(sub) {
 			return false
 		}
-		for i := 0; i < len(sub); i++ {
-			c := sub[i]
-			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
-				return false
+		if len(sub) != 1 {
+			continue
+		}
+		// A singleton opens an extension or private-use sequence: it needs a
+		// following subtag, and an extension subtag is at least 2 characters.
+		if i+1 >= len(rest) {
+			return false
+		}
+		if !strings.EqualFold(sub, "x") && len(rest[i+1]) < 2 {
+			return false
+		}
+		if strings.EqualFold(sub, "x") {
+			// Every subtag after x is private use (1 to 8 alphanumerics).
+			for _, p := range rest[i+1:] {
+				if !alnumSubtag(p) {
+					return false
+				}
 			}
+			return true
+		}
+	}
+	return true
+}
+
+// alnumSubtag reports whether sub is 1 to 8 ASCII letters or digits.
+func alnumSubtag(sub string) bool {
+	if len(sub) < 1 || len(sub) > 8 {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		c := sub[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
 		}
 	}
 	return true
