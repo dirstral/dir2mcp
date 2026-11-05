@@ -789,9 +789,12 @@ the values must be equal (case does not matter); different values are
 
 Setting or changing the pin changes the derivation identity, so the next run
 transcribes the media again (spec 8.8, 0.85.0). A detected language is not part
-of that identity, so on a corpus indexed without a pin, adding one re-transcribes
-**every** media item. Plan the STT (GPU) time for a full pass before you pin a
-large indexed archive, or try the pin on a small copy first.
+of that identity. So on a corpus indexed without a pin, adding one re-transcribes
+**every** media item whose STT profile sets no `stt_language` of its own. A
+profile that sets its own `stt_language` keeps that language, so the pin does not
+change its identity and its media is not transcribed again. Plan the STT (GPU)
+time for a full pass before you pin a large indexed archive, or try the pin on a
+small copy first.
 
 ### Recognition: how long one media file may take
 

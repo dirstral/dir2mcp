@@ -556,45 +556,119 @@ func validLanguageSubtag(key string) bool {
 	return true
 }
 
-// validLanguageTag reports whether tag has the shape of a BCP-47 language tag
-// (RFC 5646 §2.1): a valid primary subtag and, after each hyphen, a non-empty
-// subtag of at most 8 ASCII letters or digits. An empty subtag (`uk-`, `pt--BR`)
-// is rejected. A singleton (a one-character subtag) must be followed by at
-// least one subtag: 2 to 8 characters after an extension singleton (`en-u-ca`),
-// 1 to 8 after the private-use `x` (`en-x-a`). So `en-u`, `en-x` and `en-u-x`
-// are rejected. It is a shape check only; no registry lookup is made.
+// validLanguageTag reports whether tag is a well-formed BCP-47 language tag by
+// the RFC 5646 §2.1 langtag grammar. Each subtag must fit its role, in order:
+//
+//	language  2 to 8 letters; a 2- or 3-letter language may take up to three
+//	          3-letter extlang subtags (zh-yue)
+//	script    4 letters (Hant)
+//	region    2 letters or 3 digits (BR, 419)
+//	variant   5 to 8 letters or digits, or a digit and 3 letters or digits (1996)
+//	extension a singleton other than x, then one or more subtags of 2 to 8
+//	          letters or digits (u-ca-gregory)
+//	private   x, then one or more subtags of 1 to 8 letters or digits (x-a)
+//
+// So `en-12` (two digits fit no role), `uk-`, `en-u` and `en-x` are rejected.
+// It is a shape check only; no registry lookup is made, and the irregular
+// grandfathered tags are not accepted.
 func validLanguageTag(tag string) bool {
 	parts := strings.Split(tag, "-")
 	if !validLanguageSubtag(parts[0]) {
 		return false
 	}
-	rest := parts[1:]
-	for i, sub := range rest {
-		if !alnumSubtag(sub) {
+	i := 1
+	if len(parts[0]) <= 3 {
+		i = skipSubtags(parts, i, 3, isExtlangSubtag)
+	}
+	i = skipSubtags(parts, i, 1, isScriptSubtag)
+	i = skipSubtags(parts, i, 1, isRegionSubtag)
+	i = skipSubtags(parts, i, len(parts), variantSubtag)
+	i, ok := skipExtensions(parts, i)
+	if !ok {
+		return false
+	}
+	i, ok = skipPrivateUse(parts, i)
+	return ok && i == len(parts)
+}
+
+// skipSubtags moves past at most limit subtags from parts[i] on that match fit,
+// and returns the index of the first subtag it did not take.
+func skipSubtags(parts []string, i, limit int, fit func(string) bool) int {
+	for n := 0; n < limit && i < len(parts) && fit(parts[i]); n++ {
+		i++
+	}
+	return i
+}
+
+func isExtlangSubtag(sub string) bool { return letterSubtag(sub, 3, 3) }
+func isScriptSubtag(sub string) bool  { return letterSubtag(sub, 4, 4) }
+func isRegionSubtag(sub string) bool  { return letterSubtag(sub, 2, 2) || digitSubtag(sub, 3) }
+
+// isExtensionSubtag reports whether sub is an extension subtag: 2 to 8 letters
+// or digits.
+func isExtensionSubtag(sub string) bool { return len(sub) >= 2 && alnumSubtag(sub) }
+
+// skipExtensions moves past each extension sequence (a singleton other than x
+// and one or more extension subtags). ok is false for a singleton with no
+// subtag after it.
+func skipExtensions(parts []string, i int) (next int, ok bool) {
+	for i < len(parts) && len(parts[i]) == 1 && alnumSubtag(parts[i]) && !strings.EqualFold(parts[i], "x") {
+		j := skipSubtags(parts, i+1, len(parts), isExtensionSubtag)
+		if j == i+1 {
+			return i, false
+		}
+		i = j
+	}
+	return i, true
+}
+
+// skipPrivateUse moves past a private-use sequence (x and one or more subtags
+// of 1 to 8 letters or digits). ok is false for an x with no subtag after it.
+func skipPrivateUse(parts []string, i int) (next int, ok bool) {
+	if i >= len(parts) || !strings.EqualFold(parts[i], "x") {
+		return i, true
+	}
+	j := skipSubtags(parts, i+1, len(parts), alnumSubtag)
+	return j, j > i+1
+}
+
+// letterSubtag reports whether sub is min to max ASCII letters.
+func letterSubtag(sub string, minLen, maxLen int) bool {
+	if len(sub) < minLen || len(sub) > maxLen {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		c := sub[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			return false
-		}
-		if len(sub) != 1 {
-			continue
-		}
-		// A singleton opens an extension or private-use sequence: it needs a
-		// following subtag, and an extension subtag is at least 2 characters.
-		if i+1 >= len(rest) {
-			return false
-		}
-		if !strings.EqualFold(sub, "x") && len(rest[i+1]) < 2 {
-			return false
-		}
-		if strings.EqualFold(sub, "x") {
-			// Every subtag after x is private use (1 to 8 alphanumerics).
-			for _, p := range rest[i+1:] {
-				if !alnumSubtag(p) {
-					return false
-				}
-			}
-			return true
 		}
 	}
 	return true
+}
+
+// digitSubtag reports whether sub is exactly n ASCII digits.
+func digitSubtag(sub string, n int) bool {
+	if len(sub) != n {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		if sub[i] < '0' || sub[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// variantSubtag reports whether sub is a BCP-47 variant: 5 to 8 letters or
+// digits, or 4 letters or digits that start with a digit.
+func variantSubtag(sub string) bool {
+	if !alnumSubtag(sub) {
+		return false
+	}
+	if len(sub) >= 5 {
+		return true
+	}
+	return len(sub) == 4 && sub[0] >= '0' && sub[0] <= '9'
 }
 
 // alnumSubtag reports whether sub is 1 to 8 ASCII letters or digits.

@@ -143,6 +143,16 @@ func TestMediaLanguage_Validation(t *testing.T) {
 		{value: "en-u-x", wantErr: true},
 		{value: "en-u-a", wantErr: true},
 		{value: "en-US-x", wantErr: true},
+		{value: "en-12", wantErr: true},
+		{value: "en-US-US", wantErr: true},
+		{value: "en-Latn-Latn", wantErr: true},
+		{value: "english-abc", wantErr: true},
+		{value: "sr-Latn-RS"},
+		{value: "zh-yue-HK"},
+		{value: "de-CH-1996"},
+		{value: "sl-rozaj-biske"},
+		{value: "en-US-x-twain"},
+		{value: "en-a-bbb-x-a"},
 	} {
 		cfg := config.Default()
 		cfg.MediaLanguage = tc.value
