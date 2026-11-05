@@ -2,7 +2,6 @@ package tests
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -27,6 +26,8 @@ func TestYAMLTrailingComment_HashInsideValueIsKept(t *testing.T) {
 		{"server:\n  name: 'a # b'  # note\n", "a # b"},
 		{"server:\n  name: \"a \\\" # b\"\n", "a \" # b"},
 		{"server:\n  name: it's  # note\n", "it's"},
+		{"server:\n  name: beta-'draft # note\n", "beta-'draft"},
+		{"server:\n  name: a:'b # note\n", "a:'b"},
 	} {
 		cfg := loadCfg(t, tc.yaml)
 		if cfg.ServerName != tc.want {
@@ -39,8 +40,8 @@ func TestYAMLTrailingComment_HashInsideValueIsKept(t *testing.T) {
 // is an escaped quote, so the # after it is still inside the scalar.
 func TestYAMLTrailingComment_EscapedSingleQuote(t *testing.T) {
 	cfg := loadCfg(t, "server:\n  name: 'it''s # x'  # note\n")
-	if !strings.Contains(cfg.ServerName, "s # x") || strings.Contains(cfg.ServerName, "note") {
-		t.Errorf("ServerName = %q, want the quoted text with its # kept and the trailing comment dropped", cfg.ServerName)
+	if cfg.ServerName != "it's # x" {
+		t.Errorf("ServerName = %q, want %q", cfg.ServerName, "it's # x")
 	}
 }
 

@@ -4960,14 +4960,26 @@ func quotedScalarEnd(line string, start int) int {
 }
 
 // scalarStartsAt reports whether a scalar can start at line[i]: the line holds
-// only whitespace before it, or its last non-blank character before i is one of
-// `:`, `-`, `[`, `{` or `,`.
+// only whitespace before it; or the last non-blank character before it is a
+// flow indicator (`[`, `{` or `,`); or it is a `:` or a list `-` with
+// whitespace between it and line[i]. A list `-` must open the line or follow
+// whitespace, so the `-` inside `beta-'draft` is not one.
 func scalarStartsAt(line string, i int) bool {
 	prev := strings.TrimRight(line[:i], " \t")
 	if prev == "" {
 		return true
 	}
-	return strings.ContainsRune(":-[{,", rune(prev[len(prev)-1]))
+	spaced := len(prev) < i
+	n := len(prev)
+	switch prev[n-1] {
+	case '[', '{', ',':
+		return true
+	case ':':
+		return spaced
+	case '-':
+		return spaced && (n == 1 || prev[n-2] == ' ' || prev[n-2] == '\t')
+	}
+	return false
 }
 
 func unquoteYAMLScalar(value string) string {
@@ -4979,7 +4991,8 @@ func unquoteYAMLScalar(value string) string {
 			}
 		}
 		if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
-			return value[1 : len(value)-1]
+			// In a single-quoted YAML scalar, '' is an escaped quote.
+			return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
 		}
 	}
 	return value
