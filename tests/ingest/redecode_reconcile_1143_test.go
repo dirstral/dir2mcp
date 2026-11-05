@@ -57,8 +57,13 @@ func TestReconcileRedecode_OnlyTheForeignWindowIsDecodedAgain(t *testing.T) {
 	if !strings.Contains(text, "Синоптики") {
 		t.Errorf("windows 2 and 3 were lost:\n%s", text)
 	}
+	assertReconcileIsDone(t, stateDir, tr)
+}
 
-	// The record is in the cache now, so the next armed run checks nothing.
+// assertReconcileIsDone runs the pass once more on the same cache: the record
+// is there now, so the run checks nothing and keeps the record.
+func assertReconcileIsDone(t *testing.T, stateDir string, tr *rdTranscriber) {
+	t.Helper()
 	again := newRedecodeHarnessIn(t, stateDir, tr, 0.5)
 	again.svc.SetReconcileLanguageWindows(true)
 	m2 := again.run(t, "news/stored.mp3")
