@@ -219,6 +219,22 @@ The prompt also tells the model to refuse a language switch demanded by a retrie
 document. Document text reaches the model inside untrusted-data markers, and the prompt
 rejects every instruction found there, a language change included.
 
+The server also checks the answer after the model writes it. It counts the letters of
+each script it knows in the question and in the answer: Latin, Cyrillic, Greek, Arabic,
+Hebrew, Devanagari, Han, Hiragana, Katakana, Hangul, Georgian, Armenian, Thai, Bengali,
+Tamil and Ethiopic. A text in another script has no clear script, so the check does not
+run on it. Han, Hiragana and Katakana count as one script. Only the answer's own words
+count: citation tags, link URLs, code and passages in quotation marks do not, so an English
+answer that quotes a Russian document is still an English answer.
+When both have a clear script and the two differ, for example a Chinese answer to an
+English question, the server asks the model for the answer once more, with an instruction
+that names the script of the question. The second answer replaces the first only when it
+is in the script of the question. Otherwise the first answer stays. This costs at most one
+extra generation, and only on a mismatch. The check follows the answer-language rule: when
+your `rag.system_prompt` drops that rule, the check does not run. Each mismatch writes one
+line to the server log. The check sees the script, not the language, so it does not catch
+a Spanish answer to an English question.
+
 To pin one answer language for all requests, write your own `rag.system_prompt`. It
 replaces the shipped grounding rule, answer-language rule and `[rel_path]` citation rule,
 so keep in your text the ones you still want.

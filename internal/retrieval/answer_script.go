@@ -1,7 +1,12 @@
 package retrieval
 
 import (
+	"context"
+	"regexp"
+	"strings"
 	"unicode"
+
+	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
 // The answer-language rule (#880), the trailing reminder (#892) and the
@@ -88,16 +93,23 @@ const (
 // covers enough of it to be worth stating. Punctuation, digits and spaces do not
 // vote: only letters do.
 func dominantScript(question string) string {
-	counts := make([]int, len(scriptNames))
+	return dominantBy(question, func(name string) string { return name })
+}
+
+// dominantBy is dominantScript with the letters grouped by key before the
+// share and margin rules run. The identity key gives dominantScript; the
+// scriptFamily key gives dominantFamily.
+func dominantBy(text string, key func(string) string) string {
+	counts := make(map[string]int, len(scriptNames))
 	letters := 0
-	for _, r := range question {
+	for _, r := range text {
 		if !unicode.IsLetter(r) {
 			continue
 		}
 		letters++
 		for i := range scriptNames {
 			if unicode.Is(scriptNames[i].table, r) {
-				counts[i]++
+				counts[key(scriptNames[i].name)]++
 				break
 			}
 		}
@@ -105,13 +117,16 @@ func dominantScript(question string) string {
 	if letters < minScriptLetters {
 		return ""
 	}
-	best, bestN := -1, 0
-	for i, n := range counts {
-		if n > bestN {
-			best, bestN = i, n
+	// Walk scriptNames, not the map, so a tie resolves the same way on every
+	// run: the first listed script wins, as it always has.
+	best, bestN := "", 0
+	for i := range scriptNames {
+		k := key(scriptNames[i].name)
+		if n := counts[k]; n > bestN {
+			best, bestN = k, n
 		}
 	}
-	if best < 0 {
+	if best == "" {
 		return ""
 	}
 	if float64(bestN)/float64(letters) < scriptShare {
@@ -124,7 +139,14 @@ func dominantScript(question string) string {
 	if float64(bestN) < scriptMargin*float64(others) {
 		return ""
 	}
-	return scriptNames[best].name
+	return best
+}
+
+// dominantFamily names the writing system a text is written in (see
+// scriptFamily), or "". Han and kana letters vote together, so a Japanese text
+// that splits its letters between them still has a clear verdict.
+func dominantFamily(text string) string {
+	return dominantBy(text, scriptFamily)
 }
 
 // scriptReminder is the sentence appended to the trailing language reminder when
@@ -148,3 +170,176 @@ func scriptReminder(question string) string {
 // ScriptReminderForQuestion is the exported form of scriptReminder, for tests in
 // the tests/ tree. It returns "" when the question has no clear script.
 func ScriptReminderForQuestion(question string) string { return scriptReminder(question) }
+
+// The script check (#1083, SPEC §9.4.6). The rule, the reminder and the
+// script sentence above all work on the INPUT. A small local model can still
+// write the answer in another script: in a 344-question benchmark run,
+// qwen2.5:7b-instruct answered "What is the 16th century known as the start
+// of?" over an English corpus in Chinese, with all three in the prompt. More
+// words in the prompt cannot close that gap. A check of the OUTPUT can, and the
+// script is the one axis that is counted, not guessed.
+//
+// The check is deliberately narrow, so a wrong verdict costs at most one call:
+//
+//   - both texts must have a dominant script (the same dominantScript rules), so
+//     a short answer, a mixed answer or a question with no clear script is never
+//     corrected;
+//   - inline citation tags are removed first, because a tag carries a file name
+//     and a Latin file name must not vote for the answer's script;
+//   - Han, Hiragana and Katakana are one family, so a Japanese answer to a
+//     Japanese question is not a mismatch whichever of the three leads;
+//   - at most one more generation, and its answer replaces the first only when
+//     its dominant script is positively the question's. Absence of a verdict is
+//     not a pass.
+
+// hanKanaFamily is the name of the one writing system Han, Hiragana and
+// Katakana form together. It names scripts, not a language.
+const hanKanaFamily = "Han and Kana"
+
+// scriptFamily maps a script name from scriptNames to the writing system it
+// belongs to. Scripts that one language writes together share a family.
+func scriptFamily(name string) string {
+	switch name {
+	case "Han", "Hiragana", "Katakana":
+		return hanKanaFamily
+	}
+	return name
+}
+
+// markdownLinkTargetRe matches the destination half of a markdown link,
+// "](https://...)". The label before it is answer text; the destination is a
+// URL, whose Latin letters must not vote for the answer's script.
+//
+// It accepts the CommonMark forms a model writes: a destination with one level
+// of balanced parentheses ("wiki/Foo_(bar)"), an angle-bracket destination, and
+// an optional title in double quotes, single quotes or parentheses.
+var markdownLinkTargetRe = regexp.MustCompile(
+	`\]\(\s*(?:<[^<>\n]*>|[^()\s]*(?:\([^()\s]*\)[^()\s]*)*)` +
+		`(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)`)
+
+// quotedPassageRe matches a quoted passage: text in straight double quotes,
+// curly quotes, guillemets, low-high quotes or corner brackets, on one line or
+// across lines, and a markdown block quote line ("> ..."). Single quotes are
+// left out on purpose: an apostrophe ("Park's") is the same character.
+//
+// A stray unpaired mark can pair with a later one and remove the text between
+// them. That only removes letters from the count, so its worst case is "no
+// verdict", which never causes a retry: the safe direction.
+var quotedPassageRe = regexp.MustCompile(
+	`"[^"]*"|\x{201C}[^\x{201D}]*\x{201D}|\x{00AB}[^\x{00BB}]*\x{00BB}|` +
+		`\x{201E}[^\x{201C}\x{201D}]*[\x{201C}\x{201D}]|\x{300C}[^\x{300D}]*\x{300D}|\x{300E}[^\x{300F}]*\x{300F}|` +
+		`(?m:^[ \t]*>.*$)`)
+
+// bareURLRe matches a URL written in the text, bare or as an <...> autolink.
+var bareURLRe = regexp.MustCompile(`<?\b(?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)[^\s<>]*>?`)
+
+// codeSpanRe matches a fenced code block (``` or ~~~) and an inline code span.
+// Code is written in the script of the programming language, not the answer's.
+var codeSpanRe = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
+
+// answerScript names the writing system (scriptFamily) of an answer's own prose,
+// or "" when that prose has no dominant one.
+//
+// Four kinds of text are removed first, because none of them is the answer's
+// own words: code (a Russian answer about a code corpus can hold a long Latin
+// code block), citation tags (they carry file names), URLs (link destinations,
+// autolinks and bare URLs) and quoted passages. The prompt lets a quote keep
+// its own spelling, so an English answer that quotes a long Cyrillic passage is
+// an English answer and must not be sent back to be rewritten.
+//
+// Only a bracket that names a document is removed (the same parse §9.4.1 uses).
+// A bracket that holds prose, such as a markdown link label, is answer text and
+// keeps its vote.
+func answerScript(answer string) string {
+	text := codeSpanRe.ReplaceAllString(answer, " ")
+	text = markdownLinkTargetRe.ReplaceAllString(text, "]")
+	text = bareURLRe.ReplaceAllString(text, " ")
+	text = quotedPassageRe.ReplaceAllString(text, " ")
+	text = inlineCitationRe.ReplaceAllStringFunc(text, func(match string) string {
+		if inlineCitationTagPath(match) == "" {
+			return match
+		}
+		return " "
+	})
+	return dominantFamily(text)
+}
+
+// answerScriptMismatch reports whether the answer is clearly written in another
+// writing system than the question. want is the question's and got the
+// answer's, both as scriptFamily names. Both are "" when either text has no
+// dominant one, and then there is no mismatch.
+func answerScriptMismatch(question, answer string) (want, got string, mismatch bool) {
+	want = dominantFamily(question)
+	if want == "" {
+		return "", "", false
+	}
+	got = answerScript(answer)
+	if got == "" {
+		return "", "", false
+	}
+	return want, got, got != want
+}
+
+// AnswerScriptMismatch is the exported form of answerScriptMismatch, for tests
+// in the tests/ tree.
+func AnswerScriptMismatch(question, answer string) bool {
+	_, _, mismatch := answerScriptMismatch(question, answer)
+	return mismatch
+}
+
+// ragScriptCorrectionHeader delimits the correction section of the second
+// prompt. It sits after the Reminder section, so it is the last thing the model
+// reads, for the same reason the reminder is (#892).
+const ragScriptCorrectionHeader = "Correction:\n"
+
+// scriptCorrection is the instruction appended to the prompt for the second
+// generation. Like the reminder, it speaks only about the script and language
+// of the answer: it is the last instruction in the prompt, after the injection
+// guard, so it must not touch grounding or citations.
+func scriptCorrection(want, got string) string {
+	return "\n" + ragScriptCorrectionHeader +
+		"A previous answer to this question was written in the " + got + " alphabet. " +
+		"The question is written in the " + want + " alphabet. Write the whole answer " +
+		"in the " + want + " alphabet, in the language of the question. Quoted words " +
+		"from a document keep their own spelling; everything you write yourself does not.\n"
+}
+
+// correctAnswerScript runs the §9.4.6 check on a generated answer and, on a
+// mismatch, generates the answer once more with scriptCorrection appended to
+// the same prompt. It returns the answer to publish: the second answer when its
+// script is the question's, and the first answer in every other case (no
+// mismatch, a failed or empty second call, or a second answer that still
+// misses).
+//
+// It runs only when the prompt in force states the answer-language rule, the
+// same condition that gates the reminder. An operator who fixed one answer
+// language has replaced the rule, and correcting toward the question's script
+// would overrule them.
+//
+// The log lines name the scripts only, never the question or the answer text.
+func (s *Service) correctAnswerScript(ctx context.Context, question, prompt, systemPrompt, answer string) string {
+	if !carriesAnswerLanguageRule(composeSystemPrompt(systemPrompt)) {
+		return answer
+	}
+	want, got, mismatch := answerScriptMismatch(question, answer)
+	if !mismatch {
+		return answer
+	}
+	var second string
+	err := usage.TimeStage(ctx, usage.StageGenerate, func() error {
+		var gErr error
+		second, gErr = s.gen.Generate(ctx, prompt+scriptCorrection(want, got))
+		return gErr
+	})
+	if err != nil {
+		s.logf("rag: answer script %s does not match question script %s; the second generation failed (%v), the first answer is kept", got, want, err)
+		return answer
+	}
+	second = strings.TrimSpace(second)
+	if again := answerScript(second); again != want {
+		s.logf("rag: answer script %s does not match question script %s; the second answer has script %q, the first answer is kept", got, want, again)
+		return answer
+	}
+	s.logf("rag: answer script %s does not match question script %s; corrected by one more generation", got, want)
+	return second
+}
