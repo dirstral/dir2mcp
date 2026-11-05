@@ -764,6 +764,38 @@ same files single-pass writes. Enabling write-back on an already-indexed corpus
 fills the files in on the next scan without a reindex. A `source.kind: s3`
 corpus has no filesystem to write beside the media and requires `dir`.
 
+### Source language pin (`media.language`)
+
+By default dir2mcp detects the source language of each recording. When the
+corpus has one known source language, pin it:
+
+```yaml
+media:
+  language: uk          # BCP-47 tag; alias: media.stt.language
+```
+
+The pin fills the `stt_language` of every provider profile that does not set
+one. So it reaches every place a profile's `stt_language` reaches: the language
+sent with each transcription request, the `media.stt.language_providers` route,
+the transcript's derivation identity, and the transcript record
+(`language_source: configured`). A pin turns off the language identifiers
+(`media.stt.language_identifier`, and per-window detection under
+`language_scope: window`). A profile's own `stt_language` is more specific and
+wins for that profile. `media.stt.language` is an alias, for operators who look
+for the pin beside the other `media.stt.language_*` keys. If you set both keys,
+the values must be equal (case does not matter); different values are
+`CONFIG_INVALID`. A value that is not a BCP-47 tag (`ukrainian`, `fa_IR`) is
+`CONFIG_INVALID`.
+
+Setting or changing the pin changes the derivation identity, so the next run
+transcribes the media again (spec 8.8, 0.85.0). A detected language is not part
+of that identity. So on a corpus indexed without a pin, adding one re-transcribes
+**every** media item whose STT profile sets no `stt_language` of its own. A
+profile that sets its own `stt_language` keeps that language, so the pin does not
+change its identity and its media is not transcribed again. Plan the STT (GPU)
+time for a full pass before you pin a large indexed archive, or try the pin on a
+small copy first.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition

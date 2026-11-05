@@ -1203,8 +1203,18 @@ type Config struct {
 	MediaSTTMaxPayloadMB      int
 	MediaSTTRequestTimeoutSec int
 
+	// MediaLanguage is the corpus-wide source-language pin (config
+	// `media.language`, alias `media.stt.language`; SPEC §8.8, spec 0.85.0,
+	// dir2mcp #1136): a BCP-47 tag that fills the stt_language of every provider
+	// profile that sets none, so it reaches the transcription request, the
+	// language_providers route, the derivation identity and the §8.2.2 to §8.2.4
+	// identifiers exactly as a profile's stt_language does. A profile's own
+	// stt_language is more specific and wins for that profile. Empty = no pin
+	// (auto-detect). A value that is not a BCP-47 tag is CONFIG_INVALID.
+	MediaLanguage string
+
 	// MediaSTTLanguageStrict controls whether a corpus-pinned STT language
-	// (config `media.stt.language` / a provider profile's language) is treated
+	// (config `media.language` / a provider profile's stt_language) is treated
 	// by the output quality gate as ground truth about content, and therefore
 	// enforced by its language/script-mismatch detector (config
 	// `media.stt.language_strict`, dir2mcp#439 F3).
@@ -1625,6 +1635,7 @@ type fileConfig struct {
 	MediaSTTOnPartialTranscript        *string
 	MediaSTTLanguageScope              *string
 	MediaSTTLanguageIdentifier         *string
+	MediaLanguage                      *string
 	MediaSTTLanguageProbeSec           *int
 	MediaSTTRequireValidation          *bool
 	MediaSTTOnRouteError               *string
@@ -1810,6 +1821,7 @@ type persistedConfig struct {
 	MediaSTTOnPartialTranscript        string        `yaml:"media_stt_on_partial_transcript"`
 	MediaSTTLanguageScope              string        `yaml:"media_stt_language_scope"`
 	MediaSTTLanguageIdentifier         string        `yaml:"media_stt_language_identifier"`
+	MediaLanguage                      string        `yaml:"media_language"`
 	MediaSTTLanguageProbeSec           int           `yaml:"media_stt_language_probe_sec"`
 	MediaSTTRequireValidation          bool          `yaml:"media_stt_require_validation"`
 	MediaSTTOnRouteError               string        `yaml:"media_stt_on_route_error"`
@@ -2300,6 +2312,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTOnPartialTranscript:        cfg.MediaSTTOnPartialTranscript,
 		MediaSTTLanguageScope:              cfg.MediaSTTLanguageScope,
 		MediaSTTLanguageIdentifier:         cfg.MediaSTTLanguageIdentifier,
+		MediaLanguage:                      cfg.MediaLanguage,
 		MediaSTTLanguageProbeSec:           cfg.MediaSTTLanguageProbeSec,
 		MediaSTTRequireValidation:          cfg.MediaSTTRequireValidation,
 		MediaSTTOnRouteError:               cfg.MediaSTTOnRouteError,
@@ -3339,6 +3352,9 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTLanguageIdentifier != nil {
 		cfg.MediaSTTLanguageIdentifier = strings.TrimSpace(*fc.MediaSTTLanguageIdentifier)
 	}
+	if fc.MediaLanguage != nil {
+		cfg.MediaLanguage = strings.TrimSpace(*fc.MediaLanguage)
+	}
 	if fc.MediaSTTLanguageProbeSec != nil {
 		cfg.MediaSTTLanguageProbeSec = *fc.MediaSTTLanguageProbeSec
 	}
@@ -3623,6 +3639,15 @@ func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bo
 	if isListConfigKey(key) {
 		setFileListValue(cfg, key, value)
 		return nil
+	}
+	// media.language and its aliases (media.stt.language, media_language) all
+	// canonicalize to one key. Two spellings with different values would leave
+	// the pin to file order, so a mismatch is CONFIG_INVALID (SPEC §8.8, spec
+	// 0.85.0, #1136). The comparison ignores case: BCP-47 tags are
+	// case-insensitive.
+	if key == "media.language" && cfg.MediaLanguage != nil &&
+		!strings.EqualFold(strings.TrimSpace(*cfg.MediaLanguage), strings.TrimSpace(value)) {
+		return fmt.Errorf("CONFIG_INVALID: media.language is set more than once with different values (%q and %q); media.stt.language and media_language are aliases of media.language", *cfg.MediaLanguage, value)
 	}
 	if err := setFileScalarValue(cfg, key, value); err != nil {
 		return err
@@ -3920,6 +3945,8 @@ var configKeyAliases = map[string]string{
 	"media_stt_on_partial_transcript":         "media.stt.on_partial_transcript",
 	"media_stt_language_scope":                "media.stt.language_scope",
 	"media_stt_language_identifier":           "media.stt.language_identifier",
+	"media_language":                          "media.language",
+	"media.stt.language":                      "media.language", // alias of the media.language pin (SPEC §8.8, #1136)
 	"media_stt_language_probe_sec":            "media.stt.language_probe_sec",
 	"media_stt_require_validation":            "media.stt.require_validation",
 	"media_stt_on_route_error":                "media.stt.on_route_error",
@@ -4292,6 +4319,9 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 // setStringFileScalar dispatches a string key/value to the
 // server/model/ingest/x402 string setters.
 func setStringFileScalar(cfg *fileConfig, key, value string) {
+	if key == "media.language" {
+		cfg.MediaLanguage = strPtr(value)
+	}
 	setServerStringFileScalar(cfg, key, value)
 	setModelStringFileScalar(cfg, key, value)
 	setIngestStringFileScalar(cfg, key, value)
@@ -4841,6 +4871,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_stt_on_partial_transcript", cfg.MediaSTTOnPartialTranscript)
 	writeScalar("media_stt_language_scope", cfg.MediaSTTLanguageScope)
 	writeScalar("media_stt_language_identifier", cfg.MediaSTTLanguageIdentifier)
+	writeScalar("media_language", cfg.MediaLanguage)
 	writeInt("media_stt_language_probe_sec", cfg.MediaSTTLanguageProbeSec)
 	writeBool("media_stt_require_validation", cfg.MediaSTTRequireValidation)
 	writeScalar("media_stt_on_route_error", cfg.MediaSTTOnRouteError)
@@ -5378,6 +5409,7 @@ func (c *Config) Validate() error {
 		c.validateMediaSTTOnUncoveredLanguage,
 		c.validateMediaSTTPartialTranscriptFloor,
 		c.validateMediaSTTLanguageScope,
+		c.validateMediaLanguage,
 		c.validateSTTLanguageIdentifier,
 		c.validateMediaSTTOnRouteError,
 		c.validateMediaSTTRouteRetryAfter,
@@ -6311,6 +6343,23 @@ func (c *Config) validateMediaSTTRouteRetryAfter() error {
 	}
 	if c.MediaSTTRouteRetryAfter < 0 {
 		return fmt.Errorf("CONFIG_INVALID: media.stt.route_retry_after must not be negative: %v", c.MediaSTTRouteRetryAfter)
+	}
+	return nil
+}
+
+// validateMediaLanguage checks the media.language pin (SPEC §8.8, #1136): empty
+// is no pin; otherwise the value must have the shape of a BCP-47 tag: a primary
+// subtag of 2 to 8 ASCII letters and, after each hyphen, a subtag of 1 to 8
+// ASCII letters or digits (`uk`, `pt-BR`). A pin that can never match a language
+// (`ukrainian`, `fa_IR`, `uk-`) is CONFIG_INVALID rather than a silent no-op. The tag
+// is kept as written (trimmed): it is what the transcription request carries.
+func (c *Config) validateMediaLanguage() error {
+	c.MediaLanguage = strings.TrimSpace(c.MediaLanguage)
+	if c.MediaLanguage == "" {
+		return nil
+	}
+	if !validLanguageTag(c.MediaLanguage) {
+		return fmt.Errorf("CONFIG_INVALID: media.language %q is not a BCP-47 language tag (the primary subtag must be 2 to 8 ASCII letters, e.g. uk or pt-BR)", c.MediaLanguage)
 	}
 	return nil
 }
