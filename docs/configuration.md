@@ -772,6 +772,25 @@ same files single-pass writes. Enabling write-back on an already-indexed corpus
 fills the files in on the next scan without a reindex. A `source.kind: s3`
 corpus has no filesystem to write beside the media and requires `dir`.
 
+### Translated broadcast cues follow the source speech (SPEC §8.6.3)
+
+```yaml
+media:
+  subtitles:
+    segmentation: broadcast
+    source_pause_ms: 2000   # default; 0 turns the rule off; negative => CONFIG_INVALID
+```
+
+A chat translation has no word times of its own. Under `segmentation: broadcast`,
+dir2mcp times its words against the source transcript's word timings. A gap of
+at least `source_pause_ms` between two source words is a source pause. The
+translated words of that segment are shared out over the spoken parts in
+proportion to their source words, so no translated cue starts or ends in the
+pause. A cue can stay on screen into the pause after it, but never past the
+start of the next spoken part. A source without word timings, or `0`, gives the
+old per-segment timing. The key changes VTT and SRT export timing only. It
+never changes the index, the chunks or the citations.
+
 ### Source language pin (`media.language`)
 
 By default dir2mcp detects the source language of each recording. When the

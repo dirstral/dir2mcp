@@ -161,6 +161,11 @@ const (
 // cue is merged into that cue.
 const DefaultMediaSubtitlesAlignToleranceMS = 2500
 
+// DefaultMediaSubtitlesSourcePauseMS is the SPEC §8.6.3 source pause
+// (media.subtitles.source_pause_ms, 0.87.0): under broadcast segmentation no
+// translated cue is timed inside a source pause of at least this many ms.
+const DefaultMediaSubtitlesSourcePauseMS = 2000
+
 // DefaultMediaSubtitlesEmitPolicy is the SPEC §8.6.14 default overwrite policy
 // for subtitle write-back: a file dir2mcp did not write is never overwritten,
 // and a (language, format) is written only when the document has no bound
@@ -969,6 +974,15 @@ type Config struct {
 	// validation time.
 	MediaSubtitlesTTMLAlignToleranceMS int
 
+	// MediaSubtitlesSourcePauseMS is the shortest gap between two source words
+	// that counts as a source pause (SPEC §8.6.3, config
+	// `media.subtitles.source_pause_ms`, default 2000, 0.87.0). Under broadcast
+	// segmentation, a translation with no word timings of its own is timed
+	// against the source words, and no translated cue starts or ends inside such
+	// a pause. 0 turns the rule off; a negative value is CONFIG_INVALID. Export
+	// timing only: it never affects ingest, chunks or citations.
+	MediaSubtitlesSourcePauseMS int
+
 	// MediaSubtitlesSMILEnabled opts IN to emitting a SMIL packaging document
 	// alongside TTML (SPEC §8.6.10, config `media.subtitles.smil.enabled`). OFF by
 	// default. Only consulted when MediaSubtitlesTTMLEnabled is true. SMIL carries
@@ -1611,6 +1625,7 @@ type fileConfig struct {
 	MediaFilterWords                   []string
 	MediaSubtitlesTTMLEnabled          *bool
 	MediaSubtitlesTTMLAlignToleranceMS *int
+	MediaSubtitlesSourcePauseMS        *int
 	MediaSubtitlesSMILEnabled          *bool
 	MediaSubtitlesSegmentation         *string
 	MediaSubtitlesEmitEnabled          *bool
@@ -1799,6 +1814,7 @@ type persistedConfig struct {
 	MediaFilterWords                   []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled          bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
+	MediaSubtitlesSourcePauseMS        int           `yaml:"media_subtitles_source_pause_ms"`
 	MediaSubtitlesSMILEnabled          bool          `yaml:"media_subtitles_smil_enabled"`
 	MediaSubtitlesSegmentation         string        `yaml:"media_subtitles_segmentation"`
 	MediaSubtitlesEmitEnabled          bool          `yaml:"media_subtitles_emit_enabled"`
@@ -2120,6 +2136,7 @@ func Default() Config {
 		// behaves predictably.
 		MediaSubtitlesTTMLEnabled:          false,
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
+		MediaSubtitlesSourcePauseMS:        DefaultMediaSubtitlesSourcePauseMS,
 		MediaSubtitlesSMILEnabled:          false,
 		MediaSubtitlesSegmentation:         "chunk",
 		// Subtitle write-back (SPEC §8.6.14) is OFF by default; formats and policy
@@ -2291,6 +2308,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaFilterWords:                   append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:          cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS: cfg.MediaSubtitlesTTMLAlignToleranceMS,
+		MediaSubtitlesSourcePauseMS:        cfg.MediaSubtitlesSourcePauseMS,
 		MediaSubtitlesSMILEnabled:          cfg.MediaSubtitlesSMILEnabled,
 		MediaSubtitlesSegmentation:         cfg.MediaSubtitlesSegmentation,
 		MediaSubtitlesEmitEnabled:          cfg.MediaSubtitlesEmitEnabled,
@@ -3424,6 +3442,9 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesTTMLAlignToleranceMS != nil {
 		cfg.MediaSubtitlesTTMLAlignToleranceMS = *fc.MediaSubtitlesTTMLAlignToleranceMS
 	}
+	if fc.MediaSubtitlesSourcePauseMS != nil {
+		cfg.MediaSubtitlesSourcePauseMS = *fc.MediaSubtitlesSourcePauseMS
+	}
 	if fc.MediaSubtitlesSMILEnabled != nil {
 		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
 	}
@@ -3937,6 +3958,7 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_align_tolerance_ms": "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":            "media.subtitles.smil.enabled",
 	"media_subtitles_segmentation":            "media.subtitles.segmentation",
+	"media_subtitles_source_pause_ms":         "media.subtitles.source_pause_ms",
 	"media_subtitles_emit_enabled":            "media.subtitles.emit.enabled",
 	"media_subtitles_emit_formats":            "media.subtitles.emit.formats",
 	"media_subtitles_emit_languages":          "media.subtitles.emit.languages",
@@ -4224,6 +4246,9 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.subtitles.collapse_repeats": func(c *fileConfig) **int {
 		return &c.MediaSubtitlesCollapseRepeats
 	},
+	"media.subtitles.source_pause_ms": func(c *fileConfig) **int {
+		return &c.MediaSubtitlesSourcePauseMS
+	},
 	"distributed_embed_max_attempts": func(c *fileConfig) **int {
 		return &c.DistributedEmbedMaxAttempts
 	},
@@ -4269,6 +4294,7 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.stt.request_timeout_sec":           true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
 	"media.subtitles.collapse_repeats":        true,
+	"media.subtitles.source_pause_ms":         true,
 	"retrieval.hierarchical.max_tokens":       true,
 }
 
@@ -4858,6 +4884,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
 	writeScalar("media_subtitles_segmentation", cfg.MediaSubtitlesSegmentation)
+	writeInt("media_subtitles_source_pause_ms", cfg.MediaSubtitlesSourcePauseMS)
 	writeBool("media_subtitles_emit_enabled", cfg.MediaSubtitlesEmitEnabled)
 	writeList("media_subtitles_emit_formats", cfg.MediaSubtitlesEmitFormats)
 	writeList("media_subtitles_emit_languages", cfg.MediaSubtitlesEmitLanguages)
@@ -5929,6 +5956,11 @@ func (c *Config) validateMediaSubtitles() error {
 			c.MediaSubtitlesSegmentation)
 	}
 	c.MediaSubtitlesSegmentation = segmentation
+	// §8.6.3 (0.87.0): 0 turns the source-pause rule off, so 0 is kept as is.
+	if c.MediaSubtitlesSourcePauseMS < 0 {
+		return fmt.Errorf("CONFIG_INVALID: media.subtitles.source_pause_ms must not be negative: %d",
+			c.MediaSubtitlesSourcePauseMS)
+	}
 	if c.MediaSubtitlesCollapseRepeats < 0 {
 		return fmt.Errorf("media.subtitles.collapse_repeats must not be negative: %d",
 			c.MediaSubtitlesCollapseRepeats)

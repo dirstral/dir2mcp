@@ -259,6 +259,13 @@ type broadcastWord struct {
 	end     int
 	text    string
 	speaker string
+	// runStart and hold are set only on a translation timed against a source
+	// pause (ReflowTranslatedCues, SPEC §8.6.3). runStart marks the first token
+	// of a spoken run after a source pause: it always opens a new cue, and that
+	// cue never leads in to the pause. hold, when > 0, is the start of the next
+	// spoken run: relaxation never extends a cue that ends on this word past it.
+	runStart bool
+	hold     int
 }
 
 // BuildBroadcastCues re-segments a transcript's per-word timings (model.Span.Words,
@@ -386,29 +393,12 @@ func ReflowChunkCues(cues []Cue) []Cue {
 func synthesizeWordTimings(cues []Cue) []broadcastWord {
 	var words []broadcastWord
 	for _, c := range cues {
-		toks := strings.Fields(strings.ReplaceAll(c.Text, "\n", " "))
+		toks := cueTokens(c)
 		if len(toks) == 0 {
 			continue
 		}
-		start, end := c.StartMS, c.EndMS
-		if start < 0 {
-			start = 0
-		}
-		if end < start {
-			end = start
-		}
-		span := end - start
-		total := 0
-		for _, t := range toks {
-			total += utf8.RuneCountInString(t) + 1
-		}
-		acc := 0
-		for _, t := range toks {
-			ws := start + span*acc/total
-			acc += utf8.RuneCountInString(t) + 1
-			we := start + span*acc/total
-			words = append(words, broadcastWord{start: ws, end: we, text: t})
-		}
+		start, end := clampCueSpan(c)
+		words = append(words, spreadTokens(toks, start, end)...)
 	}
 	return words
 }
@@ -421,6 +411,10 @@ type broadcastSeg struct {
 	end     int
 	text    string
 	speaker string
+	// noLead and hold carry the source-pause limits of ReflowTranslatedCues
+	// (see broadcastWord): noLead from the first word, hold from the last.
+	noLead bool
+	hold   int
 }
 
 // segmentBroadcastWords groups ordered words into segments, starting a new
@@ -432,13 +426,16 @@ func segmentBroadcastWords(words []broadcastWord) []broadcastSeg {
 	haveCur := false
 	var curStart, curLastEnd int
 	var curText, curSpeaker string
+	var curNoLead bool
+	var curHold int
 
 	flush := func() {
 		if !haveCur {
 			return
 		}
 		if t := strings.TrimSpace(curText); t != "" {
-			segs = append(segs, broadcastSeg{start: curStart, end: curLastEnd, text: t, speaker: curSpeaker})
+			segs = append(segs, broadcastSeg{start: curStart, end: curLastEnd, text: t, speaker: curSpeaker,
+				noLead: curNoLead, hold: curHold})
 		}
 		haveCur = false
 		curText = ""
@@ -449,18 +446,22 @@ func segmentBroadcastWords(words []broadcastWord) []broadcastSeg {
 		// A speaker change is a hard cue boundary: BuildCues keeps one cue per
 		// (single-speaker) span, so the broadcast path must never merge two
 		// speakers' words into one cue when re-segmenting from word timings.
-		if haveCur && (w.speaker != curSpeaker || shouldBreakBroadcast(curText, curStart, curLastEnd, w)) {
+		// A spoken run after a source pause (runStart) is a hard boundary too, so
+		// no cue spans a source pause (SPEC §8.6.3), whatever the pause length.
+		if haveCur && (w.speaker != curSpeaker || w.runStart || shouldBreakBroadcast(curText, curStart, curLastEnd, w)) {
 			flush()
 		}
 		if !haveCur {
 			curStart = w.start
 			curText = w.text
 			curSpeaker = w.speaker
+			curNoLead = w.runStart
 			haveCur = true
 		} else {
 			curText = appendBroadcastToken(curText, w.text)
 		}
 		curLastEnd = w.end
+		curHold = w.hold
 	}
 	flush()
 	return segs
@@ -502,10 +503,7 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 		if i > 0 {
 			prevEnd = segs[i-1].end
 		}
-		next := segs[i].end + 2000
-		if i+1 < len(segs) {
-			next = segs[i+1].start
-		}
+		next := relaxEndLimit(segs, i)
 		need := int(math.Round(float64(utf8.RuneCountInString(segs[i].text)) * 1000.0 / bcTargetCPS))
 		if need < bcMinDurMS {
 			need = bcMinDurMS
@@ -525,7 +523,9 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 			}
 			segs[i].end = end
 		}
-		if segs[i].end-segs[i].start < need {
+		// A cue that opens a spoken run after a source pause never leads in to
+		// that pause (SPEC §8.6.3).
+		if segs[i].end-segs[i].start < need && !segs[i].noLead {
 			room := segs[i].start - (prevEnd + bcGapMinMS)
 			if room > bcLeadMS {
 				room = bcLeadMS
@@ -553,6 +553,21 @@ func relaxBroadcastTiming(segs []broadcastSeg) []Cue {
 		})
 	}
 	return cues
+}
+
+// relaxEndLimit returns the time a cue's display end must stay clear of: the
+// start of the next cue (or 2 s past the last cue's end), lowered to the start
+// of the next spoken run when the cue ends before a source pause (hold > 0,
+// SPEC §8.6.3). Relaxation may extend a cue into that pause, never past it.
+func relaxEndLimit(segs []broadcastSeg, i int) int {
+	next := segs[i].end + 2000
+	if i+1 < len(segs) {
+		next = segs[i+1].start
+	}
+	if h := segs[i].hold; h > 0 && h < next {
+		next = h
+	}
+	return next
 }
 
 // collectBroadcastWords flattens the per-word timings of every "time" span into

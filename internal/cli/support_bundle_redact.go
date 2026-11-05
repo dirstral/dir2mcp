@@ -198,6 +198,7 @@ var snapshotAllowedKeys = map[string]bool{
 	"media_subtitles_ttml_align_tolerance_ms": true,
 	"media_subtitles_smil_enabled":            true,
 	"media_subtitles_segmentation":            true,
+	"media_subtitles_source_pause_ms":         true,
 	"media_subtitles_collapse_repeats":        true,
 	"media_subtitles_drop_urls":               true,
 	"media_trim_leading_silence":              true,
