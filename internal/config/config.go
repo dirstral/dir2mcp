@@ -3372,6 +3372,16 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTRequireValidation != nil {
 		cfg.MediaSTTRequireValidation = *fc.MediaSTTRequireValidation
 	}
+	if fc.MediaSTTTracks != nil {
+		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
+	}
+	applyMediaSTTRouteFileParsed(cfg, fc)
+}
+
+// applyMediaSTTRouteFileParsed copies the set media.stt.* route and re-decode
+// file fields (§8.2.4, §8.6.13) onto cfg. Split out of applyMediaSTTFileParsed
+// so that function stays under the cyclomatic-complexity budget.
+func applyMediaSTTRouteFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTOnRouteError != nil {
 		cfg.MediaSTTOnRouteError = *fc.MediaSTTOnRouteError
 	}
@@ -3380,9 +3390,6 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaSTTRedecodeBelow != nil {
 		cfg.MediaSTTRedecodeBelow = *fc.MediaSTTRedecodeBelow
-	}
-	if fc.MediaSTTTracks != nil {
-		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
 }
 
