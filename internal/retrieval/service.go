@@ -2403,7 +2403,11 @@ func (s *Service) generateGroundedAnswer(
 			// answer: it would have been grounded in nothing.
 			sourceReason = reasonGeneratorError
 		} else if trimmed := strings.TrimSpace(generated); trimmed != "" {
-			answer = trimmed
+			// §9.4.6 (#1083): an answer clearly written in another script than
+			// the question is generated once more. This runs BEFORE the
+			// citation rules below, so they and the #336 check apply to the
+			// answer that is published, whichever of the two it is.
+			answer = s.correctAnswerScript(ctx, question, prompt, systemPrompt, trimmed)
 			// Faithfulness (issue #403): the answer came from the model, so
 			// its citations MUST reference only the chunks the model actually
 			// saw. Restrict citations to the in-context set (F1) and strip any

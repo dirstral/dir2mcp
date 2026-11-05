@@ -201,6 +201,12 @@ func runWorkerFor(t *testing.T, cfg embedqueue.Config, d time.Duration) {
 	}
 }
 
+// workerWaitTimeout is the upper bound a test waits for the worker to reach an
+// expected state. The waits poll, so a pass returns as soon as the state
+// arrives and only a failure costs the full budget. A short fixed budget (3 s)
+// flaked on the loaded Windows CI runner (#1124).
+const workerWaitTimeout = 30 * time.Second
+
 // runWorkerUntilOrTimeout runs the worker loop until done() reports true (then
 // stops it) or the timeout expires. Unlike runWorkerFor it stops as soon as the
 // expected state is reached, so a positive assertion does not pay the full
