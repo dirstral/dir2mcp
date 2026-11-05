@@ -146,8 +146,15 @@ type rdHarness struct {
 // the default transcriber.
 func newRedecodeHarness(t *testing.T, tr model.Transcriber, below float64) *rdHarness {
 	t.Helper()
+	return newRedecodeHarnessIn(t, testutil.TempDir(t), tr, below)
+}
+
+// newRedecodeHarnessIn is newRedecodeHarness on a given state dir, so two
+// Services can share one transcript cache.
+func newRedecodeHarnessIn(t *testing.T, stateDir string, tr model.Transcriber, below float64) *rdHarness {
+	t.Helper()
 	h := &rdHarness{store: &fakeIngestStore{}, logs: &syncBuffer{}}
-	cfg := config.Config{StateDir: testutil.TempDir(t), LanguageDetectionEnabled: true, MediaSTTRedecodeBelow: below}
+	cfg := config.Config{StateDir: stateDir, LanguageDetectionEnabled: true, MediaSTTRedecodeBelow: below}
 	h.svc = mustNewIngestService(t, cfg, h.store)
 	h.svc.SetTranscriber(tr)
 	h.svc.SetSTTIdentity("whisper", "large-v3")
