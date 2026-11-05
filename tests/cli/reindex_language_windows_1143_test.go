@@ -30,8 +30,13 @@ func TestReindexLanguageWindows_RejectsEmbeddingsOnly(t *testing.T) {
 // stderr.
 func runLanguageWindowsReindex(t *testing.T, extraCfg string) (int, string) {
 	t.Helper()
+	return runLanguageWindowsReindexWith(t, "stt:\n  provider: \"whisper\"\nproviders:\n  whisper:\n    kind: whisper\n    base_url: \"http://127.0.0.1:9/v1\"\n"+extraCfg)
+}
+
+// runLanguageWindowsReindexWith runs the flag with the whole config body.
+func runLanguageWindowsReindexWith(t *testing.T, cfgBody string) (int, string) {
+	t.Helper()
 	dir := testutil.TempDir(t)
-	cfgBody := "stt:\n  provider: \"whisper\"\nproviders:\n  whisper:\n    kind: whisper\n    base_url: \"http://127.0.0.1:9/v1\"\n" + extraCfg
 	if err := os.WriteFile(filepath.Join(dir, ".dir2mcp.yaml"), []byte(cfgBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -42,6 +47,20 @@ func runLanguageWindowsReindex(t *testing.T, extraCfg string) (int, string) {
 		code = app.Run([]string{"--non-interactive", "reindex", "--redecode-language-windows"})
 	})
 	return code, stderr.String()
+}
+
+// TestReindexLanguageWindows_RefusesARouteWithoutALanguageHint: an openai
+// transcriber cannot take a language hint, so the pass could decode no window
+// again. The flag refuses the run and names the provider.
+func TestReindexLanguageWindows_RefusesARouteWithoutALanguageHint(t *testing.T) {
+	code, stderr := runLanguageWindowsReindexWith(t,
+		"stt:\n  provider: \"openai\"\nproviders:\n  openai:\n    kind: openai\n    base_url: \"http://127.0.0.1:9/v1\"\n    api_key: \"test-key\"\n")
+	if code == 0 {
+		t.Errorf("exit = 0, want a configuration error: a route without a language hint repairs nothing")
+	}
+	if !strings.Contains(stderr, "cannot take a language hint") || !strings.Contains(stderr, `"openai"`) {
+		t.Errorf("the refusal does not name the provider and why: %q", stderr)
+	}
 }
 
 func TestReindexLanguageWindows_AnnouncesTheCheck(t *testing.T) {

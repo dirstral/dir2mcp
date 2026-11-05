@@ -252,8 +252,15 @@ func (a *App) armLanguageWindowReconcile(global globalOptions, opts reindexOptio
 // languageWindowReconcileBlocker names the configuration that makes the
 // reconcile pass a no-op, or returns "" when it can run.
 func languageWindowReconcileBlocker(cfg config.Config) string {
-	if transcriber, err := ingest.TranscriberFromConfig(cfg); err != nil || transcriber == nil {
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err != nil || transcriber == nil {
 		return "no speech-to-text provider resolved; configure stt.provider and run it again"
+	}
+	// The pass decodes a window again with the item language as the request
+	// language. A transcriber without that capability (the same check
+	// model.TranscriberForLanguage makes) would leave every window as recorded.
+	if _, ok := transcriber.(model.LanguageHintTranscriber); !ok {
+		return fmt.Sprintf("the speech-to-text provider (stt.provider %q) cannot take a language hint, so no window can be decoded again in the recording's language; use a kind: whisper profile", sttSelectorLabel(cfg))
 	}
 	if cfg.MediaSTTRedecodeBelow <= 0 {
 		return "media.stt.redecode_below is 0, so the rule is off"
@@ -268,6 +275,15 @@ func languageWindowReconcileBlocker(cfg config.Config) string {
 		return fmt.Sprintf("the source language is pinned to %q (media.language or stt_language), so every window is decoded in it", pin)
 	}
 	return ""
+}
+
+// sttSelectorLabel names the configured stt.provider selector for a message,
+// "auto" when it is not set.
+func sttSelectorLabel(cfg config.Config) string {
+	if sel := strings.TrimSpace(cfg.STTProvider); sel != "" {
+		return sel
+	}
+	return "auto"
 }
 
 // commitReindex keeps the rebuild: it discards both undo records and closes the
