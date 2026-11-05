@@ -245,3 +245,47 @@ func TestIngestMediaIdentity_DefaultsValidatesAndLoads(t *testing.T) {
 		t.Fatalf("nested key must load, got %q err=%v", loaded.IngestMediaIdentity, err)
 	}
 }
+
+// TestMediaSubtitlesSMIL_DefaultsAndGates pins SPEC §8.6.14's SMIL caption
+// patch keys: off/unchanged by default; enums normalized and validated; a param
+// must be name=value; the patch requires write-back beside the media and its
+// format among the written formats, but only when the patch is on.
+func TestMediaSubtitlesSMIL_DefaultsAndGates(t *testing.T) {
+	d := config.Default()
+	if d.MediaSubtitlesEmitSMIL != "off" || d.MediaSubtitlesEmitSMILLanguageCodes != "bcp47" ||
+		d.MediaSubtitlesEmitTTMLName != "group" || d.MediaSubtitlesTTMLSegmentation != "chunk" {
+		t.Fatalf("defaults changed: %q %q %q %q", d.MediaSubtitlesEmitSMIL, d.MediaSubtitlesEmitSMILLanguageCodes,
+			d.MediaSubtitlesEmitTTMLName, d.MediaSubtitlesTTMLSegmentation)
+	}
+	ok := config.Default()
+	ok.MediaSubtitlesEmitEnabled = true
+	ok.MediaSubtitlesTTMLEnabled = true
+	ok.MediaSubtitlesEmitFormats = []string{"vtt", "ttml"}
+	ok.MediaSubtitlesEmitSMIL = " TTML "
+	ok.MediaSubtitlesEmitSMILParams = []string{"isWowzaCaptionStream=true"}
+	ok.MediaSubtitlesEmitSMILLanguageCodes = "ISO639_2"
+	ok.MediaSubtitlesEmitTTMLName = "Top_Rendition"
+	ok.MediaSubtitlesTTMLSegmentation = "broadcast"
+	if err := ok.Validate(); err != nil || ok.MediaSubtitlesEmitSMIL != "ttml" || ok.MediaSubtitlesEmitTTMLName != "top_rendition" {
+		t.Fatalf("valid archive settings rejected or not normalized: %v (%q %q)", err, ok.MediaSubtitlesEmitSMIL, ok.MediaSubtitlesEmitTTMLName)
+	}
+	for name, mutate := range map[string]func(*config.Config){
+		"bad mode":       func(c *config.Config) { c.MediaSubtitlesEmitSMIL = "always" },
+		"bad param":      func(c *config.Config) { c.MediaSubtitlesEmitSMILParams = []string{"novalue"} },
+		"format missing": func(c *config.Config) { c.MediaSubtitlesEmitFormats = []string{"vtt"} },
+		"output dir":     func(c *config.Config) { c.MediaSubtitlesEmitDir = t.TempDir() },
+	} {
+		c := ok
+		c.MediaSubtitlesEmitSMIL = "ttml"
+		c.MediaSubtitlesEmitFormats = []string{"vtt", "ttml"}
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s must be CONFIG_INVALID", name)
+		}
+	}
+	off := config.Default()
+	off.MediaSubtitlesEmitSMIL = "ttml" // write-back itself is off: unused, so not an error
+	if err := off.Validate(); err != nil {
+		t.Fatalf("an unused SMIL patch must not invalidate the config: %v", err)
+	}
+}
