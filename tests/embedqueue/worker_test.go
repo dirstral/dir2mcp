@@ -126,29 +126,13 @@ func textTask(id uint64, text string) model.ChunkTask {
 	return model.NewChunkTask(id, text, "text", model.ChunkMetadata{ChunkID: id, RelPath: "a.txt"})
 }
 
+// runWorkerUntil runs the worker loop until done() reports true. It polls, so a
+// pass costs only the time the worker needs. The deadline is workerWaitTimeout:
+// a slow CI runner gets the full budget, and only a real failure pays it (#1124).
 func runWorkerUntil(t *testing.T, cfg embedqueue.Config, done func() bool) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	finished := make(chan struct{})
-	go func() {
-		_ = embedqueue.Run(ctx, cfg)
-		close(finished)
-	}()
-	deadline := time.After(3 * time.Second)
-	for {
-		if done() {
-			cancel()
-			<-finished
-			return
-		}
-		select {
-		case <-deadline:
-			cancel()
-			<-finished
-			t.Fatal("worker did not reach the expected state within 3s")
-		case <-time.After(5 * time.Millisecond):
-		}
+	if !runWorkerUntilOrTimeout(t, cfg, workerWaitTimeout, done) {
+		t.Fatalf("worker did not reach the expected state within %s", workerWaitTimeout)
 	}
 }
 
@@ -216,7 +200,7 @@ func TestWorker_IdempotentRedelivery(t *testing.T) {
 		}
 	}
 	waitForWrites := func(n int) {
-		deadline := time.After(3 * time.Second)
+		deadline := time.After(workerWaitTimeout)
 		for {
 			st, _ := broker.Stats(context.Background())
 			if st.Pending == 0 && st.InFlight == 0 && len(step.writes()) >= n {
@@ -224,7 +208,7 @@ func TestWorker_IdempotentRedelivery(t *testing.T) {
 			}
 			select {
 			case <-deadline:
-				t.Fatalf("worker did not reach %d writes within 3s (have %d)", n, len(step.writes()))
+				t.Fatalf("worker did not reach %d writes within %s (have %d)", n, workerWaitTimeout, len(step.writes()))
 			case <-time.After(5 * time.Millisecond):
 			}
 		}
