@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -26,6 +27,14 @@ import (
 // no redecode_rule is checked before it is served.
 func (s *Service) SetReconcileLanguageWindows(on bool) {
 	s.reconcileLanguageWindows = on
+}
+
+// STTLanguagePin returns the source-language pin a Service built from cfg
+// decodes under: media.language or the resolved STT profile's stt_language,
+// as the active profile carries it. Empty means no pin. A pinned corpus never
+// needs the §8.6.13 rule, so the reconcile flag refuses it.
+func STTLanguagePin(cfg config.Config) string {
+	return sttExpectedLanguage(cfg)
 }
 
 // reconcileWindow is one scheduled window of a stored transcript: its extent

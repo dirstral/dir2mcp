@@ -261,6 +261,9 @@ func languageWindowReconcileBlocker(cfg config.Config) string {
 	if strings.EqualFold(strings.TrimSpace(cfg.MediaSTTLanguageScope), "window") {
 		return "media.stt.language_scope is window, where the rule does not apply"
 	}
+	if pin := ingest.STTLanguagePin(cfg); pin != "" {
+		return fmt.Sprintf("the source language is pinned to %q (media.language or stt_language), so every window is decoded in it", pin)
+	}
 	return ""
 }
 
