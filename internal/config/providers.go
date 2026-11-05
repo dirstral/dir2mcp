@@ -1203,10 +1203,36 @@ func (cfg Config) baseProviders() ProviderResolution {
 	base := builtinProfiles()
 	seedLegacy(base, cfg)
 	r := cfg.providersDoc.resolve(base, nil)
+	r.pinSourceLanguage(cfg.MediaLanguage)
 	// Fold the resolved ingest.late_chunking flag onto the resolution so the
 	// embed identity captures the late-chunking mode (issue #332/#446).
 	r.lateChunking = cfg.IngestLateChunking
 	return r
+}
+
+// pinSourceLanguage applies the media.language pin (SPEC §8.8, spec 0.85.0,
+// dir2mcp #1136): every resolved profile that sets no stt_language takes pin.
+// It runs at resolution, so every consumer of a profile's stt_language (the
+// transcriber build, the language_providers route, the expected-language and
+// derivation-identity resolver, the identifiers a pin disables) sees the same
+// value. A profile's own stt_language is more specific and is kept. An empty
+// pin changes nothing.
+func (r *ProviderResolution) pinSourceLanguage(pin string) {
+	pin = strings.TrimSpace(pin)
+	if pin == "" {
+		return
+	}
+	for name, p := range r.byName {
+		if strings.TrimSpace(p.STTLanguage) == "" {
+			p.STTLanguage = pin
+			r.byName[name] = p
+		}
+	}
+	for i := range r.precedence {
+		if strings.TrimSpace(r.precedence[i].STTLanguage) == "" {
+			r.precedence[i].STTLanguage = pin
+		}
+	}
 }
 
 // ProviderEnvVarRefs returns the distinct environment variable names

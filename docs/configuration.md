@@ -747,6 +747,29 @@ same files single-pass writes. Enabling write-back on an already-indexed corpus
 fills the files in on the next scan without a reindex. A `source.kind: s3`
 corpus has no filesystem to write beside the media and requires `dir`.
 
+### Source language pin (`media.language`)
+
+By default dir2mcp detects the source language of each recording. When the
+corpus has one known source language, pin it:
+
+```yaml
+media:
+  language: uk          # BCP-47 tag; alias: media.stt.language
+```
+
+The pin fills the `stt_language` of every provider profile that does not set
+one. So it reaches every place a profile's `stt_language` reaches: the language
+sent with each transcription request, the `media.stt.language_providers` route,
+the transcript's derivation identity, and the transcript record
+(`language_source: configured`). A pin turns off the language identifiers
+(`media.stt.language_identifier`, and per-window detection under
+`language_scope: window`). A profile's own `stt_language` is more specific and
+wins for that profile. `media.stt.language` is an alias, for operators who look
+for the pin beside the other `media.stt.language_*` keys. A value that is not a
+BCP-47 tag (`ukrainian`, `fa_IR`) is `CONFIG_INVALID`. Setting or changing the
+pin changes the derivation identity, so the next run transcribes the media
+again (spec 8.8, 0.85.0).
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition
