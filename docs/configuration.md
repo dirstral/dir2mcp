@@ -815,6 +815,11 @@ What happens to `<stem>.smil` beside the video:
   (with a `.<n>` suffix if two changes fall in the same second), and
   the new SMIL replaces the old one atomically with the same file permissions. A
   failed write is `SMIL_PATCH_FAILED`; the document stays indexed.
+- **Backups are never indexed.** Discovery skips every file whose name ends in
+  `.smil.bak.<YYYYmmdd_HHMMSS>` (or that name plus `.<n>`), in every scan and in
+  watch mode, whether or not write-back is on (SPEC §7.1). A backup that an
+  older version indexed is removed from the index on the next scan. The SMIL
+  itself is still indexed, at its new version after each change.
 
 `ttml_name: top_rendition` names the TTML after the SMIL's highest rendition
 (`<stem>_1080p.ttml`), because Wowza resolves the caption file against a

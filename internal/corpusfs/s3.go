@@ -404,7 +404,7 @@ func (s *S3FS) discoveredFromObject(obj s3types.Object, opts Options, excluded E
 	if rel == "" || strings.HasSuffix(rel, "/") {
 		return DiscoveredFile{}, false
 	}
-	if keyHasExcludedDir(rel, excluded) {
+	if keyHasExcludedDir(rel, excluded) || IsSMILBackup(rel) {
 		return DiscoveredFile{}, false
 	}
 	size := aws.ToInt64(obj.Size)
