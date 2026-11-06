@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -255,5 +256,52 @@ func TestSMILPatch_ManagedNamesMatchExactly(t *testing.T) {
 	}
 	if !strings.Contains(got, `src="abc_1080p.ttml"`) {
 		t.Fatalf("our entry must be added:\n%s", got)
+	}
+}
+
+// TestSMILPatch_SameSizeSameMtimePatchIsIndexedAgain pins the SPEC §8.6.14
+// rule that a patch invalidates the SMIL's cached change signal (§7.8). The
+// patch swaps one managed entry for another of the same length, so the SMIL
+// keeps its size, and the test puts the old mtime back, as a filesystem with a
+// coarse mtime would. The next scan must still index the patched bytes.
+func TestSMILPatch_SameSizeSameMtimePatchIsIndexedAgain(t *testing.T) {
+	t.Parallel()
+	// abc_0480p.ttml is a managed name (<stem>_<N>p.ttml) as long as the
+	// abc_1080p.ttml the patch wants, so the swap keeps the byte length.
+	stale := strings.Replace(wiredTextStream, "abc_1080p.ttml", "abc_0480p.ttml", 1)
+	start := strings.Replace(archiveSMIL, "    </switch>\n", stale+"    </switch>\n", 1)
+	root := smilCorpus(t, start)
+	smilPath := filepath.Join(root, "v", "abc.smil")
+	old, err := os.Stat(smilPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := testutil.TempDir(t)
+	st := runSMILCorpus(t, root, nil, stateDir)
+
+	first, err := st.GetDocumentByPath(context.Background(), "v/abc.smil")
+	if err != nil {
+		t.Fatalf("get SMIL document: %v", err)
+	}
+	if first.ContentHash != ingest.ComputeContentHash([]byte(start)) {
+		t.Fatalf("setup: the first scan must index the SMIL as it was before the patch (type %q)", first.DocType)
+	}
+	patched := readFile(t, smilPath)
+	if patched == start || len(patched) != len(start) {
+		t.Fatalf("setup: the patch must change the SMIL and keep its size (%d -> %d)", len(start), len(patched))
+	}
+	// The coarse-mtime case: the patched file shows the mtime it had before.
+	if err := os.Chtimes(smilPath, old.ModTime(), old.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	runSMILCorpus(t, root, st, stateDir)
+	doc, err := st.GetDocumentByPath(context.Background(), "v/abc.smil")
+	if err != nil {
+		t.Fatalf("get SMIL document: %v", err)
+	}
+	if want := ingest.ComputeContentHash([]byte(patched)); doc.ContentHash != want {
+		t.Fatalf("the next scan must index the patched SMIL: content_hash=%q, want %q (original %q)",
+			doc.ContentHash, want, ingest.ComputeContentHash([]byte(start)))
 	}
 }

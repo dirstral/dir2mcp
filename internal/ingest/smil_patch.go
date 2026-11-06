@@ -153,6 +153,13 @@ func (s *Service) patchSMIL(plan emitPlan) {
 		s.markActiveErrored(manifestErrSMILPatchFailed, manifestErrSMILPatchFailed+": "+plan.smil.relPath)
 		return
 	}
+	// The patch invalidates the SMIL's cached change signal (§8.6.14, §7.8): a
+	// same-length patch on a coarse-mtime filesystem can keep its (size,
+	// mtime). Nothing needs to be cleared here, because the (size, mtime) skip
+	// (mediaStatUnchanged) covers audio and video only: the next scan reads the
+	// SMIL and confirms it by content_hash. If that skip ever widens to text,
+	// the SMIL's stored signal must be cleared here.
+	// TestSMILPatch_SameSizeSameMtimePatchIsIndexedAgain pins this.
 	s.activeOutcome.addOutput("smil")
 }
 
