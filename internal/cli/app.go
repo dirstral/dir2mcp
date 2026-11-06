@@ -697,6 +697,7 @@ func (a *App) printUsage() {
 	reindexFlags := [][2]string{
 		{"--embeddings-only", "retry chunks that failed to embed, without re-running extraction"},
 		{"--error-category <csv>", "with --embeddings-only: which failure categories to retry"},
+		{"--redecode-language-windows", "decode again only the transcript windows stored in another language than the recording's"},
 	}
 	for _, f := range reindexFlags {
 		writef(o, "  %-30s %s\n", s.Accent.Render(f[0]), s.Dim.Render(f[1]))

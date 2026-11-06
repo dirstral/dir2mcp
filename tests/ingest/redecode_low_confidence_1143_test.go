@@ -45,6 +45,7 @@ type rdReply struct {
 	lang string
 	conf float64
 	text string
+	err  error
 }
 
 // rdTranscriber is a fake STT provider with the optional language-hint
@@ -57,6 +58,8 @@ type rdTranscriber struct {
 	script   map[int]rdReply
 	hints    []string
 	hintText string
+	// hintWords are the word timings each hinted decode returns.
+	hintWords []model.TimedWord
 }
 
 func (r *rdTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -69,6 +72,9 @@ func (r *rdTranscriber) TranscribeStructured(context.Context, string, []byte) (m
 	defer r.mu.Unlock()
 	r.calls++
 	rep := r.script[r.calls]
+	if rep.err != nil {
+		return model.TranscriptResult{}, rep.err
+	}
 	return model.TranscriptResult{Text: rep.text, Language: rep.lang, LanguageConfidence: rep.conf}, nil
 }
 
@@ -105,7 +111,7 @@ func (h *rdHinted) TranscribeStructured(context.Context, string, []byte) (model.
 	h.parent.mu.Lock()
 	defer h.parent.mu.Unlock()
 	h.parent.hints = append(h.parent.hints, h.lang)
-	return model.TranscriptResult{Text: h.parent.hintText, Language: h.lang, LanguageConfidence: 0.97}, nil
+	return model.TranscriptResult{Text: h.parent.hintText, Words: h.parent.hintWords, Language: h.lang, LanguageConfidence: 0.97}, nil
 }
 
 // jingleScript is the #1143 recording: window 1 reported en at 0.34, windows
@@ -139,6 +145,16 @@ type rdHarness struct {
 	svc   *ingest.Service
 	store *fakeIngestStore
 	logs  *syncBuffer
+
+	mu   sync.Mutex
+	cuts []sttWindowCut
+}
+
+// cutList returns the segments the service asked the stub to cut.
+func (h *rdHarness) cutList() []sttWindowCut {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]sttWindowCut(nil), h.cuts...)
 }
 
 // newRedecodeHarness builds a Service with language detection on and the
@@ -146,8 +162,15 @@ type rdHarness struct {
 // the default transcriber.
 func newRedecodeHarness(t *testing.T, tr model.Transcriber, below float64) *rdHarness {
 	t.Helper()
+	return newRedecodeHarnessIn(t, testutil.TempDir(t), tr, below)
+}
+
+// newRedecodeHarnessIn is newRedecodeHarness on a given state dir, so two
+// Services can share one transcript cache.
+func newRedecodeHarnessIn(t *testing.T, stateDir string, tr model.Transcriber, below float64) *rdHarness {
+	t.Helper()
 	h := &rdHarness{store: &fakeIngestStore{}, logs: &syncBuffer{}}
-	cfg := config.Config{StateDir: testutil.TempDir(t), LanguageDetectionEnabled: true, MediaSTTRedecodeBelow: below}
+	cfg := config.Config{StateDir: stateDir, LanguageDetectionEnabled: true, MediaSTTRedecodeBelow: below, MediaSTTLanguageProbeSec: 30}
 	h.svc = mustNewIngestService(t, cfg, h.store)
 	h.svc.SetTranscriber(tr)
 	h.svc.SetSTTIdentity("whisper", "large-v3")
@@ -156,6 +179,9 @@ func newRedecodeHarness(t *testing.T, tr model.Transcriber, below float64) *rdHa
 		return time.Duration(rdTotalMS) * time.Millisecond, nil
 	}
 	h.svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+		h.mu.Lock()
+		h.cuts = append(h.cuts, sttWindowCut{startMS: startMS, endMS: endMS})
+		h.mu.Unlock()
 		return make([]byte, (endMS-startMS)/1000+1), nil
 	}
 	return h

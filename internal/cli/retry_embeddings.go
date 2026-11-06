@@ -26,6 +26,11 @@ type reindexOptions struct {
 	// document the §7.7 report named as partially decoded, so those recordings
 	// reach the STT provider again (#974).
 	redecodePartial bool
+	// redecodeLanguageWindows arms the §8.6.13 reconcile pass (spec 0.88.0,
+	// #1143): a cached item-scoped transcript without redecode_rule is checked,
+	// and only its windows whose stored text is in another language than the
+	// recording's are decoded again.
+	redecodeLanguageWindows bool
 }
 
 // parseReindexOptions parses the reindex flag set. Positional arguments are
@@ -42,6 +47,9 @@ func parseReindexOptions(args []string) (reindexOptions, []string, error) {
 		"re-decode the recordings whose transcript covers only part of the audio "+
 			"(the transcript_coverage report names them); ignores their cached transcript, "+
 			"which an ordinary reindex would restore unchanged")
+	fs.BoolVar(&opts.redecodeLanguageWindows, "redecode-language-windows", false,
+		"check transcripts indexed before the low-confidence re-decode rule (media.stt.redecode_below) "+
+			"and decode again only the windows whose text is in another language than the recording's")
 	fs.StringVar(&categories, "error-category", "",
 		"comma-separated error categories to retry (default: "+strings.Join(store.RequeueableErrorCategories(), ",")+")")
 	if err := fs.Parse(args); err != nil {
@@ -59,16 +67,31 @@ func parseReindexOptions(args []string) (reindexOptions, []string, error) {
 		// whole corpus.
 		return reindexOptions{}, nil, errors.New("--error-category is only valid with --embeddings-only")
 	}
-	if opts.redecodePartial && opts.embeddingsOnly {
-		// --embeddings-only re-queues chunks a provider rejected and runs no
-		// extraction at all, so it would never reach a transcript. Accepting the
-		// pair would let an operator believe they had repaired their partial
-		// transcripts by running something that cannot.
-		return reindexOptions{}, nil, errors.New("--redecode-partial-transcripts cannot be combined with --embeddings-only: " +
-			"the embeddings-only retry runs no transcription")
+	if err := validateRedecodeFlags(opts); err != nil {
+		return reindexOptions{}, nil, err
 	}
 	opts.errorCategories = parsed
 	return opts, fs.Args(), nil
+}
+
+// validateRedecodeFlags rejects a transcript repair flag combined with
+// --embeddings-only. The embeddings-only retry re-queues chunks a provider
+// rejected and runs no extraction at all, so it would never reach a
+// transcript. Accepting the pair would let an operator believe they had
+// repaired their transcripts by running something that cannot.
+func validateRedecodeFlags(opts reindexOptions) error {
+	if !opts.embeddingsOnly {
+		return nil
+	}
+	if opts.redecodePartial {
+		return errors.New("--redecode-partial-transcripts cannot be combined with --embeddings-only: " +
+			"the embeddings-only retry runs no transcription")
+	}
+	if opts.redecodeLanguageWindows {
+		return errors.New("--redecode-language-windows cannot be combined with --embeddings-only: " +
+			"the embeddings-only retry runs no transcription")
+	}
+	return nil
 }
 
 // parseErrorCategoryList splits and validates a comma-separated
