@@ -58,6 +58,8 @@ type rdTranscriber struct {
 	script   map[int]rdReply
 	hints    []string
 	hintText string
+	// hintWords are the word timings each hinted decode returns.
+	hintWords []model.TimedWord
 }
 
 func (r *rdTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -109,7 +111,7 @@ func (h *rdHinted) TranscribeStructured(context.Context, string, []byte) (model.
 	h.parent.mu.Lock()
 	defer h.parent.mu.Unlock()
 	h.parent.hints = append(h.parent.hints, h.lang)
-	return model.TranscriptResult{Text: h.parent.hintText, Language: h.lang, LanguageConfidence: 0.97}, nil
+	return model.TranscriptResult{Text: h.parent.hintText, Words: h.parent.hintWords, Language: h.lang, LanguageConfidence: 0.97}, nil
 }
 
 // jingleScript is the #1143 recording: window 1 reported en at 0.34, windows

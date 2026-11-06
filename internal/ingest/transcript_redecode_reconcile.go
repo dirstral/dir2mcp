@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -191,7 +192,13 @@ func (s *Service) reconcileOneWindow(ctx context.Context, doc model.Document, re
 	plan := windowSchedule{capBytes: sttPayloadCapBytes(s.transcriber), label: "transcription"}
 	second, kept := s.redecodeWindow(ctx, relPath, tmpPath, hinted, plan, windowReport{span: w.extent})
 	if kept {
-		run.segs, run.anyKept = spliceCore(run.segs, second, w.core), true
+		// A second decode with no segment inside the core would drop the
+		// stored core and put nothing in its place, so the window stays as
+		// recorded and is not replaced.
+		var spliced []mergedSegment
+		if spliced, kept = spliceCore(run.segs, second, w.core); kept {
+			run.segs, run.anyKept = spliced, true
+		}
 	}
 	s.getLogger().Printf("reconcile %s: window [%d,%d]ms reads as %q; the language probe reports %q at confidence %.2f; decoded again as %q, replaced=%v (SPEC §8.6.13)",
 		doc.RelPath, w.extent.StartMS, w.extent.EndMS, w.lang, lang, conf, itemLang, kept)
@@ -225,15 +232,11 @@ func (s *Service) probeWindow(ctx context.Context, relPath, tmpPath string, exte
 // spliceCore replaces the stored segments that start inside core with the
 // segments of the second decode that start inside core. The second decode's
 // pieces are de-duplicated and grouped among themselves, as the merge treats
-// one window (see retrySegments).
-func spliceCore(segs []mergedSegment, second []TranscriptWindow, core CoverageRange) []mergedSegment {
+// one window (see retrySegments). When no segment of the second decode starts
+// inside core (all of them start in the overlap tail), spliceCore returns segs
+// unchanged and false, so the stored core is kept.
+func spliceCore(segs []mergedSegment, second []TranscriptWindow, core CoverageRange) ([]mergedSegment, bool) {
 	in := func(start int) bool { return start >= core.StartMS && start < core.EndMS }
-	out := make([]mergedSegment, 0, len(segs))
-	for _, sg := range segs {
-		if !in(sg.startMS) {
-			out = append(out, sg)
-		}
-	}
 	var fresh []mergedSegment
 	for k, w := range second {
 		for _, sg := range windowSegments(w.Res, w.StartMS, k+1) {
@@ -245,18 +248,27 @@ func spliceCore(segs []mergedSegment, second []TranscriptWindow, core CoverageRa
 			}
 		}
 	}
+	if len(fresh) == 0 {
+		return segs, false
+	}
+	out := make([]mergedSegment, 0, len(segs))
+	for _, sg := range segs {
+		if !in(sg.startMS) {
+			out = append(out, sg)
+		}
+	}
 	sort.SliceStable(fresh, func(a, b int) bool { return fresh[a].startMS < fresh[b].startMS })
 	out = append(out, groupMistimedSegments(dedupMergedSegments(fresh))...)
 	sort.SliceStable(out, func(a, b int) bool { return out[a].startMS < out[b].startMS })
-	return out
+	return out, true
 }
 
 // publishReconciled stamps the record on a copy of the hit and writes the
-// cache entry: the whole entry when the text changed, the coverage sidecar
-// only otherwise. mark records redecode_rule, so the next armed run skips the
-// transcript; without it and with nothing to record, the hit is served as it
-// is. A write that fails still serves the checked transcript; the next armed
-// run checks it again.
+// cache entry: the whole entry when the text or the word timings changed, the
+// coverage sidecar only otherwise. mark records redecode_rule, so the next
+// armed run skips the transcript; without it and with nothing to record, the
+// hit is served as it is. A write that fails still serves the checked
+// transcript; the next armed run checks it again.
 func (s *Service) publishReconciled(doc model.Document, paths transcriptCachePaths, hit cachedTranscript, text string, words []model.TimedWord, record []model.RedecodedWindow, mark bool) cachedTranscript {
 	if !mark && len(record) == 0 {
 		return hit
@@ -267,7 +279,7 @@ func (s *Service) publishReconciled(doc model.Document, paths transcriptCachePat
 		out.coverage.RedecodeRule = model.RedecodeRuleLowConfidence
 	}
 	out.coverage.RedecodedWindows = mergeRedecodedWindows(hit.coverage.RedecodedWindows, record)
-	if text == hit.text {
+	if text == hit.text && slices.Equal(words, hit.words) {
 		s.publishCachedCoverage(paths.coverage, out.coverage)
 		return out
 	}

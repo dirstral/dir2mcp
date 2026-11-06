@@ -2,9 +2,13 @@ package tests
 
 import (
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
@@ -261,4 +265,80 @@ func TestReconcileRedecode_APartialRunKeepsItsRecord(t *testing.T) {
 	if m2.RedecodedWindows[0].StartMS != 0 || m2.RedecodedWindows[1].StartMS != 1_180_000 {
 		t.Errorf("record = %+v, want window 1 then window 3 in start order", m2.RedecodedWindows)
 	}
+}
+
+// TestReconcileRedecode_TailOnlySecondDecodeKeepsTheCore: the second decode of
+// window 1 holds one segment only, at 595 s. That is in the overlap tail of the
+// window (its core ends where window 2 starts, at 590 s), so no new segment
+// lands in the core. The stored core stays, and the record says the window was
+// not replaced.
+func TestReconcileRedecode_TailOnlySecondDecodeKeepsTheCore(t *testing.T) {
+	t.Parallel()
+	stateDir := storeUnmarkedTranscript(t, "news/stored.mp3")
+	tail := "[09:55] Наші кореспонденти розповідають про події в містах і селах, про людей, які працюють для своєї громади."
+	tr := &rdTranscriber{script: map[int]rdReply{1: {lang: "uk", conf: 0.95}}, hintText: tail}
+	h, m := armedRun(t, stateDir, "news/stored.mp3", tr)
+
+	if got := tr.hintCalls(); len(got) != 1 || got[0] != "uk" {
+		t.Fatalf("hinted decodes = %v, want exactly one in uk\nlogs:\n%s", got, h.logs.String())
+	}
+	if m.RedecodeRule != "low-confidence" || len(m.RedecodedWindows) != 1 {
+		t.Fatalf("redecode_rule=%q redecoded_windows=%+v, want low-confidence and one entry", m.RedecodeRule, m.RedecodedWindows)
+	}
+	if w := m.RedecodedWindows[0]; w.StartMS != 0 || w.Replaced {
+		t.Errorf("redecoded window = %+v, want window 1 not replaced", w)
+	}
+	text := h.chunkText()
+	if !strings.Contains(text, "Good evening") || !strings.Contains(text, "Our reporters") {
+		t.Errorf("the stored core of window 1 was lost:\n%s", text)
+	}
+}
+
+// TestReconcileRedecode_SameTextNewWordsRewritesTheCache: the second decode of
+// window 1 has the stored text, but it brings word timings the stored
+// transcript does not have. The pass writes the whole cache entry, so the new
+// word timings are kept beside the record that names the window replaced.
+func TestReconcileRedecode_SameTextNewWordsRewritesTheCache(t *testing.T) {
+	t.Parallel()
+	stateDir := storeUnmarkedTranscript(t, "news/stored.mp3")
+	if n := len(wordsSidecars(t, stateDir)); n != 0 {
+		t.Fatalf("setup: %d word-timing sidecars before the pass, want none", n)
+	}
+	words := []model.TimedWord{{Word: "Good", StartMS: 0, EndMS: 400}, {Word: "evening", StartMS: 400, EndMS: 900}}
+	tr := &rdTranscriber{script: map[int]rdReply{1: {lang: "uk", conf: 0.95}}, hintText: rdEnglish, hintWords: words}
+	h, m := armedRun(t, stateDir, "news/stored.mp3", tr)
+
+	if m.RedecodeRule != "low-confidence" || len(m.RedecodedWindows) != 1 || !m.RedecodedWindows[0].Replaced {
+		t.Fatalf("redecode_rule=%q redecoded_windows=%+v, want low-confidence and window 1 replaced\nlogs:\n%s", m.RedecodeRule, m.RedecodedWindows, h.logs.String())
+	}
+	sidecars := wordsSidecars(t, stateDir)
+	if len(sidecars) != 1 {
+		t.Fatalf("word-timing sidecars = %v, want one: the new word timings were not written", sidecars)
+	}
+	raw, err := os.ReadFile(sidecars[0])
+	if err != nil {
+		t.Fatalf("read %s: %v", sidecars[0], err)
+	}
+	if !strings.Contains(string(raw), "evening") {
+		t.Errorf("the word-timing sidecar does not hold the new words:\n%s", raw)
+	}
+}
+
+// wordsSidecars lists the transcript word-timing sidecars under stateDir.
+func wordsSidecars(t *testing.T, stateDir string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(stateDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".words.json") {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", stateDir, err)
+	}
+	return out
 }
