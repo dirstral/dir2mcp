@@ -556,6 +556,135 @@ func validLanguageSubtag(key string) bool {
 	return true
 }
 
+// validLanguageTag reports whether tag is a well-formed BCP-47 language tag by
+// the RFC 5646 §2.1 langtag grammar. Each subtag must fit its role, in order:
+//
+//	language  2 to 8 letters; a 2- or 3-letter language may take up to three
+//	          3-letter extlang subtags (zh-yue)
+//	script    4 letters (Hant)
+//	region    2 letters or 3 digits (BR, 419)
+//	variant   5 to 8 letters or digits, or a digit and 3 letters or digits (1996)
+//	extension a singleton other than x, then one or more subtags of 2 to 8
+//	          letters or digits (u-ca-gregory)
+//	private   x, then one or more subtags of 1 to 8 letters or digits (x-a)
+//
+// So `en-12` (two digits fit no role), `uk-`, `en-u` and `en-x` are rejected.
+// It is a shape check only; no registry lookup is made, and the irregular
+// grandfathered tags are not accepted.
+func validLanguageTag(tag string) bool {
+	parts := strings.Split(tag, "-")
+	if !validLanguageSubtag(parts[0]) {
+		return false
+	}
+	i := 1
+	if len(parts[0]) <= 3 {
+		i = skipSubtags(parts, i, 3, isExtlangSubtag)
+	}
+	i = skipSubtags(parts, i, 1, isScriptSubtag)
+	i = skipSubtags(parts, i, 1, isRegionSubtag)
+	i = skipSubtags(parts, i, len(parts), variantSubtag)
+	i, ok := skipExtensions(parts, i)
+	if !ok {
+		return false
+	}
+	i, ok = skipPrivateUse(parts, i)
+	return ok && i == len(parts)
+}
+
+// skipSubtags moves past at most limit subtags from parts[i] on that match fit,
+// and returns the index of the first subtag it did not take.
+func skipSubtags(parts []string, i, limit int, fit func(string) bool) int {
+	for n := 0; n < limit && i < len(parts) && fit(parts[i]); n++ {
+		i++
+	}
+	return i
+}
+
+func isExtlangSubtag(sub string) bool { return letterSubtag(sub, 3, 3) }
+func isScriptSubtag(sub string) bool  { return letterSubtag(sub, 4, 4) }
+func isRegionSubtag(sub string) bool  { return letterSubtag(sub, 2, 2) || digitSubtag(sub, 3) }
+
+// isExtensionSubtag reports whether sub is an extension subtag: 2 to 8 letters
+// or digits.
+func isExtensionSubtag(sub string) bool { return len(sub) >= 2 && alnumSubtag(sub) }
+
+// skipExtensions moves past each extension sequence (a singleton other than x
+// and one or more extension subtags). ok is false for a singleton with no
+// subtag after it.
+func skipExtensions(parts []string, i int) (next int, ok bool) {
+	for i < len(parts) && len(parts[i]) == 1 && alnumSubtag(parts[i]) && !strings.EqualFold(parts[i], "x") {
+		j := skipSubtags(parts, i+1, len(parts), isExtensionSubtag)
+		if j == i+1 {
+			return i, false
+		}
+		i = j
+	}
+	return i, true
+}
+
+// skipPrivateUse moves past a private-use sequence (x and one or more subtags
+// of 1 to 8 letters or digits). ok is false for an x with no subtag after it.
+func skipPrivateUse(parts []string, i int) (next int, ok bool) {
+	if i >= len(parts) || !strings.EqualFold(parts[i], "x") {
+		return i, true
+	}
+	j := skipSubtags(parts, i+1, len(parts), alnumSubtag)
+	return j, j > i+1
+}
+
+// letterSubtag reports whether sub is min to max ASCII letters.
+func letterSubtag(sub string, minLen, maxLen int) bool {
+	if len(sub) < minLen || len(sub) > maxLen {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		c := sub[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// digitSubtag reports whether sub is exactly n ASCII digits.
+func digitSubtag(sub string, n int) bool {
+	if len(sub) != n {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		if sub[i] < '0' || sub[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// variantSubtag reports whether sub is a BCP-47 variant: 5 to 8 letters or
+// digits, or 4 letters or digits that start with a digit.
+func variantSubtag(sub string) bool {
+	if !alnumSubtag(sub) {
+		return false
+	}
+	if len(sub) >= 5 {
+		return true
+	}
+	return len(sub) == 4 && sub[0] >= '0' && sub[0] <= '9'
+}
+
+// alnumSubtag reports whether sub is 1 to 8 ASCII letters or digits.
+func alnumSubtag(sub string) bool {
+	if len(sub) < 1 || len(sub) > 8 {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		c := sub[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func parseProvidersDoc(raw []byte) (providersDoc, error) {
 	var doc providersDoc
 	sub := extractProvidersSubtree(raw)
@@ -1203,10 +1332,36 @@ func (cfg Config) baseProviders() ProviderResolution {
 	base := builtinProfiles()
 	seedLegacy(base, cfg)
 	r := cfg.providersDoc.resolve(base, nil)
+	r.pinSourceLanguage(cfg.MediaLanguage)
 	// Fold the resolved ingest.late_chunking flag onto the resolution so the
 	// embed identity captures the late-chunking mode (issue #332/#446).
 	r.lateChunking = cfg.IngestLateChunking
 	return r
+}
+
+// pinSourceLanguage applies the media.language pin (SPEC §8.8, spec 0.85.0,
+// dir2mcp #1136): every resolved profile that sets no stt_language takes pin.
+// It runs at resolution, so every consumer of a profile's stt_language (the
+// transcriber build, the language_providers route, the expected-language and
+// derivation-identity resolver, the identifiers a pin disables) sees the same
+// value. A profile's own stt_language is more specific and is kept. An empty
+// pin changes nothing.
+func (r *ProviderResolution) pinSourceLanguage(pin string) {
+	pin = strings.TrimSpace(pin)
+	if pin == "" {
+		return
+	}
+	for name, p := range r.byName {
+		if strings.TrimSpace(p.STTLanguage) == "" {
+			p.STTLanguage = pin
+			r.byName[name] = p
+		}
+	}
+	for i := range r.precedence {
+		if strings.TrimSpace(r.precedence[i].STTLanguage) == "" {
+			r.precedence[i].STTLanguage = pin
+		}
+	}
 }
 
 // ProviderEnvVarRefs returns the distinct environment variable names

@@ -292,6 +292,19 @@ func (c *Client) ForAudioDuration(audioMS int) model.Transcriber {
 // compile-time interface check for the optional duration-sizing capability.
 var _ model.AudioDurationTranscriber = (*Client)(nil)
 
+// ForLanguage implements model.LanguageHintTranscriber: it returns a shallow
+// copy of the client that sends lang as the `language` hint. The copy shares
+// the transport, the model and every limit, so only the hint changes (SPEC
+// §8.6.13, the low-confidence re-decode). The receiver is never mutated.
+func (c *Client) ForLanguage(lang string) model.Transcriber {
+	cp := *c
+	cp.DefaultLanguage = strings.TrimSpace(lang)
+	return &cp
+}
+
+// compile-time interface check for the optional language-hint capability.
+var _ model.LanguageHintTranscriber = (*Client)(nil)
+
 func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	maxAttempts := c.MaxRetries + 1
 	if maxAttempts <= 0 {

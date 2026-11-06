@@ -5951,6 +5951,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	meta.Coverage = coverage
 	s.applyWindowLanguageMeta(&meta, coverage)
 	s.applyItemRouteMeta(&meta, route)
+	applyRedecodeMeta(&meta, coverage)
 	s.warnPartialTranscript(doc, tc, coverage)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -7328,7 +7329,7 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 	if s.itemIdentifierActive() {
 		return s.transcribeItemRouted(ctx, relPath, content)
 	}
-	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber)
+	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber, true)
 	return text, words, coverage, nil, err
 }
 
@@ -7424,6 +7425,7 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	coverage.RouteFallbackAt, coverage.RouteFallbackBy = entry.RouteFallbackAt, entry.RouteFallbackBy
 	coverage.RouteFallbackDropped, coverage.RouteFallbackSkipReason = entry.RouteFallbackDropped, entry.RouteFallbackSkipReason
 	coverage.WindowMS = entry.WindowMS
+	coverage.RedecodedWindows, coverage.RedecodeRule = entry.RedecodedWindows, entry.RedecodeRule
 	return coverage
 }
 
@@ -7441,6 +7443,10 @@ type coverageCacheEntry struct {
 	RouteFallbackDropped    []model.CoverageLanguage `json:"route_fallback_dropped,omitempty"`
 	RouteFallbackSkipReason string                   `json:"route_fallback_skip_reason,omitempty"`
 	WindowMS                int                      `json:"window_ms,omitempty"`
+	// RedecodedWindows and RedecodeRule are the §8.6.13 low-confidence
+	// re-decode record (spec 0.88.0), restored with the text on a cache hit.
+	RedecodedWindows []model.RedecodedWindow `json:"redecoded_windows,omitempty"`
+	RedecodeRule     string                  `json:"redecode_rule,omitempty"`
 }
 
 // restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
@@ -7509,6 +7515,8 @@ func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverag
 		RouteFallbackBy:         coverage.RouteFallbackBy,
 		RouteFallbackSkipReason: coverage.RouteFallbackSkipReason,
 		WindowMS:                coverage.WindowMS,
+		RedecodedWindows:        coverage.RedecodedWindows,
+		RedecodeRule:            coverage.RedecodeRule,
 	}
 	// Windows whose fallback text the cache keeps are not dropped there.
 	entry.RouteFallbackDropped = missingDropped(coverage)

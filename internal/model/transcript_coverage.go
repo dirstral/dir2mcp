@@ -90,6 +90,31 @@ type TranscriptCoverage struct {
 	// cache keeps it, so a §8.2.4 retry rebuilds the same window schedule. Not
 	// part of the persisted coverage object.
 	WindowMS int `json:"-"`
+	// RedecodedWindows and RedecodeRule are the §8.6.13 re-decode record of an
+	// item-scoped windowed decode (spec 0.88.0, dir2mcp #1143). The transcript
+	// cache keeps them beside the text, and the meta_json records them at its
+	// top level (redecoded_windows, redecode_rule), so they are not part of the
+	// persisted coverage object.
+	RedecodedWindows []RedecodedWindow `json:"-"`
+	RedecodeRule     string            `json:"-"`
+}
+
+// RedecodeRuleLowConfidence is the redecode_rule value a transcript records
+// when the §8.6.13 low-confidence rule ran and no window qualified.
+const RedecodeRuleLowConfidence = "low-confidence"
+
+// RedecodedWindow is one window the §8.6.13 low-confidence rule decoded again
+// (spec 0.88.0): the window span in absolute recording time, the language and
+// confidence the decoder reported on the first decode, the item language the
+// second decode was asked for, and whether the second decode replaced the
+// first.
+type RedecodedWindow struct {
+	StartMS         int     `json:"start_ms"`
+	EndMS           int     `json:"end_ms"`
+	FirstLanguage   string  `json:"first_language"`
+	FirstConfidence float64 `json:"first_confidence"`
+	Language        string  `json:"language"`
+	Replaced        bool    `json:"replaced"`
 }
 
 // CoverageRange is one decoded stretch of a recording, in absolute milliseconds

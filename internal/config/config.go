@@ -161,6 +161,11 @@ const (
 // cue is merged into that cue.
 const DefaultMediaSubtitlesAlignToleranceMS = 2500
 
+// DefaultMediaSubtitlesSourcePauseMS is the SPEC §8.6.3 source pause
+// (media.subtitles.source_pause_ms, 0.87.0): under broadcast segmentation no
+// translated cue is timed inside a source pause of at least this many ms.
+const DefaultMediaSubtitlesSourcePauseMS = 2000
+
 // DefaultMediaSubtitlesEmitPolicy is the SPEC §8.6.14 default overwrite policy
 // for subtitle write-back: a file dir2mcp did not write is never overwritten,
 // and a (language, format) is written only when the document has no bound
@@ -969,6 +974,15 @@ type Config struct {
 	// validation time.
 	MediaSubtitlesTTMLAlignToleranceMS int
 
+	// MediaSubtitlesSourcePauseMS is the shortest gap between two source words
+	// that counts as a source pause (SPEC §8.6.3, config
+	// `media.subtitles.source_pause_ms`, default 2000, 0.87.0). Under broadcast
+	// segmentation, a translation with no word timings of its own is timed
+	// against the source words, and no translated cue starts or ends inside such
+	// a pause. 0 turns the rule off; a negative value is CONFIG_INVALID. Export
+	// timing only: it never affects ingest, chunks or citations.
+	MediaSubtitlesSourcePauseMS int
+
 	// MediaSubtitlesSMILEnabled opts IN to emitting a SMIL packaging document
 	// alongside TTML (SPEC §8.6.10, config `media.subtitles.smil.enabled`). OFF by
 	// default. Only consulted when MediaSubtitlesTTMLEnabled is true. SMIL carries
@@ -1223,8 +1237,18 @@ type Config struct {
 	MediaSTTMaxPayloadMB      int
 	MediaSTTRequestTimeoutSec int
 
+	// MediaLanguage is the corpus-wide source-language pin (config
+	// `media.language`, alias `media.stt.language`; SPEC §8.8, spec 0.85.0,
+	// dir2mcp #1136): a BCP-47 tag that fills the stt_language of every provider
+	// profile that sets none, so it reaches the transcription request, the
+	// language_providers route, the derivation identity and the §8.2.2 to §8.2.4
+	// identifiers exactly as a profile's stt_language does. A profile's own
+	// stt_language is more specific and wins for that profile. Empty = no pin
+	// (auto-detect). A value that is not a BCP-47 tag is CONFIG_INVALID.
+	MediaLanguage string
+
 	// MediaSTTLanguageStrict controls whether a corpus-pinned STT language
-	// (config `media.stt.language` / a provider profile's language) is treated
+	// (config `media.language` / a provider profile's stt_language) is treated
 	// by the output quality gate as ground truth about content, and therefore
 	// enforced by its language/script-mismatch detector (config
 	// `media.stt.language_strict`, dir2mcp#439 F3).
@@ -1323,6 +1347,13 @@ type Config struct {
 	// CONFIG_INVALID. Under on_route_error: fail a fallback result is stale on
 	// every run, so the interval does not apply there.
 	MediaSTTRouteRetryAfter time.Duration
+	// MediaSTTRedecodeBelow is the confidence below which a window decoded in
+	// another language than the item's is decoded again with the item language
+	// (config `media.stt.redecode_below`, SPEC §8.6.13, spec 0.88.0, dir2mcp
+	// #1143). It applies only under language_scope: item with no pin and no
+	// identifier hint. Default 0.5. 0 turns the rule off. A value outside [0,1]
+	// is CONFIG_INVALID.
+	MediaSTTRedecodeBelow float64
 	// mediaSTTRouteRetryAfterEnvErr keeps an env value that is not a duration,
 	// so Validate reports it as CONFIG_INVALID instead of a warning.
 	mediaSTTRouteRetryAfterEnvErr string
@@ -1614,6 +1645,7 @@ type fileConfig struct {
 	MediaFilterWords                    []string
 	MediaSubtitlesTTMLEnabled           *bool
 	MediaSubtitlesTTMLAlignToleranceMS  *int
+	MediaSubtitlesSourcePauseMS         *int
 	MediaSubtitlesSMILEnabled           *bool
 	MediaSubtitlesSegmentation          *string
 	MediaSubtitlesEmitEnabled           *bool
@@ -1650,10 +1682,12 @@ type fileConfig struct {
 	MediaSTTOnPartialTranscript         *string
 	MediaSTTLanguageScope               *string
 	MediaSTTLanguageIdentifier          *string
+	MediaLanguage                       *string
 	MediaSTTLanguageProbeSec            *int
 	MediaSTTRequireValidation           *bool
 	MediaSTTOnRouteError                *string
 	MediaSTTRouteRetryAfter             *time.Duration
+	MediaSTTRedecodeBelow               *float64
 	MediaSTTTracks                      []string
 	ElevenLabsAPIKey                    *string
 	ServerTLSCertFile                   *string
@@ -1805,6 +1839,7 @@ type persistedConfig struct {
 	MediaFilterWords                    []string      `yaml:"media_filter_words"`
 	MediaSubtitlesTTMLEnabled           bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS  int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
+	MediaSubtitlesSourcePauseMS         int           `yaml:"media_subtitles_source_pause_ms"`
 	MediaSubtitlesSMILEnabled           bool          `yaml:"media_subtitles_smil_enabled"`
 	MediaSubtitlesSegmentation          string        `yaml:"media_subtitles_segmentation"`
 	MediaSubtitlesEmitEnabled           bool          `yaml:"media_subtitles_emit_enabled"`
@@ -1840,10 +1875,12 @@ type persistedConfig struct {
 	MediaSTTOnPartialTranscript         string        `yaml:"media_stt_on_partial_transcript"`
 	MediaSTTLanguageScope               string        `yaml:"media_stt_language_scope"`
 	MediaSTTLanguageIdentifier          string        `yaml:"media_stt_language_identifier"`
+	MediaLanguage                       string        `yaml:"media_language"`
 	MediaSTTLanguageProbeSec            int           `yaml:"media_stt_language_probe_sec"`
 	MediaSTTRequireValidation           bool          `yaml:"media_stt_require_validation"`
 	MediaSTTOnRouteError                string        `yaml:"media_stt_on_route_error"`
 	MediaSTTRouteRetryAfter             time.Duration `yaml:"media_stt_route_retry_after"`
+	MediaSTTRedecodeBelow               float64       `yaml:"media_stt_redecode_below"`
 	MediaSTTTracks                      []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                  bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                  bool          `yaml:"media_batch_progress"`
@@ -2111,6 +2148,7 @@ func Default() Config {
 		MediaSTTLanguageProbeSec:    30,
 		MediaSTTOnRouteError:        routeErrorFail,
 		MediaSTTRouteRetryAfter:     DefaultMediaSTTRouteRetryAfter,
+		MediaSTTRedecodeBelow:       DefaultMediaSTTRedecodeBelow,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2128,6 +2166,7 @@ func Default() Config {
 		// behaves predictably.
 		MediaSubtitlesTTMLEnabled:          false,
 		MediaSubtitlesTTMLAlignToleranceMS: DefaultMediaSubtitlesAlignToleranceMS,
+		MediaSubtitlesSourcePauseMS:        DefaultMediaSubtitlesSourcePauseMS,
 		MediaSubtitlesSMILEnabled:          false,
 		MediaSubtitlesSegmentation:         "chunk",
 		// Subtitle write-back (SPEC §8.6.14) is OFF by default; formats and policy
@@ -2305,6 +2344,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaFilterWords:                    append([]string(nil), cfg.MediaFilterWords...),
 		MediaSubtitlesTTMLEnabled:           cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS:  cfg.MediaSubtitlesTTMLAlignToleranceMS,
+		MediaSubtitlesSourcePauseMS:         cfg.MediaSubtitlesSourcePauseMS,
 		MediaSubtitlesSMILEnabled:           cfg.MediaSubtitlesSMILEnabled,
 		MediaSubtitlesSegmentation:          cfg.MediaSubtitlesSegmentation,
 		MediaSubtitlesEmitEnabled:           cfg.MediaSubtitlesEmitEnabled,
@@ -2341,10 +2381,12 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTOnPartialTranscript:         cfg.MediaSTTOnPartialTranscript,
 		MediaSTTLanguageScope:               cfg.MediaSTTLanguageScope,
 		MediaSTTLanguageIdentifier:          cfg.MediaSTTLanguageIdentifier,
+		MediaLanguage:                       cfg.MediaLanguage,
 		MediaSTTLanguageProbeSec:            cfg.MediaSTTLanguageProbeSec,
 		MediaSTTRequireValidation:           cfg.MediaSTTRequireValidation,
 		MediaSTTOnRouteError:                cfg.MediaSTTOnRouteError,
 		MediaSTTRouteRetryAfter:             cfg.MediaSTTRouteRetryAfter,
+		MediaSTTRedecodeBelow:               cfg.MediaSTTRedecodeBelow,
 		MediaSTTTracks:                      append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                   cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                    cfg.ServerTLSKeyFile,
@@ -2605,7 +2647,7 @@ func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	for scanner.Scan() {
 		rawLine := scanner.Text()
 		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
-		line := strings.TrimSpace(rawLine)
+		line := strings.TrimSpace(stripYAMLComment(rawLine))
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") {
 			continue
 		}
@@ -3380,20 +3422,33 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTLanguageIdentifier != nil {
 		cfg.MediaSTTLanguageIdentifier = strings.TrimSpace(*fc.MediaSTTLanguageIdentifier)
 	}
+	if fc.MediaLanguage != nil {
+		cfg.MediaLanguage = strings.TrimSpace(*fc.MediaLanguage)
+	}
 	if fc.MediaSTTLanguageProbeSec != nil {
 		cfg.MediaSTTLanguageProbeSec = *fc.MediaSTTLanguageProbeSec
 	}
 	if fc.MediaSTTRequireValidation != nil {
 		cfg.MediaSTTRequireValidation = *fc.MediaSTTRequireValidation
 	}
+	if fc.MediaSTTTracks != nil {
+		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
+	}
+	applyMediaSTTRouteFileParsed(cfg, fc)
+}
+
+// applyMediaSTTRouteFileParsed copies the set media.stt.* route and re-decode
+// file fields (§8.2.4, §8.6.13) onto cfg. Split out of applyMediaSTTFileParsed
+// so that function stays under the cyclomatic-complexity budget.
+func applyMediaSTTRouteFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTOnRouteError != nil {
 		cfg.MediaSTTOnRouteError = *fc.MediaSTTOnRouteError
 	}
 	if fc.MediaSTTRouteRetryAfter != nil {
 		cfg.MediaSTTRouteRetryAfter = *fc.MediaSTTRouteRetryAfter
 	}
-	if fc.MediaSTTTracks != nil {
-		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
+	if fc.MediaSTTRedecodeBelow != nil {
+		cfg.MediaSTTRedecodeBelow = *fc.MediaSTTRedecodeBelow
 	}
 }
 
@@ -3449,6 +3504,9 @@ func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.MediaSubtitlesTTMLAlignToleranceMS != nil {
 		cfg.MediaSubtitlesTTMLAlignToleranceMS = *fc.MediaSubtitlesTTMLAlignToleranceMS
+	}
+	if fc.MediaSubtitlesSourcePauseMS != nil {
+		cfg.MediaSubtitlesSourcePauseMS = *fc.MediaSubtitlesSourcePauseMS
 	}
 	if fc.MediaSubtitlesSMILEnabled != nil {
 		cfg.MediaSubtitlesSMILEnabled = *fc.MediaSubtitlesSMILEnabled
@@ -3614,7 +3672,7 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 		lineNo++
 		rawLine := scanner.Text()
 		indent := len(rawLine) - len(strings.TrimLeft(rawLine, " "))
-		line := strings.TrimSpace(rawLine)
+		line := strings.TrimSpace(stripYAMLComment(rawLine))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -3686,6 +3744,15 @@ func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bo
 	if isListConfigKey(key) {
 		setFileListValue(cfg, key, value)
 		return nil
+	}
+	// media.language and its aliases (media.stt.language, media_language) all
+	// canonicalize to one key. Two spellings with different values would leave
+	// the pin to file order, so a mismatch is CONFIG_INVALID (SPEC §8.8, spec
+	// 0.85.0, #1136). The comparison ignores case: BCP-47 tags are
+	// case-insensitive.
+	if key == "media.language" && cfg.MediaLanguage != nil &&
+		!strings.EqualFold(strings.TrimSpace(*cfg.MediaLanguage), strings.TrimSpace(value)) {
+		return fmt.Errorf("CONFIG_INVALID: media.language is set more than once with different values (%q and %q); media.stt.language and media_language are aliases of media.language", *cfg.MediaLanguage, value)
 	}
 	if err := setFileScalarValue(cfg, key, value); err != nil {
 		return err
@@ -3954,6 +4021,7 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_ttml_align_tolerance_ms":  "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":             "media.subtitles.smil.enabled",
 	"media_subtitles_segmentation":             "media.subtitles.segmentation",
+	"media_subtitles_source_pause_ms":          "media.subtitles.source_pause_ms",
 	"media_subtitles_emit_enabled":             "media.subtitles.emit.enabled",
 	"media_subtitles_emit_formats":             "media.subtitles.emit.formats",
 	"media_subtitles_emit_languages":           "media.subtitles.emit.languages",
@@ -3988,10 +4056,13 @@ var configKeyAliases = map[string]string{
 	"media_stt_on_partial_transcript":          "media.stt.on_partial_transcript",
 	"media_stt_language_scope":                 "media.stt.language_scope",
 	"media_stt_language_identifier":            "media.stt.language_identifier",
+	"media_language":                           "media.language",
+	"media.stt.language":                       "media.language", // alias of the media.language pin (SPEC §8.8, #1136)
 	"media_stt_language_probe_sec":             "media.stt.language_probe_sec",
 	"media_stt_require_validation":             "media.stt.require_validation",
 	"media_stt_on_route_error":                 "media.stt.on_route_error",
 	"media_stt_route_retry_after":              "media.stt.route_retry_after",
+	"media_stt_redecode_below":                 "media.stt.redecode_below",
 	"media_stt_tracks":                         "media.stt.tracks",
 	"stt_provider":                             "stt.provider",
 	"stt_mistral_model":                        "stt.mistral.model",
@@ -4243,6 +4314,9 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.subtitles.collapse_repeats": func(c *fileConfig) **int {
 		return &c.MediaSubtitlesCollapseRepeats
 	},
+	"media.subtitles.source_pause_ms": func(c *fileConfig) **int {
+		return &c.MediaSubtitlesSourcePauseMS
+	},
 	"distributed_embed_max_attempts": func(c *fileConfig) **int {
 		return &c.DistributedEmbedMaxAttempts
 	},
@@ -4288,6 +4362,7 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.stt.request_timeout_sec":           true,
 	"media.subtitles.ttml.align_tolerance_ms": true,
 	"media.subtitles.collapse_repeats":        true,
+	"media.subtitles.source_pause_ms":         true,
 	"retrieval.hierarchical.max_tokens":       true,
 }
 
@@ -4307,6 +4382,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.RetrievalMMRLambda
 	case "media.stt.min_coverage":
 		target = &cfg.MediaSTTMinCoverage
+	case "media.stt.redecode_below":
+		target = &cfg.MediaSTTRedecodeBelow
 	case "recognize.timeout_per_media_second":
 		target = &cfg.RecognizeTimeoutPerMediaSecond
 	default:
@@ -4360,6 +4437,9 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 // setStringFileScalar dispatches a string key/value to the
 // server/model/ingest/x402 string setters.
 func setStringFileScalar(cfg *fileConfig, key, value string) {
+	if key == "media.language" {
+		cfg.MediaLanguage = strPtr(value)
+	}
 	setServerStringFileScalar(cfg, key, value)
 	setModelStringFileScalar(cfg, key, value)
 	setIngestStringFileScalar(cfg, key, value)
@@ -4896,6 +4976,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
 	writeScalar("media_subtitles_segmentation", cfg.MediaSubtitlesSegmentation)
+	writeInt("media_subtitles_source_pause_ms", cfg.MediaSubtitlesSourcePauseMS)
 	writeBool("media_subtitles_emit_enabled", cfg.MediaSubtitlesEmitEnabled)
 	writeList("media_subtitles_emit_formats", cfg.MediaSubtitlesEmitFormats)
 	writeList("media_subtitles_emit_languages", cfg.MediaSubtitlesEmitLanguages)
@@ -4938,10 +5019,12 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_stt_on_partial_transcript", cfg.MediaSTTOnPartialTranscript)
 	writeScalar("media_stt_language_scope", cfg.MediaSTTLanguageScope)
 	writeScalar("media_stt_language_identifier", cfg.MediaSTTLanguageIdentifier)
+	writeScalar("media_language", cfg.MediaLanguage)
 	writeInt("media_stt_language_probe_sec", cfg.MediaSTTLanguageProbeSec)
 	writeBool("media_stt_require_validation", cfg.MediaSTTRequireValidation)
 	writeScalar("media_stt_on_route_error", cfg.MediaSTTOnRouteError)
 	writeScalar("media_stt_route_retry_after", cfg.MediaSTTRouteRetryAfter.String())
+	writeScalar("media_stt_redecode_below", strconv.FormatFloat(cfg.MediaSTTRedecodeBelow, 'f', -1, 64))
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -4983,6 +5066,71 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 
 // unquoteYAMLScalar trims value and strips matching single/double
 // quotes (interpreting escapes in double-quoted form).
+// stripYAMLComment removes a YAML comment from line (#1142). As in YAML, a `#`
+// starts a comment when it opens the line or follows a space or tab, and it is
+// outside a quoted scalar. So `key: value  # note` reads as `key: value`, while
+// `url: http://host/#frag` and `key: "a # b"` keep their `#`. A quote opens a
+// quoted scalar only where a scalar starts (line start, or after `:`, `-`, `[`,
+// `{` or `,`), so the apostrophe in `name: it's  # note` does not hide the
+// comment. Inside double quotes a backslash escapes the next character; inside
+// single quotes `”` is an escaped quote and does not close the scalar.
+func stripYAMLComment(line string) string {
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if (c == '"' || c == '\'') && scalarStartsAt(line, i) {
+			i = quotedScalarEnd(line, i)
+			continue
+		}
+		if c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			return strings.TrimRight(line[:i], " \t")
+		}
+	}
+	return line
+}
+
+// quotedScalarEnd returns the index of the quote that closes the quoted scalar
+// opened at line[start], or len(line) when the scalar is not closed. Inside
+// double quotes a backslash escapes the next character; inside single quotes
+// `”` is an escaped quote.
+func quotedScalarEnd(line string, start int) int {
+	q := line[start]
+	for i := start + 1; i < len(line); i++ {
+		switch {
+		case q == '"' && line[i] == '\\':
+			i++
+		case line[i] != q:
+		case q == '\'' && i+1 < len(line) && line[i+1] == '\'':
+			i++
+		default:
+			return i
+		}
+	}
+	return len(line)
+}
+
+// scalarStartsAt reports whether a scalar can start at line[i]: the line holds
+// only whitespace before it; or the last non-blank character before it is a
+// flow indicator (`[`, `{` or `,`); or it is a `:` or a list `-` with
+// whitespace between it and line[i]. A list `-` must open the line or follow
+// whitespace, so the `-` inside `beta-'draft` is not one.
+func scalarStartsAt(line string, i int) bool {
+	prev := strings.TrimRight(line[:i], " \t")
+	if prev == "" {
+		return true
+	}
+	spaced := len(prev) < i
+	n := len(prev)
+	switch prev[n-1] {
+	case '[', '{', ',':
+		return true
+	case ':':
+		return spaced
+	case '-':
+		return spaced && (n == 1 || prev[n-2] == ' ' || prev[n-2] == '\t')
+	}
+	return false
+}
+
 func unquoteYAMLScalar(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 {
@@ -4992,7 +5140,8 @@ func unquoteYAMLScalar(value string) string {
 			}
 		}
 		if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
-			return value[1 : len(value)-1]
+			// In a single-quoted YAML scalar, '' is an escaped quote.
+			return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
 		}
 	}
 	return value
@@ -5475,9 +5624,11 @@ func (c *Config) Validate() error {
 		c.validateMediaSTTOnUncoveredLanguage,
 		c.validateMediaSTTPartialTranscriptFloor,
 		c.validateMediaSTTLanguageScope,
+		c.validateMediaLanguage,
 		c.validateSTTLanguageIdentifier,
 		c.validateMediaSTTOnRouteError,
 		c.validateMediaSTTRouteRetryAfter,
+		c.validateMediaSTTRedecodeBelow,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -5903,6 +6054,11 @@ func (c *Config) validateMediaSubtitles() error {
 			c.MediaSubtitlesSegmentation)
 	}
 	c.MediaSubtitlesSegmentation = segmentation
+	// §8.6.3 (0.87.0): 0 turns the source-pause rule off, so 0 is kept as is.
+	if c.MediaSubtitlesSourcePauseMS < 0 {
+		return fmt.Errorf("CONFIG_INVALID: media.subtitles.source_pause_ms must not be negative: %d",
+			c.MediaSubtitlesSourcePauseMS)
+	}
 	if c.MediaSubtitlesCollapseRepeats < 0 {
 		return fmt.Errorf("media.subtitles.collapse_repeats must not be negative: %d",
 			c.MediaSubtitlesCollapseRepeats)
@@ -6411,6 +6567,20 @@ func (c *Config) validateMediaSTTOnRouteError() error {
 	return nil
 }
 
+// DefaultMediaSTTRedecodeBelow is the default media.stt.redecode_below (SPEC
+// §8.6.13, spec 0.88.0).
+const DefaultMediaSTTRedecodeBelow = 0.5
+
+// validateMediaSTTRedecodeBelow rejects a media.stt.redecode_below outside
+// [0,1], or one that is not a finite number (SPEC §8.6.13, spec 0.88.0).
+func (c *Config) validateMediaSTTRedecodeBelow() error {
+	v := c.MediaSTTRedecodeBelow
+	if v < 0 || v > 1 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return fmt.Errorf("CONFIG_INVALID: media.stt.redecode_below must be within [0,1]: %v", v)
+	}
+	return nil
+}
+
 // DefaultMediaSTTRouteRetryAfter is the default media.stt.route_retry_after
 // (SPEC §8.2.4): a daily reindex retries a broken route once per day, and a
 // restart loop or a watch rescan on the same day does not decode it again.
@@ -6452,6 +6622,23 @@ func (c *Config) validateMediaSTTRouteRetryAfter() error {
 	}
 	if c.MediaSTTRouteRetryAfter < 0 {
 		return fmt.Errorf("CONFIG_INVALID: media.stt.route_retry_after must not be negative: %v", c.MediaSTTRouteRetryAfter)
+	}
+	return nil
+}
+
+// validateMediaLanguage checks the media.language pin (SPEC §8.8, #1136): empty
+// is no pin; otherwise the value must have the shape of a BCP-47 tag: a primary
+// subtag of 2 to 8 ASCII letters and, after each hyphen, a subtag of 1 to 8
+// ASCII letters or digits (`uk`, `pt-BR`). A pin that can never match a language
+// (`ukrainian`, `fa_IR`, `uk-`) is CONFIG_INVALID rather than a silent no-op. The tag
+// is kept as written (trimmed): it is what the transcription request carries.
+func (c *Config) validateMediaLanguage() error {
+	c.MediaLanguage = strings.TrimSpace(c.MediaLanguage)
+	if c.MediaLanguage == "" {
+		return nil
+	}
+	if !validLanguageTag(c.MediaLanguage) {
+		return fmt.Errorf("CONFIG_INVALID: media.language %q is not a BCP-47 language tag (the primary subtag must be 2 to 8 ASCII letters, e.g. uk or pt-BR)", c.MediaLanguage)
 	}
 	return nil
 }
