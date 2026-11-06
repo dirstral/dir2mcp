@@ -838,8 +838,9 @@ translated words of that segment are shared out over the spoken parts in
 proportion to their source words, so no translated cue starts or ends in the
 pause. A cue can stay on screen into the pause after it, but never past the
 start of the next spoken part. A source without word timings, or `0`, gives the
-old per-segment timing. The key changes VTT and SRT export timing only. It
-never changes the index, the chunks or the citations.
+old per-segment timing. The key changes VTT and SRT export timing, and TTML
+timing under `media.subtitles.ttml.segmentation: broadcast`. It never changes
+the index, the chunks or the citations.
 
 ### Source language pin (`media.language`)
 

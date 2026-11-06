@@ -1020,7 +1020,9 @@ type Config struct {
 	// `media.subtitles.emit.formats`, default [vtt]). VTT/SRT are written once
 	// per transcript language in the §8.6.4 sidecar shape `<stem>.<lang>.<ext>`;
 	// TTML once per document as `<stem>.ttml` (bilingual when a translation
-	// exists) and requires MediaSubtitlesTTMLEnabled. SMIL is never written.
+	// exists) and requires MediaSubtitlesTTMLEnabled. A SMIL file is never
+	// written whole; MediaSubtitlesEmitSMIL only patches the caption entries of
+	// an existing SMIL beside the media.
 	MediaSubtitlesEmitFormats []string
 	// MediaSubtitlesEmitLanguages restricts which transcript languages get a
 	// VTT/SRT (config `media.subtitles.emit.languages`). Empty (the default)
@@ -4639,8 +4641,6 @@ func setIngestStringFileScalar(cfg *fileConfig, key, value string) {
 	}
 }
 
-// setMediaStringFileScalar assigns media.* string keys onto the fileConfig. Split
-// out of setIngestStringFileScalar so each stays within the cyclomatic budget.
 // setMediaSubtitlesSMILStringFileScalar assigns the SMIL caption patch and TTML
 // naming/segmentation string keys (SPEC §8.6.14), returning true when key
 // matched. Split out of setMediaStringFileScalar for the cyclomatic budget.
@@ -4660,6 +4660,8 @@ func setMediaSubtitlesSMILStringFileScalar(cfg *fileConfig, key, value string) b
 	return true
 }
 
+// setMediaStringFileScalar assigns media.* string keys onto the fileConfig. Split
+// out of setIngestStringFileScalar so each stays within the cyclomatic budget.
 func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 	if setMediaSubtitlesSMILStringFileScalar(cfg, key, value) {
 		return
@@ -6085,12 +6087,6 @@ func (c *Config) validateMediaSubtitles() error {
 	return nil
 }
 
-// validateMediaSubtitlesEmit normalizes and gates the subtitle write-back keys
-// (SPEC §8.6.14). Normalization (policy enum, format set, language tags, dir
-// whitespace) runs whether or not write-back is enabled so `config print` shows
-// canonical values; the two hard gates — ttml needs the TTML surface, an object
-// store needs an output root — apply only when write-back is enabled, because
-// an unused surface must never make a configuration invalid.
 // validateMediaSubtitlesSMIL normalizes and gates the SMIL caption patch and
 // TTML naming/segmentation keys (SPEC §8.6.14). The enums and the param syntax
 // are checked always; the cross-key gates apply only when the patch is on: it
@@ -6134,6 +6130,12 @@ func (c *Config) validateMediaSubtitlesSMIL() error {
 	return nil
 }
 
+// validateMediaSubtitlesEmit normalizes and gates the subtitle write-back keys
+// (SPEC §8.6.14). Normalization (policy enum, format set, language tags, dir
+// whitespace) runs whether or not write-back is enabled so `config print` shows
+// canonical values; the two hard gates — ttml needs the TTML surface, an object
+// store needs an output root — apply only when write-back is enabled, because
+// an unused surface must never make a configuration invalid.
 func (c *Config) validateMediaSubtitlesEmit() error {
 	policy, err := normalizeClosedEnum("media.subtitles.emit.policy", c.MediaSubtitlesEmitPolicy,
 		DefaultMediaSubtitlesEmitPolicy, []string{"if_missing", "refresh"})

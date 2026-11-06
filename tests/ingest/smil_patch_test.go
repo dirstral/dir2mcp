@@ -231,3 +231,29 @@ func TestSMILPatch_NothingToLinkDropsOnlyDanglingEntries(t *testing.T) {
 		t.Fatalf("an entry pointing at a missing file must be removed, none added:\n%s", got)
 	}
 }
+
+// TestSMILPatch_ManagedNamesMatchExactly pins the managed set of SPEC §8.6.14:
+// `<stem>_<N>p.ttml` is managed, but another separator (`abc-720p.ttml`,
+// `abc.720p.ttml`) or another case (`ABC.ttml`) names a file this pipeline did
+// not write, so those entries are foreign and kept as they are.
+func TestSMILPatch_ManagedNamesMatchExactly(t *testing.T) {
+	t.Parallel()
+	foreign := "      <textstream src=\"abc-720p.ttml\" system-language=\"eng\" />\n" +
+		"      <textstream src=\"abc.720p.ttml\" system-language=\"eng\" />\n" +
+		"      <textstream src=\"ABC.ttml\" system-language=\"eng\" />\n"
+	managed := "      <textstream src=\"abc_480p.ttml\" system-language=\"rus\" />\n"
+	start := strings.Replace(archiveSMIL, "    </switch>\n", foreign+managed+"    </switch>\n", 1)
+	root := smilCorpus(t, start)
+	runSMILCorpus(t, root, nil, testutil.TempDir(t))
+
+	got := readFile(t, filepath.Join(root, "v", "abc.smil"))
+	if !strings.Contains(got, foreign) {
+		t.Fatalf("entries with another separator or case are foreign and must be kept:\n%s", got)
+	}
+	if strings.Contains(got, "abc_480p.ttml") {
+		t.Fatalf("a managed <stem>_<N>p.ttml entry must be replaced:\n%s", got)
+	}
+	if !strings.Contains(got, `src="abc_1080p.ttml"`) {
+		t.Fatalf("our entry must be added:\n%s", got)
+	}
+}

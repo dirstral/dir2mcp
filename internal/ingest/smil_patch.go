@@ -212,12 +212,14 @@ func smilSiblingExists(dir, name string) bool {
 }
 
 // managedCaptionMatcher reports whether a SMIL <textstream> src is a caption
-// entry this pipeline manages for the document: its VTTs, its group-named TTML,
-// a rendition-named TTML of the same group, or the TTML name in use. Only a
-// bare file name beside the SMIL qualifies: "other/abc.ttml" is foreign.
+// entry this pipeline manages for the document: `<stem>.<lang>.vtt`,
+// `<stem>.ttml`, `<stem>_<N>p.ttml`, or the TTML name in use (SPEC §8.6.14).
+// The match is exact: another separator (`<stem>-720p.ttml`) or another case
+// names a file this pipeline did not write, so that entry is foreign and kept.
+// Only a bare file name beside the SMIL qualifies: "other/abc.ttml" is foreign.
 func managedCaptionMatcher(plan emitPlan) func(string) bool {
 	stem := regexp.QuoteMeta(plan.stem)
-	re := regexp.MustCompile(`(?i)^(?:` + stem + `\.[^./\\]+\.vtt|` + stem + `(?:[_.-]\d{3,4}p)?\.ttml|` +
+	re := regexp.MustCompile(`^(?:` + stem + `\.[^./\\]+\.vtt|` + stem + `(?:_\d+p)?\.ttml|` +
 		regexp.QuoteMeta(plan.ttmlStem) + `\.ttml)$`)
 	return func(src string) bool {
 		return re.MatchString(strings.TrimPrefix(path.Clean(subtitle.NormalizeSMILSrc(src)), "./"))

@@ -407,9 +407,10 @@ func (r Renderer) RenderTimed(ctx context.Context, st Store, relPath, lang, form
 // RenderTTML renders a (bilingual) TTML document (SPEC §8.6.10) for relPath.
 // primaryLang selects the primary transcript (empty = the document's first);
 // secondaryLang, when non-empty, selects the transcript aligned onto the primary
-// cues within media.subtitles.ttml.align_tolerance_ms. TTML cues are always built
-// in "chunk" segmentation: broadcast re-segmentation is a VTT/SRT reading-speed
-// concern and is documented as never affecting TTML. The resolved primary
+// cues within media.subtitles.ttml.align_tolerance_ms. TTML cues use "chunk"
+// segmentation (the stored transcript segments) by default; under
+// media.subtitles.ttml.segmentation=broadcast they are re-cut like VTT/SRT
+// (§8.6.14), source-pause rule included (§8.6.3). The resolved primary
 // language is returned alongside the document so a caller can tag companions
 // (the SMIL sidecar) with the same language the TTML carries.
 func (r Renderer) RenderTTML(ctx context.Context, st Store, relPath, primaryLang, secondaryLang string) (ttml string, resolvedPrimary string, err error) {
