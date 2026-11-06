@@ -51,6 +51,13 @@ func smilCorpus(t *testing.T, smil string) string {
 // through a fresh service over st (a fresh store when st is nil).
 func runSMILCorpus(t *testing.T, root string, st *store.SQLiteStore, stateDir string) *store.SQLiteStore {
 	t.Helper()
+	return runSMILCorpusWith(t, root, st, stateDir, nil)
+}
+
+// runSMILCorpusWith is runSMILCorpus with a hook that adjusts the service
+// before the run (nil for none).
+func runSMILCorpusWith(t *testing.T, root string, st *store.SQLiteStore, stateDir string, setup func(*ingest.Service)) *store.SQLiteStore {
+	t.Helper()
 	ctx := context.Background()
 	if st == nil {
 		st = store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
@@ -80,6 +87,9 @@ func runSMILCorpus(t *testing.T, root string, st *store.SQLiteStore, stateDir st
 	svc.SetSTTIdentity("whisper", "large-v3")
 	svc.SetTranscriptLanguage("ru")
 	svc.SetTranslator(&fakeTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
+	if setup != nil {
+		setup(svc)
+	}
 	if err := svc.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -303,5 +313,49 @@ func TestSMILPatch_SameSizeSameMtimePatchIsIndexedAgain(t *testing.T) {
 	if want := ingest.ComputeContentHash([]byte(patched)); doc.ContentHash != want {
 		t.Fatalf("the next scan must index the patched SMIL: content_hash=%q, want %q (original %q)",
 			doc.ContentHash, want, ingest.ComputeContentHash([]byte(start)))
+	}
+}
+
+// TestSMILPatch_LeavesASMILChangedSinceRead pins the re-check before a patch
+// (SPEC §8.6.14 "every change is backed up first"): when another tool rewrites
+// the SMIL after the scan read it, just before the patch commits, the scan
+// keeps that rewrite, writes no backup and leaves no temp file. The next scan
+// patches the new content, with one backup that holds it.
+func TestSMILPatch_LeavesASMILChangedSinceRead(t *testing.T) {
+	t.Parallel()
+	root := smilCorpus(t, archiveSMIL)
+	stateDir := testutil.TempDir(t)
+	smilPath := filepath.Join(root, "v", "abc.smil")
+	rewritten := strings.Replace(archiveSMIL, `name="720p"`, `name="720p-new"`, 1)
+	calls := 0
+	st := runSMILCorpusWith(t, root, nil, stateDir, func(svc *ingest.Service) {
+		svc.SetSMILBeforeCommitForTest(func(abs string) {
+			calls++
+			if err := os.WriteFile(abs, []byte(rewritten), 0o644); err != nil {
+				t.Errorf("rewrite SMIL: %v", err)
+			}
+		})
+	})
+	if calls != 1 {
+		t.Fatalf("the patch must reach its final check once, calls=%d", calls)
+	}
+	if got := readFile(t, smilPath); got != rewritten {
+		t.Fatalf("the rewritten SMIL must be kept, got:\n%s", got)
+	}
+	if b := smilBackups(t, root); len(b) != 0 {
+		t.Fatalf("no backup may be written for a SMIL that changed, got %v", b)
+	}
+	if tmp, _ := filepath.Glob(filepath.Join(root, "v", ".dir2mcp-smil-*")); len(tmp) != 0 {
+		t.Fatalf("the temp file must be removed, got %v", tmp)
+	}
+
+	runSMILCorpus(t, root, st, stateDir)
+	want := strings.Replace(rewritten, "    </switch>\n", wiredTextStream+"    </switch>\n", 1)
+	if got := readFile(t, smilPath); got != want {
+		t.Fatalf("the next scan must patch the new content:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	backups := smilBackups(t, root)
+	if len(backups) != 1 || readFile(t, backups[0]) != rewritten {
+		t.Fatalf("want one backup holding the rewritten SMIL, got %v", backups)
 	}
 }

@@ -141,7 +141,7 @@ func (s *Service) patchSMIL(plan emitPlan) {
 	if !changed {
 		return
 	}
-	if err := replaceSMIL(plan.smil, out); err != nil {
+	if err := replaceSMIL(plan.smil, out, s.smilBeforeCommit); err != nil {
 		if errors.Is(err, errSMILChanged) {
 			// Another tool rewrote the SMIL after it was read. Leave its version
 			// alone; the next scan patches the new content.
@@ -246,11 +246,47 @@ var errSMILChanged = errors.New("smil changed since it was read")
 
 // replaceSMIL backs the SMIL up (livevtt's `<smil>.bak.<ts>` shape) and replaces
 // it atomically with data, keeping its file mode. Every change gets its own
-// backup; one that cannot be made aborts the change. The SMIL is read once
-// more first: when another tool rewrote it after planSMIL read it, the patch
+// backup; one that cannot be made aborts the change.
+//
+// The order keeps the check close to the rename. The new bytes go to a temp
+// file beside the SMIL first, and get the SMIL's mode. Then the SMIL is read
+// once more: when another tool rewrote it after planSMIL read it, the patch
 // would discard that rewrite and the backup would hold the older bytes, so
-// replaceSMIL returns errSMILChanged and writes nothing.
-func replaceSMIL(t smilTarget, data []byte) error {
+// replaceSMIL returns errSMILChanged and writes nothing. Only after that check
+// does it write the backup and rename the temp file over the SMIL. On any
+// error or mismatch the temp file is removed.
+//
+// A race remains: a write by another tool between the final check and the
+// rename is lost (the backup holds the bytes that were read, not that write).
+// Only a lock that the other writer also honours can close that window;
+// replaceSMIL takes none.
+//
+// beforeCommit, when not nil, runs just before the final check (a test seam).
+func replaceSMIL(t smilTarget, data []byte, beforeCommit func(abs string)) error {
+	tmp, err := os.CreateTemp(filepath.Dir(t.abs), ".dir2mcp-smil-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, t.mode); err != nil {
+		return err
+	}
+	if beforeCommit != nil {
+		beforeCommit(t.abs)
+	}
 	current, err := os.ReadFile(t.abs)
 	if err != nil {
 		return err
@@ -261,28 +297,10 @@ func replaceSMIL(t smilTarget, data []byte) error {
 	if err := backupSMIL(t); err != nil {
 		return fmt.Errorf("backup: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(t.abs), ".dir2mcp-smil-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Chmod(tmpName, t.mode); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
 	if err := os.Rename(tmpName, t.abs); err != nil {
-		_ = os.Remove(tmpName)
 		return err
 	}
+	committed = true
 	return nil
 }
 

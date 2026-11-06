@@ -172,6 +172,11 @@ type Service struct {
 	// time source for that rule; nil means time.Now (tests inject one).
 	routeRetryAfter time.Duration
 	clock           func() time.Time
+	// smilBeforeCommit runs in replaceSMIL just before the final check that
+	// the SMIL still holds the bytes it was read with (SPEC §8.6.14). Nil in
+	// production; tests set it with SetSMILBeforeCommitForTest to rewrite the
+	// SMIL inside that window.
+	smilBeforeCommit func(abs string)
 	// routeFallbackIndex holds the §8.2.4 fallback records of the corpus for
 	// the length of one scan (one query per scan, not one per document); nil
 	// outside a scan. Guarded by routeFallbackMu.
