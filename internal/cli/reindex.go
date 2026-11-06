@@ -77,7 +77,7 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
-	if code := a.armTranscriptRedecode(ctx, global, opts, cfg, st, ing); code != exitSuccess {
+	if code := a.armTranscriptRepairs(ctx, global, opts, cfg, st, ing); code != exitSuccess {
 		staging.restoreContentHashes(ctx, a.stderr)
 		a.closeStoreWithLog(st)
 		staging.rollback(a.stderr)
@@ -202,6 +202,88 @@ func (a *App) armTranscriptRedecode(ctx context.Context, global globalOptions, o
 		}
 	}
 	return exitSuccess
+}
+
+// armTranscriptRepairs arms the transcript repair flags before the rebuild
+// starts: --redecode-partial-transcripts, then --redecode-language-windows.
+func (a *App) armTranscriptRepairs(ctx context.Context, global globalOptions, opts reindexOptions, cfg config.Config, st model.Store, ing any) int {
+	if code := a.armTranscriptRedecode(ctx, global, opts, cfg, st, ing); code != exitSuccess {
+		return code
+	}
+	return a.armLanguageWindowReconcile(global, opts, cfg, ing)
+}
+
+// languageWindowReconciler is the ingestor capability
+// --redecode-language-windows drives (SPEC §8.6.13, spec 0.88.0, #1143).
+type languageWindowReconciler interface {
+	SetReconcileLanguageWindows(on bool)
+}
+
+// armLanguageWindowReconcile arms the §8.6.13 reconcile pass before the
+// rebuild starts. The rebuild reads each cached transcript, and the pass
+// checks the ones that record no redecode_rule: only the windows whose stored
+// text is in another language than the recording's are decoded again.
+//
+// Like --redecode-partial-transcripts it fails the run rather than degrading:
+// with no ingestor support, no transcriber, or the rule off, a green rebuild
+// would repair nothing.
+func (a *App) armLanguageWindowReconcile(global globalOptions, opts reindexOptions, cfg config.Config, ing any) int {
+	if !opts.redecodeLanguageWindows {
+		return exitSuccess
+	}
+	reconciler, ok := ing.(languageWindowReconciler)
+	if !ok {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"--redecode-language-windows is not supported by this ingestor")
+		return exitConfigInvalid
+	}
+	if reason := languageWindowReconcileBlocker(cfg); reason != "" {
+		writeCLIError(a.stderr, global.jsonOutput, exitConfigInvalid,
+			"--redecode-language-windows cannot repair anything: "+reason)
+		return exitConfigInvalid
+	}
+	reconciler.SetReconcileLanguageWindows(true)
+	if !global.quiet && !global.jsonOutput {
+		writeln(a.stderr, "checking transcripts indexed before the low-confidence re-decode rule; only windows in another language are decoded again")
+	}
+	return exitSuccess
+}
+
+// languageWindowReconcileBlocker names the configuration that makes the
+// reconcile pass a no-op, or returns "" when it can run.
+func languageWindowReconcileBlocker(cfg config.Config) string {
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err != nil || transcriber == nil {
+		return "no speech-to-text provider resolved; configure stt.provider and run it again"
+	}
+	// The pass decodes a window again with the item language as the request
+	// language. A transcriber without that capability (the same check
+	// model.TranscriberForLanguage makes) would leave every window as recorded.
+	if _, ok := transcriber.(model.LanguageHintTranscriber); !ok {
+		return fmt.Sprintf("the speech-to-text provider (stt.provider %q) cannot take a language hint, so no window can be decoded again in the recording's language; use a kind: whisper profile", sttSelectorLabel(cfg))
+	}
+	if cfg.MediaSTTRedecodeBelow <= 0 {
+		return "media.stt.redecode_below is 0, so the rule is off"
+	}
+	if !cfg.LanguageDetectionEnabled {
+		return "language_detection_enabled is false, so no recording language is resolved to compare the windows with"
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.MediaSTTLanguageScope), "window") {
+		return "media.stt.language_scope is window, where the rule does not apply"
+	}
+	if pin := ingest.STTLanguagePin(cfg); pin != "" {
+		return fmt.Sprintf("the source language is pinned to %q (media.language or stt_language), so every window is decoded in it", pin)
+	}
+	return ""
+}
+
+// sttSelectorLabel names the configured stt.provider selector for a message,
+// "auto" when it is not set.
+func sttSelectorLabel(cfg config.Config) string {
+	if sel := strings.TrimSpace(cfg.STTProvider); sel != "" {
+		return sel
+	}
+	return "auto"
 }
 
 // commitReindex keeps the rebuild: it discards both undo records and closes the

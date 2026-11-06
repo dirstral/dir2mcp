@@ -91,6 +91,12 @@ type Service struct {
 	// Nil means "trust the cache", which is every ordinary run.
 	redecodeTranscripts map[string]bool
 
+	// reconcileLanguageWindows arms the §8.6.13 reconcile pass (spec 0.88.0,
+	// #1143): a cached item-scoped windowed transcript that records no
+	// redecode_rule is checked, and only the windows whose stored text is in
+	// another language are decoded again. False on every ordinary run.
+	reconcileLanguageWindows bool
+
 	// onUnsupported is the resolved §7.4.B.2 degradation mode for a format no
 	// active extraction engine supports (ingest.on_unsupported): "lenient"
 	// (default) skips with a warning and surfaces the gap in the honest coverage
@@ -7087,6 +7093,7 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 				coverage: s.restoreCachedCoverage(paths.coverage, paths.screened),
 				route:    readCachedItemRoute(paths.route),
 			}
+			hit = s.reconcileStoredRedecode(ctx, doc, content, paths, hit)
 			return s.serveCachedTranscript(ctx, doc, content, paths, hit, retryFallback)
 		}
 	}

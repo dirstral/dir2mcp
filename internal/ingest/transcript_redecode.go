@@ -216,7 +216,9 @@ func reportsTileWindows(reports []windowReport, n int) bool {
 // redecode_rule whenever the rule ran, so a consumer and a later reconcile
 // pass can tell "checked" from "not checked".
 func applyRedecodeMeta(meta *transcriptMeta, coverage *TranscriptCoverage) {
-	if coverage == nil || coverage.RedecodeRule == "" {
+	// A reconcile pass whose probe failed for one window records the windows
+	// it did decode again but no rule, so that window is checked again.
+	if coverage == nil || (coverage.RedecodeRule == "" && len(coverage.RedecodedWindows) == 0) {
 		return
 	}
 	meta.RedecodeRule = coverage.RedecodeRule
