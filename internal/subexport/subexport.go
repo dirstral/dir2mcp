@@ -407,19 +407,23 @@ func (r Renderer) RenderTimed(ctx context.Context, st Store, relPath, lang, form
 // RenderTTML renders a (bilingual) TTML document (SPEC §8.6.10) for relPath.
 // primaryLang selects the primary transcript (empty = the document's first);
 // secondaryLang, when non-empty, selects the transcript aligned onto the primary
-// cues within media.subtitles.ttml.align_tolerance_ms. TTML cues are always built
-// in "chunk" segmentation: broadcast re-segmentation is a VTT/SRT reading-speed
-// concern and is documented as never affecting TTML. The resolved primary
+// cues within media.subtitles.ttml.align_tolerance_ms. TTML cues use "chunk"
+// segmentation (the stored transcript segments) by default; under
+// media.subtitles.ttml.segmentation=broadcast they are re-cut like VTT/SRT
+// (§8.6.14), source-pause rule included (§8.6.3). The resolved primary
 // language is returned alongside the document so a caller can tag companions
 // (the SMIL sidecar) with the same language the TTML carries.
 func (r Renderer) RenderTTML(ctx context.Context, st Store, relPath, primaryLang, secondaryLang string) (ttml string, resolvedPrimary string, err error) {
-	primary, resolved, err := r.Cues(ctx, st, relPath, primaryLang, "chunk")
+	// TTML cues are the stored transcript segments ("chunk", default) or, under
+	// media.subtitles.ttml.segmentation=broadcast, re-cut like VTT/SRT (§8.6.14).
+	seg := r.ttmlSegmentation()
+	primary, resolved, err := r.Cues(ctx, st, relPath, primaryLang, seg)
 	if err != nil {
 		return "", "", err
 	}
 	var bilingual []subtitle.BilingualCue
 	if strings.TrimSpace(secondaryLang) != "" {
-		secondary, resolvedSecondary, serr := r.Cues(ctx, st, relPath, secondaryLang, "chunk")
+		secondary, resolvedSecondary, serr := r.Cues(ctx, st, relPath, secondaryLang, seg)
 		if serr != nil {
 			return "", "", serr
 		}
@@ -432,4 +436,13 @@ func (r Renderer) RenderTTML(ctx context.Context, st Store, relPath, primaryLang
 		return "", "", fmt.Errorf("%w: %q", ErrNoCues, relPath)
 	}
 	return subtitle.RenderTTML(bilingual, resolved), resolved, nil
+}
+
+// ttmlSegmentation is the cue builder TTML uses: "chunk" unless
+// media.subtitles.ttml.segmentation selects "broadcast".
+func (r Renderer) ttmlSegmentation() string {
+	if strings.EqualFold(strings.TrimSpace(r.cfg.MediaSubtitlesTTMLSegmentation), "broadcast") {
+		return "broadcast"
+	}
+	return "chunk"
 }

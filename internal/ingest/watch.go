@@ -609,7 +609,9 @@ func (w *fsWatchLoop) relPath(absPath string) (string, bool) {
 		return "", false
 	}
 	rel = filepath.ToSlash(rel)
-	if rel == "." || matchesAnyPathExclude(rel, w.svc.cfg.PathExcludes) {
+	// A SMIL caption-patch backup is never a document (SPEC §7.1), so the
+	// watcher ignores it exactly as the scan does.
+	if rel == "." || corpusfs.IsSMILBackup(rel) || matchesAnyPathExclude(rel, w.svc.cfg.PathExcludes) {
 		return "", false
 	}
 	return rel, true
