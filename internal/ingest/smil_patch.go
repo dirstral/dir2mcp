@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -141,6 +142,12 @@ func (s *Service) patchSMIL(plan emitPlan) {
 		return
 	}
 	if err := replaceSMIL(plan.smil, out); err != nil {
+		if errors.Is(err, errSMILChanged) {
+			// Another tool rewrote the SMIL after it was read. Leave its version
+			// alone; the next scan patches the new content.
+			s.getLogger().Printf("subtitle write-back: SMIL %s changed during write-back; not patched this scan", plan.smil.relPath)
+			return
+		}
 		s.getLogger().Printf("subtitle write-back: patch SMIL %s: %v", plan.smil.relPath, redactPathError(err))
 		s.addErrors(1)
 		s.markActiveErrored(manifestErrSMILPatchFailed, manifestErrSMILPatchFailed+": "+plan.smil.relPath)
@@ -226,10 +233,24 @@ func managedCaptionMatcher(plan emitPlan) func(string) bool {
 	}
 }
 
+// errSMILChanged reports that the SMIL on disk no longer holds the bytes the
+// patch was computed from.
+var errSMILChanged = errors.New("smil changed since it was read")
+
 // replaceSMIL backs the SMIL up (livevtt's `<smil>.bak.<ts>` shape) and replaces
 // it atomically with data, keeping its file mode. Every change gets its own
-// backup; one that cannot be made aborts the change.
+// backup; one that cannot be made aborts the change. The SMIL is read once
+// more first: when another tool rewrote it after planSMIL read it, the patch
+// would discard that rewrite and the backup would hold the older bytes, so
+// replaceSMIL returns errSMILChanged and writes nothing.
 func replaceSMIL(t smilTarget, data []byte) error {
+	current, err := os.ReadFile(t.abs)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current, t.data) {
+		return errSMILChanged
+	}
 	if err := backupSMIL(t); err != nil {
 		return fmt.Errorf("backup: %w", err)
 	}
