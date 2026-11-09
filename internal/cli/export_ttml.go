@@ -113,7 +113,10 @@ func (a *App) emitSMILSidecar(ctx context.Context, global globalOptions, cfg con
 	// raw --lang flag, so an omitted --lang produced a <textstream> with no
 	// systemLanguage even when the transcript recorded one. An empty resolved tag
 	// still omits the attribute, which RenderSMIL handles.
-	subs := []subtitle.SMILSubtitleRef{{Src: filepath.Base(opts.out), Lang: lang}}
+	// The tag is written in the TTML's own code form (media.subtitles.ttml.
+	// language_codes, SPEC §8.6.10), so systemLanguage matches the TTML xml:lang.
+	subs := []subtitle.SMILSubtitleRef{{Src: filepath.Base(opts.out),
+		Lang: subtitle.LanguageCode(lang, cfg.MediaSubtitlesTTMLLanguageCodes)}}
 	smil := subtitle.RenderSMIL(subtitle.SMILInput{
 		// The media reference is the corpus document's own path, never the
 		// localized copy's: a downloaded S3 object lands in a temp file whose
