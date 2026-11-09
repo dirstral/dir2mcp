@@ -7,9 +7,11 @@ import (
 )
 
 // LanguageCode renders a language tag under a code scheme: "iso639_2" gives the
-// ISO 639-2 three-letter code of the tag's base language ("ru" -> "rus",
-// "en-US" -> "eng"); any other scheme ("bcp47", empty) returns the tag as
-// given. A tag with no known base language is returned unchanged.
+// ISO 639-2/T (terminological) code of the tag's base language ("ru" -> "rus",
+// "en-US" -> "eng", "fr" -> "fra", never the bibliographic "fre"; SPEC
+// §8.6.10); any other scheme ("bcp47", empty) returns the tag as given. A tag
+// with no known base language is returned unchanged. The TTML xml:lang and the
+// SMIL system-language both use it, so equal settings give equal codes.
 func LanguageCode(tag, scheme string) string {
 	if !strings.EqualFold(strings.TrimSpace(scheme), "iso639_2") {
 		return tag

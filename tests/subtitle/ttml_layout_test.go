@@ -76,6 +76,8 @@ func TestLanguageCode(t *testing.T) {
 		{"ru", "iso639_2", "rus"},
 		{"en-US", "ISO639_2", "eng"},
 		{"uk", "iso639_2", "ukr"},
+		{"fr", "iso639_2", "fra"}, // ISO 639-2/T, not the bibliographic "fre"
+		{"de", "iso639_2", "deu"},
 		{"ru", "bcp47", "ru"},
 		{"ru", "", "ru"},
 		{"zz-not-a-language", "iso639_2", "zz-not-a-language"},
