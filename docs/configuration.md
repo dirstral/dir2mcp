@@ -727,9 +727,10 @@ With `media.variants.group: true` the stem is the **group** stem
 rendition. The cues are **identical to `dir2mcp export`** for the same document,
 language and format: one renderer, one cue pipeline (`filter_words`, the
 `media.subtitles.*` cleaning, `segmentation`). A written VTT or TTML also
-carries a one-line provenance comment that export does not (see below). **SMIL is never written** by
-write-back: an archive's packaging manifests belong to whatever produced the
-media, and stay an on-demand `export --format ttml --out` concern.
+carries a one-line provenance comment that export does not (see below). Write-back
+never **creates** a SMIL. With `emit.smil` on it can add caption entries to the
+SMIL that already sits beside the media; see
+[Captions in an existing SMIL](#captions-in-an-existing-smil-spec-8614).
 
 **A written file is dir2mcp's output, not a human's.** Every file written is
 recorded in the state database (path, size, mtime, content hash). While it is
@@ -772,6 +773,60 @@ same files single-pass writes. Enabling write-back on an already-indexed corpus
 fills the files in on the next scan without a reindex. A `source.kind: s3`
 corpus has no filesystem to write beside the media and requires `dir`.
 
+#### Captions in an existing SMIL (SPEC §8.6.14)
+
+A streaming server such as Wowza plays an archive video from a SMIL that lists
+its renditions, and shows captions when that SMIL has a `<textstream>` entry
+pointing at a subtitle file. These settings make write-back add that entry, the
+way the retired livevtt archive transcriber did:
+
+```yaml
+media:
+  subtitles:
+    ttml:
+      enabled: true
+      segmentation: broadcast   # chunk (default) | broadcast: short TTML cues, like VTT/SRT
+    emit:
+      enabled: true
+      formats: [vtt, ttml]
+      smil: ttml                # off (default) | ttml | vtt
+      smil_params:              # <param> children of each entry, name=value
+        - isWowzaCaptionStream=true
+      smil_language_codes: iso639_2   # bcp47 (default, "ru,en") | iso639_2 ("rus,eng")
+      ttml_name: top_rendition  # group (default, <stem>.ttml) | top_rendition (<stem>_1080p.ttml)
+```
+
+What happens to `<stem>.smil` beside the video:
+
+- **It is never created.** A missing or malformed SMIL, or one without a
+  `<switch>` holding a `<video>`, is left alone and reported as `SMIL_INVALID`
+  in the run manifest.
+- **Only managed caption entries change.** Those are entries whose source is the
+  video's own `<stem>.<lang>.vtt`, `<stem>.ttml` or `<stem>_<N>p.ttml`, named
+  as a bare file beside the SMIL (`other/<stem>.ttml` is not one). Any other
+  `<textstream>` is kept. `smil: ttml` adds one entry for the bilingual TTML;
+  `smil: vtt` adds one per VTT. An entry is added only for a file that exists.
+  When no caption file exists (for example, the write failed), entries whose
+  file is present are kept and only entries pointing at a missing file go.
+- **Only the caption lines are edited.** Every other byte of the SMIL stays as it
+  was, and a SMIL whose entries are already right is not touched, so re-scans
+  cause no churn.
+- **Every change is backed up first**, to a new `<stem>.smil.bak.<YYYYmmdd_HHMMSS>`
+  (with a `.<n>` suffix if two changes fall in the same second), and
+  the new SMIL replaces the old one atomically with the same file permissions. A
+  failed write is `SMIL_PATCH_FAILED`; the document stays indexed.
+- **Backups are never indexed.** Discovery skips every file whose name ends in
+  `.smil.bak.<YYYYmmdd_HHMMSS>` (or that name plus `.<n>`), in every scan and in
+  watch mode, whether or not write-back is on (SPEC §7.1). A backup that an
+  older version indexed is removed from the index on the next scan. The SMIL
+  itself is still indexed, at its new version after each change.
+
+`ttml_name: top_rendition` names the TTML after the SMIL's highest rendition
+(`<stem>_1080p.ttml`), because Wowza resolves the caption file against a
+rendition name and serves empty captions for the group name. Without a usable
+SMIL the TTML is named after the media file itself. `smil` requires write-back
+beside the media (an empty `emit.dir`) and its format among `emit.formats`.
+
 ### Translated broadcast cues follow the source speech (SPEC §8.6.3)
 
 ```yaml
@@ -788,8 +843,9 @@ translated words of that segment are shared out over the spoken parts in
 proportion to their source words, so no translated cue starts or ends in the
 pause. A cue can stay on screen into the pause after it, but never past the
 start of the next spoken part. A source without word timings, or `0`, gives the
-old per-segment timing. The key changes VTT and SRT export timing only. It
-never changes the index, the chunks or the citations.
+old per-segment timing. The key changes VTT and SRT export timing, and TTML
+timing under `media.subtitles.ttml.segmentation: broadcast`. It never changes
+the index, the chunks or the citations.
 
 ### Source language pin (`media.language`)
 

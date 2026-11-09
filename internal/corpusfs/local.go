@@ -245,6 +245,9 @@ func (w *discoverWalker) shouldAddFile(lstat os.FileInfo, relPath string, rules 
 	if !lstat.Mode().IsRegular() {
 		return false
 	}
+	if IsSMILBackup(relPath) {
+		return false
+	}
 	if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, false) {
 		return false
 	}
@@ -684,7 +687,7 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		return w.walkDir(ctx, resolvedPath, relPath, rules)
 	}
 
-	if !stat.Mode().IsRegular() {
+	if !stat.Mode().IsRegular() || IsSMILBackup(relPath) {
 		return nil
 	}
 	if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, false) {
