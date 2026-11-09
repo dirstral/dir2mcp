@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/subtitle"
@@ -87,5 +88,22 @@ func TestLanguageCode(t *testing.T) {
 		if got := subtitle.LanguageCode(c.tag, c.scheme); got != c.want {
 			t.Fatalf("LanguageCode(%q, %q) = %q, want %q", c.tag, c.scheme, got, c.want)
 		}
+	}
+}
+
+// TestRenderTTMLWith_DivsKeepColliding639Codes pins the documented collision
+// rule: two languages that share a primary subtag get the same ISO 639-2 code
+// under iso639_2, and the TTML still keeps one <div> per language, primary
+// first, rather than merging them.
+func TestRenderTTMLWith_DivsKeepColliding639Codes(t *testing.T) {
+	cues := subtitle.SeparateLanguageCues(
+		[]subtitle.Cue{{StartMS: 0, EndMS: 1000, Text: "Olá, Brasil"}},
+		[]subtitle.Cue{{StartMS: 0, EndMS: 1000, Text: "Olá, Portugal"}},
+		"pt-BR", "pt-PT")
+	got := subtitle.RenderTTMLWith(cues, "pt-BR", subtitle.TTMLOptions{Layout: "divs", LanguageCodes: "iso639_2"})
+	br := strings.Index(got, "Olá, Brasil")
+	pt := strings.Index(got, "Olá, Portugal")
+	if strings.Count(got, `<div xml:lang="por">`) != 2 || br < 0 || pt < 0 || br > pt {
+		t.Fatalf("want two por divs, pt-BR first:\n%s", got)
 	}
 }
