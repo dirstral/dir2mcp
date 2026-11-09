@@ -435,7 +435,11 @@ func (r Renderer) RenderTTML(ctx context.Context, st Store, relPath, primaryLang
 	if len(bilingual) == 0 {
 		return "", "", fmt.Errorf("%w: %q", ErrNoCues, relPath)
 	}
-	return subtitle.RenderTTML(bilingual, resolved), resolved, nil
+	opts := subtitle.TTMLOptions{
+		Layout:        r.cfg.MediaSubtitlesTTMLLayout,
+		LanguageCodes: r.cfg.MediaSubtitlesTTMLLanguageCodes,
+	}
+	return subtitle.RenderTTMLWith(bilingual, resolved, opts), resolved, nil
 }
 
 // ttmlSegmentation is the cue builder TTML uses: "chunk" unless

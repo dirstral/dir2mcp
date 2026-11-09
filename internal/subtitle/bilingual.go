@@ -198,6 +198,16 @@ func MonolingualBilingualCues(cues []Cue, lang string) []BilingualCue {
 	return out
 }
 
+// TTMLOptions selects how RenderTTMLWith arranges languages and writes their
+// tags (SPEC §8.6.10). The zero value is the default output of RenderTTML.
+type TTMLOptions struct {
+	// Layout is "spans" (default: one <p> per cue, each language a
+	// <span xml:lang>) or "divs" (each language its own <div xml:lang>).
+	Layout string
+	// LanguageCodes is "bcp47" (default: tags as given) or "iso639_2".
+	LanguageCodes string
+}
+
 // RenderTTML serializes bilingual cues as a TTML (Timed Text Markup Language)
 // document. Each cue becomes a <p> with begin/end timing; its primary and (when
 // present) secondary text runs are emitted as language-tagged <span xml:lang>
@@ -209,29 +219,102 @@ func MonolingualBilingualCues(cues []Cue, lang string) []BilingualCue {
 // docLang is the document-level xml:lang (typically the primary language).
 // Rendering is deterministic for a given cue slice.
 func RenderTTML(cues []BilingualCue, docLang string) string {
+	return RenderTTMLWith(cues, docLang, TTMLOptions{})
+}
+
+// RenderTTMLWith is RenderTTML with a layout and language-code choice. Under
+// the "divs" layout each language is a <div xml:lang> (primary first) holding
+// plain-text <p> cues; a cue keeps its begin/end in every <div> it has text
+// for. Players that build one caption track per language, such as Wowza,
+// need that layout.
+func RenderTTMLWith(cues []BilingualCue, docLang string, opts TTMLOptions) string {
+	code := func(tag string) string { return LanguageCode(tag, opts.LanguageCodes) }
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="`)
-	b.WriteString(escapeAttr(docLang))
+	b.WriteString(escapeAttr(code(docLang)))
 	b.WriteString("\">\n")
 	b.WriteString("  <body>\n")
+	if strings.EqualFold(strings.TrimSpace(opts.Layout), "divs") {
+		writeTTMLDivs(&b, cues, code)
+	} else {
+		writeTTMLSpans(&b, cues, code)
+	}
+	b.WriteString("  </body>\n")
+	b.WriteString("</tt>\n")
+	return b.String()
+}
+
+// writeTTMLSpans writes one <div> with one <p> per cue, each language a run.
+func writeTTMLSpans(b *strings.Builder, cues []BilingualCue, code func(string) string) {
 	b.WriteString("    <div>\n")
 	for _, c := range cues {
 		if strings.TrimSpace(c.PrimaryText) == "" && strings.TrimSpace(c.SecondaryText) == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "      <p begin=%q end=%q>\n",
+		fmt.Fprintf(b, "      <p begin=%q end=%q>\n",
 			formatTimestampTTML(c.StartMS), formatTimestampTTML(c.EndMS))
-		writeTTMLRun(&b, c.PrimaryLang, c.PrimaryText)
+		writeTTMLRun(b, code(c.PrimaryLang), c.PrimaryText)
 		if strings.TrimSpace(c.SecondaryText) != "" {
-			writeTTMLRun(&b, c.SecondaryLang, c.SecondaryText)
+			writeTTMLRun(b, code(c.SecondaryLang), c.SecondaryText)
 		}
 		b.WriteString("      </p>\n")
 	}
 	b.WriteString("    </div>\n")
-	b.WriteString("  </body>\n")
-	b.WriteString("</tt>\n")
-	return b.String()
+}
+
+// ttmlLangGroup is one language's cues under the "divs" layout.
+type ttmlLangGroup struct {
+	lang string
+	ps   []string
+}
+
+// writeTTMLDivs writes one <div xml:lang> per language: primary languages in
+// order of first appearance, then secondary ones. A language with no text gets
+// no <div>.
+func writeTTMLDivs(b *strings.Builder, cues []BilingualCue, code func(string) string) {
+	var groups []*ttmlLangGroup
+	index := map[string]*ttmlLangGroup{}
+	group := func(lang string) *ttmlLangGroup {
+		lang = strings.TrimSpace(lang)
+		g, ok := index[lang]
+		if !ok {
+			g = &ttmlLangGroup{lang: lang}
+			index[lang] = g
+			groups = append(groups, g)
+		}
+		return g
+	}
+	for _, c := range cues {
+		if strings.TrimSpace(c.PrimaryText) != "" {
+			group(c.PrimaryLang)
+		}
+	}
+	for _, c := range cues {
+		for _, run := range [2][2]string{{c.PrimaryLang, c.PrimaryText}, {c.SecondaryLang, c.SecondaryText}} {
+			text := strings.TrimSpace(run[1])
+			if text == "" {
+				continue
+			}
+			g := group(run[0])
+			g.ps = append(g.ps, fmt.Sprintf("      <p begin=%q end=%q>%s</p>\n",
+				formatTimestampTTML(c.StartMS), formatTimestampTTML(c.EndMS), escapeTTMLText(text)))
+		}
+	}
+	for _, g := range groups {
+		if len(g.ps) == 0 {
+			continue
+		}
+		if g.lang != "" {
+			fmt.Fprintf(b, "    <div xml:lang=%q>\n", code(g.lang))
+		} else {
+			b.WriteString("    <div>\n")
+		}
+		for _, p := range g.ps {
+			b.WriteString(p)
+		}
+		b.WriteString("    </div>\n")
+	}
 }
 
 // writeTTMLRun writes one language-tagged text run as a <span xml:lang="..">

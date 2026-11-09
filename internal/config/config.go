@@ -1058,6 +1058,14 @@ type Config struct {
 	// segments ("chunk", default) or re-cut from word timings like VTT/SRT
 	// ("broadcast"), config `media.subtitles.ttml.segmentation`.
 	MediaSubtitlesTTMLSegmentation string
+	// MediaSubtitlesTTMLLayout arranges the languages of a TTML document: each a
+	// <span xml:lang> inside one <p> per cue ("spans", default) or each its own
+	// <div xml:lang> ("divs"), config `media.subtitles.ttml.layout`.
+	MediaSubtitlesTTMLLayout string
+	// MediaSubtitlesTTMLLanguageCodes renders every TTML xml:lang as the BCP 47
+	// tag ("bcp47", default) or the ISO 639-2 code ("iso639_2"), config
+	// `media.subtitles.ttml.language_codes`.
+	MediaSubtitlesTTMLLanguageCodes string
 
 	// The five media.subtitles.* keys below are the editorial cue-cleaning
 	// pipeline. They apply to EVERY exported subtitle format — VTT, SRT and TTML
@@ -1660,6 +1668,8 @@ type fileConfig struct {
 	MediaSubtitlesEmitSMILLanguageCodes *string
 	MediaSubtitlesEmitTTMLName          *string
 	MediaSubtitlesTTMLSegmentation      *string
+	MediaSubtitlesTTMLLayout            *string
+	MediaSubtitlesTTMLLanguageCodes     *string
 	MediaSubtitlesGlossary              []string
 	MediaSubtitlesDropPhrases           []string
 	MediaSubtitlesScrubPhrases          []string
@@ -1854,6 +1864,8 @@ type persistedConfig struct {
 	MediaSubtitlesEmitSMILLanguageCodes string        `yaml:"media_subtitles_emit_smil_language_codes"`
 	MediaSubtitlesEmitTTMLName          string        `yaml:"media_subtitles_emit_ttml_name"`
 	MediaSubtitlesTTMLSegmentation      string        `yaml:"media_subtitles_ttml_segmentation"`
+	MediaSubtitlesTTMLLayout            string        `yaml:"media_subtitles_ttml_layout"`
+	MediaSubtitlesTTMLLanguageCodes     string        `yaml:"media_subtitles_ttml_language_codes"`
 	MediaSubtitlesGlossary              []string      `yaml:"media_subtitles_glossary"`
 	MediaSubtitlesDropPhrases           []string      `yaml:"media_subtitles_drop_phrases"`
 	MediaSubtitlesScrubPhrases          []string      `yaml:"media_subtitles_scrub_phrases"`
@@ -2185,6 +2197,8 @@ func Default() Config {
 		MediaSubtitlesEmitSMILLanguageCodes: "bcp47",
 		MediaSubtitlesEmitTTMLName:          "group",
 		MediaSubtitlesTTMLSegmentation:      "chunk",
+		MediaSubtitlesTTMLLayout:            "spans",
+		MediaSubtitlesTTMLLanguageCodes:     "bcp47",
 		// Export-time cue cleaning (clean_srt.py port) is OFF by default: no
 		// glossary rewrites, no phrase drops, no repetition-collapse (< 2
 		// disables), no URL drop.
@@ -2359,6 +2373,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSubtitlesEmitSMILLanguageCodes: cfg.MediaSubtitlesEmitSMILLanguageCodes,
 		MediaSubtitlesEmitTTMLName:          cfg.MediaSubtitlesEmitTTMLName,
 		MediaSubtitlesTTMLSegmentation:      cfg.MediaSubtitlesTTMLSegmentation,
+		MediaSubtitlesTTMLLayout:            cfg.MediaSubtitlesTTMLLayout,
+		MediaSubtitlesTTMLLanguageCodes:     cfg.MediaSubtitlesTTMLLanguageCodes,
 		MediaSubtitlesGlossary:              append([]string(nil), cfg.MediaSubtitlesGlossary...),
 		MediaSubtitlesDropPhrases:           append([]string(nil), cfg.MediaSubtitlesDropPhrases...),
 		MediaSubtitlesScrubPhrases:          append([]string(nil), cfg.MediaSubtitlesScrubPhrases...),
@@ -3498,6 +3514,12 @@ func applyMediaSubtitlesSMILFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSubtitlesTTMLSegmentation != nil {
 		cfg.MediaSubtitlesTTMLSegmentation = *fc.MediaSubtitlesTTMLSegmentation
 	}
+	if fc.MediaSubtitlesTTMLLayout != nil {
+		cfg.MediaSubtitlesTTMLLayout = *fc.MediaSubtitlesTTMLLayout
+	}
+	if fc.MediaSubtitlesTTMLLanguageCodes != nil {
+		cfg.MediaSubtitlesTTMLLanguageCodes = *fc.MediaSubtitlesTTMLLanguageCodes
+	}
 }
 
 func applyMediaSubtitlesFileParsed(cfg *Config, fc fileConfig) {
@@ -4034,6 +4056,8 @@ var configKeyAliases = map[string]string{
 	"media_subtitles_emit_smil_language_codes": "media.subtitles.emit.smil_language_codes",
 	"media_subtitles_emit_ttml_name":           "media.subtitles.emit.ttml_name",
 	"media_subtitles_ttml_segmentation":        "media.subtitles.ttml.segmentation",
+	"media_subtitles_ttml_layout":              "media.subtitles.ttml.layout",
+	"media_subtitles_ttml_language_codes":      "media.subtitles.ttml.language_codes",
 	"media_subtitles_glossary":                 "media.subtitles.glossary",
 	"media_subtitles_drop_phrases":             "media.subtitles.drop_phrases",
 	"media_subtitles_scrub_phrases":            "media.subtitles.scrub_phrases",
@@ -4654,6 +4678,10 @@ func setMediaSubtitlesSMILStringFileScalar(cfg *fileConfig, key, value string) b
 		cfg.MediaSubtitlesEmitTTMLName = strPtr(value)
 	case "media.subtitles.ttml.segmentation":
 		cfg.MediaSubtitlesTTMLSegmentation = strPtr(value)
+	case "media.subtitles.ttml.layout":
+		cfg.MediaSubtitlesTTMLLayout = strPtr(value)
+	case "media.subtitles.ttml.language_codes":
+		cfg.MediaSubtitlesTTMLLanguageCodes = strPtr(value)
 	default:
 		return false
 	}
@@ -4989,6 +5017,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_subtitles_emit_smil_language_codes", cfg.MediaSubtitlesEmitSMILLanguageCodes)
 	writeScalar("media_subtitles_emit_ttml_name", cfg.MediaSubtitlesEmitTTMLName)
 	writeScalar("media_subtitles_ttml_segmentation", cfg.MediaSubtitlesTTMLSegmentation)
+	writeScalar("media_subtitles_ttml_layout", cfg.MediaSubtitlesTTMLLayout)
+	writeScalar("media_subtitles_ttml_language_codes", cfg.MediaSubtitlesTTMLLanguageCodes)
 	writeList("media_subtitles_glossary", cfg.MediaSubtitlesGlossary)
 	writeList("media_subtitles_drop_phrases", cfg.MediaSubtitlesDropPhrases)
 	writeList("media_subtitles_scrub_phrases", cfg.MediaSubtitlesScrubPhrases)
@@ -6103,6 +6133,8 @@ func (c *Config) validateMediaSubtitlesSMIL() error {
 		{"media.subtitles.emit.smil_language_codes", &c.MediaSubtitlesEmitSMILLanguageCodes, "bcp47", []string{"bcp47", "iso639_2"}},
 		{"media.subtitles.emit.ttml_name", &c.MediaSubtitlesEmitTTMLName, "group", []string{"group", "top_rendition"}},
 		{"media.subtitles.ttml.segmentation", &c.MediaSubtitlesTTMLSegmentation, "chunk", []string{"chunk", "broadcast"}},
+		{"media.subtitles.ttml.layout", &c.MediaSubtitlesTTMLLayout, "spans", []string{"spans", "divs"}},
+		{"media.subtitles.ttml.language_codes", &c.MediaSubtitlesTTMLLanguageCodes, "bcp47", []string{"bcp47", "iso639_2"}},
 	}
 	for _, e := range enums {
 		normalized, err := normalizeClosedEnum(e.key, *e.val, e.fallback, e.allowed)
