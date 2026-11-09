@@ -512,8 +512,10 @@ func withoutCoverage(text string, words []model.TimedWord, err error) (string, [
 // transcriber is text-only it transparently falls back to the single-pass decode.
 func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
 	windowMS := s.cfg.MediaTranslateWhisperWindowSec * 1000
+	capBytes := sttPayloadCapBytes(s.translateSTT)
+	overCap := capBytes > 0 && len(content) > capBytes
 	_, structured := s.translateSTT.(model.StructuredTranscriber)
-	if windowMS <= 0 || !structured || len(content) == 0 {
+	if (windowMS <= 0 && !overCap) || !structured || len(content) == 0 {
 		return s.translateStructured(ctx, doc, content)
 	}
 	tmpPath, cleanup, err := stageMediaTemp(content, filepath.Ext(doc.RelPath))
@@ -529,7 +531,13 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	// lands here too and degrades to the single pass, because a missing ffprobe must
 	// not fail a document that one request can still translate.
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
-	if totalMS <= windowMS {
+	// Audio over the provider's payload cap is decoded in windows small enough to
+	// fit, as the source transcription does (#954), whatever whisper_window_sec
+	// says; the configured window still applies when it is the smaller one.
+	if capWindow := translateCapWindowMS(overCap, totalMS, len(content), capBytes); capWindow > 0 && (windowMS <= 0 || capWindow < windowMS) {
+		windowMS = capWindow
+	}
+	if windowMS <= 0 || totalMS <= windowMS {
 		// translateStructured with the request sized to the whole recording (#962).
 		return s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.translateSTT, totalMS), doc.RelPath, content)
 	}
@@ -544,6 +552,15 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		return s.translateStructured(ctx, doc, content)
 	}
 	return text, words, err
+}
+
+// translateCapWindowMS is the decode window that keeps a translate request under
+// the provider's payload cap, or 0 when the audio fits or its duration is unknown.
+func translateCapWindowMS(overCap bool, totalMS, payloadBytes, capBytes int) int {
+	if !overCap || totalMS <= 0 {
+		return 0
+	}
+	return STTWindowMS(totalMS, payloadBytes, capBytes)
 }
 
 // decodeWindowedTranscript decodes the staged audio at tmpPath in overlapping

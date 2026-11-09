@@ -7253,7 +7253,21 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 		return string(cached), readCachedWords(wordsPath), nil
 	}
 
-	translated, words, err := s.translateStructuredWindowed(ctx, doc, content)
+	// Decode the same input the source transcription decodes: a video's demuxed
+	// audio track, not the container. Sending the whole video exceeded the
+	// provider's payload cap on any video over it (50 MB on the whisper server),
+	// so no English track was produced. The cache key above stays on the media
+	// bytes, so this extraction runs only on a cache miss.
+	relPath, audio, ok, err := s.transcriptInput(ctx, doc, content)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
+	}
+	if !ok {
+		return "", nil, nil // no audio track: nothing to translate
+	}
+	audioDoc := doc
+	audioDoc.RelPath = relPath
+	translated, words, err := s.translateStructuredWindowed(ctx, audioDoc, audio)
 	if err != nil {
 		// A whisper-translate decode is a TRANSLATION failure (§14.4 TRANSLATE_FAILED),
 		// not a transcript one — tag it with the translate sentinel directly so the
