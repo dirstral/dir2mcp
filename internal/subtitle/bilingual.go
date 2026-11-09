@@ -198,6 +198,22 @@ func MonolingualBilingualCues(cues []Cue, lang string) []BilingualCue {
 	return out
 }
 
+// SeparateLanguageCues lists the primary cues, then the secondary cues, each
+// with its own timing and no cross-language alignment: the input of a "divs"
+// TTML, where each language is its own track.
+func SeparateLanguageCues(primary, secondary []Cue, primaryLang, secondaryLang string) []BilingualCue {
+	out := make([]BilingualCue, 0, len(primary)+len(secondary))
+	for _, c := range primary {
+		out = append(out, BilingualCue{StartMS: c.StartMS, EndMS: c.EndMS, PrimaryLang: primaryLang,
+			PrimaryText: c.Text, Speaker: strings.TrimSpace(c.Speaker)})
+	}
+	for _, c := range secondary {
+		out = append(out, BilingualCue{StartMS: c.StartMS, EndMS: c.EndMS, SecondaryLang: secondaryLang,
+			SecondaryText: c.Text})
+	}
+	return out
+}
+
 // TTMLOptions selects how RenderTTMLWith arranges languages and writes their
 // tags (SPEC §8.6.10). The zero value is the default output of RenderTTML.
 type TTMLOptions struct {
@@ -224,9 +240,8 @@ func RenderTTML(cues []BilingualCue, docLang string) string {
 
 // RenderTTMLWith is RenderTTML with a layout and language-code choice. Under
 // the "divs" layout each language is a <div xml:lang> (primary first) holding
-// plain-text <p> cues; a cue keeps its begin/end in every <div> it has text
-// for. Players that build one caption track per language, such as Wowza,
-// need that layout.
+// plain-text <p> cues with each cue's own begin/end. Players that build one
+// caption track per language, such as Wowza, need that layout.
 func RenderTTMLWith(cues []BilingualCue, docLang string, opts TTMLOptions) string {
 	code := func(tag string) string { return LanguageCode(tag, opts.LanguageCodes) }
 	var b strings.Builder

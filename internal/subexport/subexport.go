@@ -427,8 +427,7 @@ func (r Renderer) RenderTTML(ctx context.Context, st Store, relPath, primaryLang
 		if serr != nil {
 			return "", "", serr
 		}
-		bilingual = subtitle.AlignBilingual(primary, secondary, resolved, resolvedSecondary,
-			r.cfg.MediaSubtitlesTTMLAlignToleranceMS)
+		bilingual = r.ttmlLanguageCues(primary, secondary, resolved, resolvedSecondary)
 	} else {
 		bilingual = subtitle.MonolingualBilingualCues(primary, resolved)
 	}
@@ -440,6 +439,20 @@ func (r Renderer) RenderTTML(ctx context.Context, st Store, relPath, primaryLang
 		LanguageCodes: r.cfg.MediaSubtitlesTTMLLanguageCodes,
 	}
 	return subtitle.RenderTTMLWith(bilingual, resolved, opts), resolved, nil
+}
+
+// ttmlLanguageCues pairs the two languages for TTML. The "divs" layout gives
+// each language its own <div>, which a player shows as its own track, so each
+// keeps its own cues and timings (as livevtt's TTML did); forcing the secondary
+// text onto primary cue windows there only moves a sentence into a neighbouring
+// cue when the two transcripts' timings differ by a second or two. The "spans"
+// layout shows both languages in one cue, so it aligns them (§8.6.10).
+func (r Renderer) ttmlLanguageCues(primary, secondary []subtitle.Cue, primaryLang, secondaryLang string) []subtitle.BilingualCue {
+	if strings.EqualFold(strings.TrimSpace(r.cfg.MediaSubtitlesTTMLLayout), "divs") {
+		return subtitle.SeparateLanguageCues(primary, secondary, primaryLang, secondaryLang)
+	}
+	return subtitle.AlignBilingual(primary, secondary, primaryLang, secondaryLang,
+		r.cfg.MediaSubtitlesTTMLAlignToleranceMS)
 }
 
 // ttmlSegmentation is the cue builder TTML uses: "chunk" unless

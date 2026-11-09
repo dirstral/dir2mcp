@@ -833,7 +833,10 @@ beside the media (an empty `emit.dir`) and its format among `emit.formats`.
 `<div xml:lang>` in the TTML and matches it to the languages the SMIL entry
 lists. The default layout (`spans`) puts both languages in each cue, so Wowza
 shows them together in one track and leaves the other track empty. With
-`divs`, each language is its own `<div>`. Set `ttml.language_codes` to the same
+`divs`, each language is its own `<div>` with that transcript's own cue
+timings, the way livevtt's TTML was. (Under `spans` the translation is aligned
+onto the source cues; under `divs` it is not, because a translation that runs a
+second behind would then land in the neighbouring cue.) Set `ttml.language_codes` to the same
 value as `emit.smil_language_codes` (`iso639_2` for Wowza) so each `<div>`
 matches a track. Both keys also apply to `dir2mcp export --format ttml` (SPEC §8.6.10).
 
