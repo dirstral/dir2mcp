@@ -546,7 +546,7 @@ const gitignoreFileName = ".gitignore"
 
 // documentStatusSkipped is the documents.status value for a discovered path
 // that ingest refused. It carries a model.SkipReason* in skip_reason.
-const documentStatusSkipped = "skipped"
+const documentStatusSkipped = string(model.DocumentStatusSkipped)
 
 // watchSkip says how the store must represent a path the watcher refuses.
 //

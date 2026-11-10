@@ -306,7 +306,7 @@ func (s *Service) emitSubtitles(ctx context.Context, doc model.Document) {
 	if !s.emitEnabled() || s.activePass == passTranscription {
 		return
 	}
-	if doc.DocID <= 0 || doc.Status != "ok" || !isSidecarMediaType(doc.DocType) {
+	if doc.DocID <= 0 || doc.Status != string(model.DocumentStatusOK) || !isSidecarMediaType(doc.DocType) {
 		return
 	}
 	ts, okTS := s.store.(subexport.Store)

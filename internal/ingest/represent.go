@@ -374,7 +374,7 @@ func (rg *RepresentationGenerator) GenerateMediaChunks(ctx context.Context, doc 
 				Ordinal:         i,
 				Text:            "",
 				IndexKind:       "text", // media shares the text vector space
-				EmbeddingStatus: "pending",
+				EmbeddingStatus: string(model.EmbeddingStatusPending),
 				Modality:        doc.DocType, // "image" | "pdf" | "audio" | "video"
 				MediaRef:        doc.RelPath,
 			}
@@ -415,9 +415,9 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 // late-chunking pooling step reads is the ordinal join (lateChunkInputs, SPEC
 // §8.1.9).
 func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStoreDoc(ctx context.Context, st model.RepresentationStore, repID int64, indexKind string, segments []chunkSegment, decision quarantineDecision, docText string) error {
-	embeddingStatus := "pending"
+	embeddingStatus := string(model.EmbeddingStatusPending)
 	if decision.quarantine {
-		embeddingStatus = "error"
+		embeddingStatus = string(model.EmbeddingStatusError)
 	}
 	// Contextual retrieval (SPEC §8.1.8, issue #330): resolve each chunk's
 	// document-aware context BEFORE the loop so the parent-document text is built

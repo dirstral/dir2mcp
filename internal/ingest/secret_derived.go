@@ -143,7 +143,7 @@ func (s *Service) withholdDocumentForSecret(ctx context.Context, doc model.Docum
 
 	s.retireDocumentRepresentations(ctx, doc.RelPath)
 
-	doc.Status = "secret_excluded"
+	doc.Status = string(model.DocumentStatusSecretExcluded)
 	doc.SkipReason = model.SkipReasonSecretExcluded
 	doc.Title = ""
 	doc.ErrorMessage = ""
@@ -273,13 +273,13 @@ func (s *Service) retireRepresentationsForPath(ctx context.Context, relPath, pol
 // index. The title is cleared for the same reason it is cleared on the withhold
 // path: it is derived text from a withheld document.
 func carrySecretExclusion(doc *model.Document, existing model.Document) {
-	if doc.Status != "ok" || existing.Status != "secret_excluded" {
+	if doc.Status != string(model.DocumentStatusOK) || existing.Status != string(model.DocumentStatusSecretExcluded) {
 		return
 	}
 	if existing.ContentHash == "" || existing.ContentHash != doc.ContentHash {
 		return
 	}
-	doc.Status = "secret_excluded"
+	doc.Status = string(model.DocumentStatusSecretExcluded)
 	doc.SkipReason = model.SkipReasonSecretExcluded
 	doc.Title = ""
 }
@@ -291,5 +291,5 @@ func carrySecretExclusion(doc *model.Document, existing model.Document) {
 // the freshly re-read row is STILL `secret_excluded`, so a status another path
 // wrote out of band is never resurrected into a done state.
 func (s *Service) finalizeSecretExcluded(ctx context.Context, doc *model.Document, contentHash string) error {
-	return s.finalizeContentHashForStatus(ctx, doc, contentHash, "secret_excluded")
+	return s.finalizeContentHashForStatus(ctx, doc, contentHash, string(model.DocumentStatusSecretExcluded))
 }

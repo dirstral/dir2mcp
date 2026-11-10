@@ -153,7 +153,7 @@ func (s *Service) buildSampledMediaDocument(ctx context.Context, f DiscoveredFil
 	// The secret scan of a media file only ever looks at a sample of its bytes
 	// (secretScanBytes → contentSample), which the head slice covers.
 	if hasSecretMatch(secretScanBytes(doc.DocType, read.head), secretPatterns) {
-		doc.Status = "secret_excluded"
+		doc.Status = string(model.DocumentStatusSecretExcluded)
 		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
 	return doc, read.content, nil

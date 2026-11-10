@@ -3173,7 +3173,7 @@ func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel st
 	upsertDoc := model.Document{
 		RelPath: normalizedRel, DocType: "audio", SourceType: "filesystem",
 		SizeBytes: info.Size(), MTimeUnix: info.ModTime().Unix(),
-		ContentHash: ingest.ComputeContentHash(content), Status: "ok", Deleted: false,
+		ContentHash: ingest.ComputeContentHash(content), Status: string(model.DocumentStatusOK), Deleted: false,
 	}
 	if err := s.store.UpsertDocument(ctx, upsertDoc); err != nil {
 		return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
@@ -4020,16 +4020,7 @@ func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string
 // future store adds, and inventing a public state for an unknown stored one
 // would be the same class of guess.
 func normalizeFileStatus(status string) string {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "skipped", "secret_excluded":
-		return "skipped"
-	case "pending":
-		return "pending"
-	case "error":
-		return "error"
-	default:
-		return "ok"
-	}
+	return model.ListFilesStatus(status)
 }
 
 // isListFilesNoisePath reports whether `list_files` hides a row when the caller

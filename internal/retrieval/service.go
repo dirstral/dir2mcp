@@ -2606,7 +2606,7 @@ func (s *Service) isSkippedDoc(ctx context.Context, relPath string) bool {
 		}
 		return false
 	}
-	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), "skipped")
+	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped))
 }
 
 // chunkModalityChecker is the optional store capability used to classify a
@@ -3251,10 +3251,10 @@ func collectStoreStatsFallback(ctx context.Context, st model.Store) (docStatusCo
 			counts[docType]++
 			totalDocs++
 
-			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
-			case "skipped":
+			switch model.DocumentStatus(strings.ToLower(strings.TrimSpace(doc.Status))) {
+			case model.DocumentStatusSkipped:
 				status.skipped++
-			case "error":
+			case model.DocumentStatusError:
 				status.errors++
 			default:
 				status.indexed++

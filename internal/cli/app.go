@@ -2555,12 +2555,13 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.
 				continue
 			}
 
-			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
-			case "indexed", "ok":
+			// "indexed" is a legacy spelling no writer produces; it stays accepted.
+			switch model.DocumentStatus(strings.ToLower(strings.TrimSpace(doc.Status))) {
+			case "indexed", model.DocumentStatusOK:
 				counts.Indexed++
-			case "skipped":
+			case model.DocumentStatusSkipped:
 				counts.Skipped++
-			case "error":
+			case model.DocumentStatusError:
 				counts.Errors++
 			default:
 				rawStatus := strings.TrimSpace(doc.Status)
