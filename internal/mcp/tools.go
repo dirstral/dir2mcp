@@ -67,6 +67,7 @@ var toolOrder = []string{
 	protocol.ToolNameOpenMediaClip,
 	protocol.ToolNameListFiles,
 	protocol.ToolNameStats,
+	protocol.ToolNameRecheckPath,
 }
 
 type toolHandler func(context.Context, map[string]interface{}) (toolCallResult, *toolExecutionError)
@@ -126,6 +127,24 @@ type voiceAwareTTSSynthesizer interface {
 }
 
 func (s *Server) buildToolRegistry() map[string]toolDefinition {
+	registry := s.buildCoreToolRegistry()
+	// dir2mcp_recheck_path is served only when the daemon handed the server a
+	// rechecker, i.e. it runs the file watcher and is not read-only (SPEC
+	// §15.13). Both tools/list paths read this map, so the tool is absent from
+	// both when it is not served.
+	if s.rechecker != nil {
+		registry[protocol.ToolNameRecheckPath] = toolDefinition{
+			Name:         protocol.ToolNameRecheckPath,
+			Description:  "Reconcile one file or directory under the corpus root now, instead of at the next periodic safety rescan.",
+			InputSchema:  recheckPathInputSchema(),
+			OutputSchema: recheckPathOutputSchema(),
+			handler:      s.handleRecheckPathTool,
+		}
+	}
+	return registry
+}
+
+func (s *Server) buildCoreToolRegistry() map[string]toolDefinition {
 	return map[string]toolDefinition{
 		protocol.ToolNameSearch: {
 			Name:         protocol.ToolNameSearch,
@@ -265,6 +284,9 @@ func (s *Server) processToolsCall(ctx context.Context, rawParams json.RawMessage
 
 	tool, ok := s.tools[params.Name]
 	if !ok {
+		if toolErr := s.unavailableToolError(params.Name); toolErr != nil {
+			return newToolErrorResult(*toolErr), http.StatusOK, nil
+		}
 		return newToolErrorResult(toolExecutionError{
 			Code:      "METHOD_NOT_FOUND",
 			Message:   fmt.Sprintf("unknown tool: %s", params.Name),

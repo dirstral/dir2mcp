@@ -18,6 +18,9 @@ const (
 	ToolNameTranscribeAndAsk = "dir2mcp_transcribe_and_ask"
 	ToolNameOpenMediaClip    = "dir2mcp_open_media_clip"
 	ToolNameRelated          = "dir2mcp_related"
+	// ToolNameRecheckPath is the optional §15.13 tool. It is served only when
+	// the server runs the file watcher and is not read-only.
+	ToolNameRecheckPath = "dir2mcp_recheck_path"
 )
 
 const (
@@ -32,7 +35,13 @@ const (
 	// support (bs-004; MCP 2025-11-25 transport).
 	ErrorCodeUnsupportedProtocolVersion = "UNSUPPORTED_PROTOCOL_VERSION"
 	ErrorCodeIndexNotReady              = "INDEX_NOT_READY"
-	ErrorCodeFileNotFound               = "FILE_NOT_FOUND"
+	// ErrorCodeToolUnavailable is the §14.3 code for a tool the spec defines
+	// but the running server does not serve in its current mode, for example
+	// dir2mcp_recheck_path without the file watcher or under --read-only
+	// (§15.13). Such a tool is also absent from tools/list. Non-retryable for
+	// the lifetime of the process.
+	ErrorCodeToolUnavailable = "TOOL_UNAVAILABLE"
+	ErrorCodeFileNotFound    = "FILE_NOT_FOUND"
 	// ErrorCodeForbidden is the canonical §14.2 code for a path or content
 	// blocked by policy (exclusion globs, secret-pattern match). Distinct from
 	// ErrorCodePermissionDenied, which is reserved for OS-level access failures.

@@ -175,6 +175,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// resolution.
 	serverOptions = append(serverOptions, mcp.WithCorpusFS(corpusFS))
 	serverOptions = appendExtractionProvenance(serverOptions, ing)
+	serverOptions = appendPathRechecker(serverOptions, cfg, opts.readOnly, ing)
 	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
 	wireIngestorHooks(ing, ingestorHooks{
 		indexingState: indexingState,
@@ -1697,6 +1698,24 @@ func appendExtractionProvenance(opts []mcp.ServerOption, ing model.Ingestor) []m
 		Engine:   engine,
 		OCRModel: ocrModel,
 	}))
+}
+
+// appendPathRechecker hands the MCP server the ingestor as the rechecker behind
+// dir2mcp_recheck_path (SPEC §15.13) when, and only when, this daemon will run
+// the file watcher: ingest.watch on, not read-only, and a source the watcher
+// can observe (local or nfs). The conditions mirror startWatchWorker and
+// ingest.SourceSupportsFileWatch, so the tool is served exactly when a watcher
+// exists to perform the reconcile. The decision is made once, here, so the
+// tool's availability is fixed for the lifetime of the process.
+func appendPathRechecker(opts []mcp.ServerOption, cfg config.Config, readOnly bool, ing model.Ingestor) []mcp.ServerOption {
+	if readOnly || !cfg.IngestWatch || !ingest.SourceSupportsFileWatch(cfg.Source.Kind) {
+		return opts
+	}
+	r, ok := ing.(ingest.PathRechecker)
+	if !ok {
+		return opts
+	}
+	return append(opts, mcp.WithPathRechecker(r))
 }
 
 // sourceIsRemote reports whether the configured corpus source is an object-store

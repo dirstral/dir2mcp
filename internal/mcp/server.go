@@ -31,6 +31,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/identity"
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
 	storepkg "github.com/dirstral/dir2mcp/internal/store"
@@ -125,6 +126,10 @@ type Server struct {
 	indexing  *appstate.IndexingState
 	tts       TTSSynthesizer
 	tools     map[string]toolDefinition
+	// rechecker serves dir2mcp_recheck_path (SPEC §15.13). Nil means the daemon
+	// runs no file watcher (watch off, read-only, or a remote source), and the
+	// tool is then absent from tools/list and TOOL_UNAVAILABLE on call.
+	rechecker ingest.PathRechecker
 
 	sessionMu sync.RWMutex
 	// sessions maps session IDs to metadata.  lastSeen is updated on each
@@ -382,6 +387,16 @@ type ExtractionProvenance struct {
 func WithExtractionProvenance(p ExtractionProvenance) ServerOption {
 	return func(s *Server) {
 		s.extraction = &p
+	}
+}
+
+// WithPathRechecker hands the server the file watcher's rechecker, which makes
+// it serve dir2mcp_recheck_path (SPEC §15.13). The daemon passes one only when
+// it runs the file watcher and is not read-only. Availability is decided here,
+// once, for the lifetime of the process. A nil rechecker leaves the tool off.
+func WithPathRechecker(r ingest.PathRechecker) ServerOption {
+	return func(s *Server) {
+		s.rechecker = r
 	}
 }
 

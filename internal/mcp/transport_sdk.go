@@ -548,6 +548,13 @@ func (t *SDKTransport) handleSDKToolsCall(w http.ResponseWriter, req *http.Reque
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	// A spec-defined tool this server does not serve is TOOL_UNAVAILABLE (SPEC
+	// §14.3, §15.13), not the SDK's unknown-tool protocol error. The SDK server
+	// never registered it, so the check has to run before dispatch.
+	if toolErr := t.server.unavailableToolErrorForParams(rawParams); toolErr != nil {
+		writeResult(w, http.StatusOK, id, newToolErrorResult(*toolErr))
+		return
+	}
 	if t.server.x402Enabled {
 		// The gated path never enters the SDK, so the SDK cannot cancel it.
 		// Register the call under (session, requestId) for exactly the window

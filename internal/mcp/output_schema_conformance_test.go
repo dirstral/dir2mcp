@@ -500,6 +500,29 @@ func TestAnnotateOutputSchemaConformance(t *testing.T) {
 	assertConforms(t, "annotate", annotateOutputSchema(), structured)
 }
 
+func TestRecheckPathOutputSchemaConformance(t *testing.T) {
+	for _, kind := range []string{"file", "directory", "missing"} {
+		structured := map[string]interface{}{
+			"rel_path": "docs/report.pdf",
+			"kind":     kind,
+			"queued":   true,
+			"pending":  1,
+		}
+		assertConforms(t, "recheck_path/"+kind, recheckPathOutputSchema(), structured)
+	}
+	// An undeclared field must be rejected: the schema is additionalProperties:false.
+	if errs := schemaErrors(recheckPathOutputSchema(), jsonRoundTrip(t, map[string]interface{}{
+		"rel_path": "a", "kind": "file", "queued": false, "pending": 0, "extra": true,
+	}), recheckPathOutputSchema(), "$"); len(errs) == 0 {
+		t.Fatal("recheck_path outputSchema accepted an undeclared field")
+	}
+	if errs := schemaErrors(recheckPathOutputSchema(), jsonRoundTrip(t, map[string]interface{}{
+		"rel_path": "a", "kind": "symlink", "queued": false, "pending": 0,
+	}), recheckPathOutputSchema(), "$"); len(errs) == 0 {
+		t.Fatal("recheck_path outputSchema accepted a kind outside the enum")
+	}
+}
+
 func TestStatsOutputSchemaConformance(t *testing.T) {
 	structured := map[string]interface{}{
 		"root":             "/corpus",

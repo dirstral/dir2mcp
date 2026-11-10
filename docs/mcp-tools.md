@@ -15,6 +15,43 @@
 | `dir2mcp_related` | Find chunks related to a chunk you already have |
 | `dir2mcp_list_files` | List indexed files with metadata |
 | `dir2mcp_stats` | Corpus statistics, including the extraction engine actually in use and the `evidence` thresholds in effect with their null baseline (see [configuration](configuration.md#relevance-floor-and-insufficient-evidence-abstention)) |
+| `dir2mcp_recheck_path` | Reconcile one file or directory under the root now (optional; served only in watch mode, see below) |
+
+### `dir2mcp_recheck_path` (optional)
+
+A server that runs the filesystem watcher (`ingest.watch: true` on a `local` or
+`nfs` source, not `--read-only`) also serves `dir2mcp_recheck_path`. A client
+that knows a path changed asks the server to reconcile that path now, instead
+of at the next periodic safety rescan. The typical case is an NFS corpus that
+another host writes to: the watcher gets no event for such a write (see
+[configuration](configuration.md#continuous-incremental-indexing-optional)).
+
+| Argument | Meaning |
+|---|---|
+| `rel_path` (required) | A path relative to the corpus root, with the grammar of `dir2mcp_open_file`'s `rel_path`. A file or a directory. `.` names the root |
+| `recursive` (default `true`) | For a directory, reconcile the whole subtree. With `false`, only the regular files that are its direct children. Ignored for a file |
+
+The call validates the path, stats it once, queues the reconcile and returns at
+once. It does not wait for ingestion. The response carries exactly four fields:
+
+| Field | Meaning |
+|---|---|
+| `rel_path` | the normalized path (`.` for the root) |
+| `kind` | what the stat found at call time: `file`, `directory` or `missing` |
+| `queued` | `true` when this call added a request; `false` when a request for the same path was already pending (the queue holds one per path; a recursive repeat makes a pending non-recursive request recursive) |
+| `pending` | the number of requests pending after this call |
+
+The watcher's worker then applies the rules of a filesystem event for the path
+as it finds it then: a changed file is re-indexed and an unchanged one is left
+alone; every file under a directory is reconciled and a document whose file is
+gone is tombstoned; a path that is still missing retires the document at it and
+every document under it; an excluded path (ignore list, `security.path_excludes`,
+`.gitignore`, secret patterns) is accepted and retired as ineligible.
+
+Errors: `MISSING_FIELD` (empty `rel_path`), `INVALID_FIELD`, `PATH_OUTSIDE_ROOT`.
+A server that does not run the watcher does not list the tool, and a call that
+names it anyway fails with `TOOL_UNAVAILABLE` (non-retryable for the lifetime of
+the process).
 
 ### What a citation carries
 
