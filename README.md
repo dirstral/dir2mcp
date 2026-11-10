@@ -228,6 +228,8 @@ Guides in this repo:
 - [Tunnels and reverse proxies](docs/deployment.md),
   [dual-machine deployment](docs/dual-machine-deployment.md) (GPU host, corpus
   on NFS or S3), [optional x402 request gating](docs/x402.md)
+- [State machines](docs/state-machines.md): document status and chunk
+  embedding status, generated from the code
 
 The normative specification lives in the
 [`dirstral-spec`](https://github.com/dirstral/dirstral-spec) submodule:

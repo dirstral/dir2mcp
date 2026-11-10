@@ -2606,7 +2606,7 @@ func (s *Service) isSkippedDoc(ctx context.Context, relPath string) bool {
 		}
 		return false
 	}
-	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), "skipped")
+	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped))
 }
 
 // chunkModalityChecker is the optional store capability used to classify a
@@ -3225,6 +3225,8 @@ func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
 	return base
 }
 
+// collectStoreStatsFallback counts the documents by status from the store when the
+// corpus stats query is not available.
 func collectStoreStatsFallback(ctx context.Context, st model.Store) (docStatusCounts, map[string]int64, int64, error) {
 	const pageSize = 500
 	offset := 0
@@ -3251,10 +3253,10 @@ func collectStoreStatsFallback(ctx context.Context, st model.Store) (docStatusCo
 			counts[docType]++
 			totalDocs++
 
-			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
-			case "skipped":
+			switch model.DocumentStatus(strings.ToLower(strings.TrimSpace(doc.Status))) {
+			case model.DocumentStatusSkipped:
 				status.skipped++
-			case "error":
+			case model.DocumentStatusError:
 				status.errors++
 			default:
 				status.indexed++

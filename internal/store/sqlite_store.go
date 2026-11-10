@@ -1092,6 +1092,8 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 	return s.initLocked(ctx)
 }
 
+// UpsertDocument inserts or replaces the document row keyed by rel_path. It writes
+// status, deleted, error_message and skip_reason without reading the previous row.
 func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) error {
 	relPath, err := normalizeRelPath(doc.RelPath)
 	if err != nil {
@@ -1104,6 +1106,10 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	}
 	defer s.ReleaseDB()
 
+	// Lifecycle hook: this is a blind upsert, so the previous status is not
+	// known here and the transition is not checked in the store. A caller that
+	// already holds the previous row records it (model.DocumentLifecycle).
+	//
 	// error_message is unconditionally overwritten by excluded.error_message
 	// so a successful re-ingest after a prior error clears the stale message
 	// (caller passes "" for healthy docs, the failure-recovery message
@@ -3708,8 +3714,9 @@ func SpanFromRow(kind string, start, end int, extraJSON string) model.Span {
 	return spanFromRow(kind, start, end, extraJSON)
 }
 
+// MarkEmbedded sets embedding_status to ok for the chunks with the given labels.
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
-	return s.markEmbeddingStatus(ctx, labels, "ok", "", "")
+	return s.markEmbeddingStatus(ctx, labels, model.EmbeddingStatusOK, "", "")
 }
 
 // HasFallbackContextChunks reports whether the document at relPath has any live
@@ -3752,7 +3759,7 @@ func (s *SQLiteStore) HasFallbackContextChunks(ctx context.Context, relPath stri
 // when an embedded chunk's vector is missing from a crash-recovered in-memory
 // index, restoring recall that would otherwise be silently lost.
 func (s *SQLiteStore) RependEmbeddedChunks(ctx context.Context, labels []uint64) error {
-	return s.markEmbeddingStatus(ctx, labels, "pending", "", "")
+	return s.markEmbeddingStatus(ctx, labels, model.EmbeddingStatusPending, "", "")
 }
 
 // MarkFailed retains its original signature for callers that have not
@@ -3761,7 +3768,7 @@ func (s *SQLiteStore) RependEmbeddedChunks(ctx context.Context, labels []uint64)
 // purposes). New call sites should prefer MarkFailedWithCategory so
 // the failure surfaces in dir2mcp status / doctor breakdowns.
 func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason string) error {
-	return s.markEmbeddingStatus(ctx, labels, "error", reason, "")
+	return s.markEmbeddingStatus(ctx, labels, model.EmbeddingStatusError, reason, "")
 }
 
 // MarkFailedWithCategory records a chunk-embedding failure together
@@ -3776,7 +3783,7 @@ func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason st
 // `store.(index.ChunkSource)` assertion in startEmbeddingIfNotReadOnly, which
 // disables the embed worker corpus-wide with no error (issue #364).
 func (s *SQLiteStore) MarkFailedWithCategory(ctx context.Context, labels []uint64, category, reason string) error {
-	return s.markEmbeddingStatus(ctx, labels, "error", reason, category)
+	return s.markEmbeddingStatus(ctx, labels, model.EmbeddingStatusError, reason, category)
 }
 
 func (s *SQLiteStore) UpsertMCPSession(ctx context.Context, sessionID string, created, lastSeen time.Time, authScope string) error {
@@ -4149,7 +4156,12 @@ func (s *SQLiteStore) ListMCPNonceLedger(ctx context.Context) ([]MCPNonceLedgerR
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, status, reason, category string) error {
+// markEmbeddingStatus writes one embedding status to every label. The UPDATE
+// does not read the old value, so the lifecycle transition hook cannot see the
+// from-state here without a new SELECT on the embed hot path; it records
+// nothing (see model.EmbeddingLifecycle and docs/state-machines.md).
+func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, target model.EmbeddingStatus, reason, category string) error {
+	status := string(target)
 	if len(labels) == 0 {
 		return nil
 	}
@@ -4397,22 +4409,10 @@ func normalizeRelPath(relPath string) (string, error) {
 	return normalized, nil
 }
 
+// normalizeStatus folds a raw document status into the persisted value. The
+// rule lives in model.NormalizeDocumentStatus (unknown folds to "ok").
 func normalizeStatus(status string) string {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "skipped":
-		return "skipped"
-	case "error":
-		return "error"
-	case "secret_excluded":
-		// A document withheld because it contains secrets is not "ok": it has
-		// zero searchable chunks and must persist faithfully so it stays
-		// visible as an audit signal (and is counted as skipped, not indexed).
-		return "secret_excluded"
-	case "pending":
-		return "pending"
-	default:
-		return "ok"
-	}
+	return string(model.NormalizeDocumentStatus(status))
 }
 
 func normalizeDocType(docType string) string {
@@ -4477,15 +4477,11 @@ func normalizeModality(modality string) string {
 	}
 }
 
+// normalizeEmbeddingStatus folds a raw chunk embedding status into the
+// persisted value. The rule lives in model.NormalizeEmbeddingStatus (unknown
+// folds to "pending").
 func normalizeEmbeddingStatus(status string) string {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ok":
-		return "ok"
-	case "error":
-		return "error"
-	default:
-		return "pending"
-	}
+	return string(model.NormalizeEmbeddingStatus(status))
 }
 
 // spanToRow flattens a span to its stored columns. extraJSON is the empty

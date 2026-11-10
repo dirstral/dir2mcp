@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/dirstral/dir2mcp/internal/model"
 )
 
 // embeddingFailureStamp returns the value to persist in
@@ -11,7 +13,7 @@ import (
 // failed row carries a timestamp; every other status clears it, so the column
 // never outlives the failure it describes (issue #783).
 func embeddingFailureStamp(status string, now time.Time) int64 {
-	if strings.TrimSpace(status) != "error" {
+	if strings.TrimSpace(status) != string(model.EmbeddingStatusError) {
 		return 0
 	}
 	return now.UTC().Unix()

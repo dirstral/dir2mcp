@@ -2246,7 +2246,7 @@ func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []D
 				s.notifyDocumentSkip(model.Document{
 					RelPath:    f.RelPath,
 					DocType:    ClassifyDocType(f.RelPath),
-					Status:     "skipped",
+					Status:     string(model.DocumentStatusSkipped),
 					SkipReason: model.SkipReasonPathExcluded,
 				})
 			}
@@ -2324,7 +2324,7 @@ func etagUnchanged(f DiscoveredFile, existing model.Document, forceReindex bool)
 	if strings.TrimSpace(f.ETag) == "" {
 		return false
 	}
-	if existing.Deleted || existing.Status == "error" {
+	if existing.Deleted || existing.Status == string(model.DocumentStatusError) {
 		return false
 	}
 	if strings.TrimSpace(existing.ETag) != strings.TrimSpace(f.ETag) {
@@ -2351,7 +2351,7 @@ func mediaStatUnchanged(f DiscoveredFile, existing model.Document, forceReindex 
 	if !isSidecarMediaType(ClassifyDocType(f.RelPath)) {
 		return false
 	}
-	if existing.Deleted || existing.Status == "error" {
+	if existing.Deleted || existing.Status == string(model.DocumentStatusError) {
 		return false
 	}
 	if f.MTimeUnix == 0 || existing.MTimeUnix == 0 {
@@ -2418,7 +2418,7 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	// derived. When the recorded derivation identity no longer matches, fall back
 	// to the full read/hash path so the stale representation is re-derived rather
 	// than silently skipped. Only meaningful for an existing ok document.
-	if existing.Status == "ok" && s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) {
+	if existing.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) {
 		return false, nil
 	}
 	s.skipUnchangedDocument(ctx, f, existing, seen)
@@ -2461,10 +2461,10 @@ func (s *Service) skipUnchangedDocument(ctx context.Context, f DiscoveredFile, e
 	// unchanged-content path. This is what lets write-back be enabled on an
 	// already-indexed archive and fill the files in without a reindex.
 	s.emitSubtitles(ctx, existing)
-	switch existing.Status {
-	case "ok":
+	switch model.DocumentStatus(existing.Status) {
+	case model.DocumentStatusOK:
 		s.addIndexed(1)
-	case "skipped", "secret_excluded":
+	case model.DocumentStatusSkipped, model.DocumentStatusSecretExcluded:
 		s.addSkipped(1)
 		s.notifyDocumentSkip(existing)
 	}
@@ -2486,7 +2486,7 @@ func (s *Service) persistBuildError(ctx context.Context, f DiscoveredFile, secre
 		SizeBytes:    f.SizeBytes,
 		MTimeUnix:    f.MTimeUnix,
 		ETag:         f.ETag,
-		Status:       "error",
+		Status:       string(model.DocumentStatusError),
 		Deleted:      false,
 		ErrorMessage: RedactSecretsInMessage(buildErr.Error(), secretPatterns),
 	}
@@ -2512,7 +2512,7 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex) {
 		return true
 	}
-	if existingDoc.Status == "error" {
+	if existingDoc.Status == string(model.DocumentStatusError) {
 		return true
 	}
 	// The classification changed on unchanged bytes: a classifier upgrade (an
@@ -2522,7 +2522,7 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if existingDoc.DocType != "" && existingDoc.DocType != doc.DocType {
 		return true
 	}
-	if doc.Status == "ok" && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
+	if doc.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
 		return true
 	}
 	return false
@@ -2545,6 +2545,9 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 	return fmt.Errorf("fetch document after upsert: %w", err)
 }
 
+// processDocument indexes one discovered file: it builds the document row from the
+// file's content, records the status transition, and generates the representations
+// of an ok document.
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
 	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
 	// flag. The scan loop is sequential (at most one asset in flight), so resetting
@@ -2622,6 +2625,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
+	s.observeDocumentTransition(existingDoc, doc)
 	// Report the hash the row now holds (#691). It is blank while the #402 done
 	// marker is withheld, which makes dedup forget the path for the duration of
 	// the reprocess instead of grouping on the previous content.
@@ -2646,7 +2650,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return s.handleArchiveDocumentAndNotify(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash)
 	}
 
-	if !needsProcessing || doc.Status != "ok" {
+	if !needsProcessing || doc.Status != string(model.DocumentStatusOK) {
 		// No representation work performed this run (cache hit / unchanged content
 		// / non-ok status): record it as skipped for the batch manifest (§8.6.11).
 		// An ok cache hit is still a durably-indexed document, so credit it.
@@ -2671,7 +2675,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
-		doc.Status = "error"
+		doc.Status = string(model.DocumentStatusError)
 		doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
@@ -2750,7 +2754,7 @@ func (s *Service) settleProcessedDocument(
 // stamped only after the reps commit (see finalizeContentHash); it returns the
 // original hash to finalize with and whether withholding applied.
 func withholdContentHash(doc *model.Document, needsProcessing bool) (finalContentHash string, willGenerateReps bool) {
-	willGenerateReps = needsProcessing && doc.Status == "ok" && doc.DocType != "archive"
+	willGenerateReps = needsProcessing && doc.Status == string(model.DocumentStatusOK) && doc.DocType != "archive"
 	finalContentHash = doc.ContentHash
 	if willGenerateReps {
 		doc.ContentHash = ""
@@ -2812,7 +2816,7 @@ func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, 
 // columns) after the #413 guard; not-found → recreate the row from doc (there is
 // no current row whose columns must be preserved); store error → propagate.
 func (s *Service) finalizeContentHash(ctx context.Context, doc *model.Document, contentHash string) error {
-	return s.finalizeContentHashForStatus(ctx, doc, contentHash, "ok")
+	return s.finalizeContentHashForStatus(ctx, doc, contentHash, string(model.DocumentStatusOK))
 }
 
 // finalizeContentHashForStatus is finalizeContentHash generalized over the
@@ -2849,6 +2853,7 @@ func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.D
 	if err := s.store.UpsertDocument(ctx, current); err != nil {
 		return fmt.Errorf("finalize document content hash: %w", err)
 	}
+	s.observeDocumentTransition(current, current)
 	// The done marker is durable now, so the group key is safe to publish (#691).
 	s.notifyDocumentContentHash(current.RelPath, current.ContentHash)
 	return nil
@@ -2862,10 +2867,10 @@ func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.D
 // only past the exit points where no rep work can still fail) and terminal (a
 // terminal status already fully counted, so processDocument should return early).
 func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, terminal bool) {
-	switch doc.Status {
-	case "ok":
+	switch model.DocumentStatus(doc.Status) {
+	case model.DocumentStatusOK:
 		return true, false
-	case "skipped", "secret_excluded":
+	case model.DocumentStatusSkipped, model.DocumentStatusSecretExcluded:
 		s.addSkipped(1)
 		// A file skipped because it classified as a non-textual binary carries the
 		// canonical §14.4 BINARY_SKIPPED code on its manifest entry; every other
@@ -2887,7 +2892,7 @@ func (s *Service) creditInitialStatus(doc model.Document) (indexedPending, termi
 			s.notifyDocumentSkip(doc)
 		}
 		return false, false
-	case "error":
+	case model.DocumentStatusError:
 		// although buildDocumentWithContent will never return a document with
 		// Status="error" (the error case returns early in processDocument), we
 		// leave this branch in place as a defensive measure. future changes to
@@ -2960,7 +2965,7 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	}
 	// A document the transcription pass did not record as a healthy media asset has
 	// no source transcript to translate or to write back; skip it.
-	if isNotFoundError(err) || doc.Status != "ok" {
+	if isNotFoundError(err) || doc.Status != string(model.DocumentStatusOK) {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -3138,7 +3143,7 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 			// itself as status="error" so it is durably visible via status queries and
 			// retried on the next incremental run, mirroring the representation-failure
 			// path in processDocument.
-			doc.Status = "error"
+			doc.Status = string(model.DocumentStatusError)
 			doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 			if upErr := s.store.UpsertDocument(ctx, doc); upErr != nil {
 				// Log and continue, mirroring persistNonFatalDocError: the original
@@ -3174,7 +3179,7 @@ func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document,
 		// next scan re-extracts instead of skipping on a premature marker. The
 		// container persists as status="skipped", so finalize preserves that healthy
 		// status.
-		if err := s.finalizeContentHashForStatus(ctx, &doc, finalContentHash, "skipped"); err != nil {
+		if err := s.finalizeContentHashForStatus(ctx, &doc, finalContentHash, string(model.DocumentStatusSkipped)); err != nil {
 			return err
 		}
 	} else if seen != nil {
@@ -3377,7 +3382,7 @@ func (s *Service) persistArchiveMemberSizeCapSkips(ctx context.Context, f Discov
 			// The size the archive declared, or 0 when the format declares none.
 			// Zero means "unknown", never "empty".
 			SizeBytes:  ex.SizeBytes,
-			Status:     "skipped",
+			Status:     string(model.DocumentStatusSkipped),
 			SkipReason: model.SkipReasonSizeCap,
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
@@ -3490,15 +3495,15 @@ func buildArchiveMemberDocument(
 		SizeBytes:   int64(len(content)),
 		MTimeUnix:   mtimeUnix,
 		ContentHash: computeContentHash(content),
-		Status:      "ok",
+		Status:      string(model.DocumentStatusOK),
 	}
 	if skipExtraction {
-		doc.Status = "skipped"
+		doc.Status = string(model.DocumentStatusSkipped)
 		doc.SkipReason = skipReasonForDocType(docType)
 		return doc
 	}
 	if hasSecretMatch(secretScanBytes(docType, content), secretPatterns) {
-		doc.Status = "secret_excluded"
+		doc.Status = string(model.DocumentStatusSecretExcluded)
 		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
 	return doc
@@ -3541,6 +3546,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
+	s.observeDocumentTransition(existingDoc, doc)
 	// Same live-dedup report as processDocument, for an archive member (#691).
 	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
 	if updated, err := s.store.GetDocumentByPath(ctx, relPath); err == nil {
@@ -3549,7 +3555,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		return fmt.Errorf("fetch document after upsert: %w", err)
 	}
 
-	if !needsProcessing || doc.Status != "ok" {
+	if !needsProcessing || doc.Status != string(model.DocumentStatusOK) {
 		return nil
 	}
 	// Archive members are not credited to the run's indexed counter here (the
@@ -3559,7 +3565,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
-		doc.Status = "error"
+		doc.Status = string(model.DocumentStatusError)
 		doc.ErrorMessage = RedactSecretsInMessage(err.Error(), secretPatterns)
 		_ = s.store.UpsertDocument(ctx, doc)
 		return fmt.Errorf("generate representations: %w", err)
@@ -3577,6 +3583,8 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	return nil
 }
 
+// buildDocumentWithContent reads the file's content and returns its document row,
+// with the status (ok, skipped or secret_excluded) and the content hash.
 func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
 	docType := ClassifyDocType(f.RelPath)
 	doc := model.Document{
@@ -3588,7 +3596,7 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 		// so a later incremental scan can skip the re-read when it is unchanged
 		// (SPEC §7.8.3, #245). content_hash below stays the canonical identity.
 		ETag:    f.ETag,
-		Status:  "ok",
+		Status:  string(model.DocumentStatusOK),
 		Deleted: false,
 	}
 	// SPEC §7.6 sampled media identity: hash slices, not the whole file, and
@@ -3629,13 +3637,13 @@ func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile
 	// .env variants) is also treated as skipped so that they never
 	// enter the pipeline.
 	if docType == "archive" || docType == "binary_ignored" || docType == "ignore" {
-		doc.Status = "skipped"
+		doc.Status = string(model.DocumentStatusSkipped)
 		doc.SkipReason = skipReasonForDocType(docType)
 		return doc, content, nil
 	}
 
 	if hasSecretMatch(secretScanBytes(docType, content), secretPatterns) {
-		doc.Status = "secret_excluded"
+		doc.Status = string(model.DocumentStatusSecretExcluded)
 		doc.SkipReason = model.SkipReasonSecretExcluded
 	}
 
@@ -3674,7 +3682,7 @@ func (s *Service) sizeCapSkippedDocument(doc model.Document, f DiscoveredFile) m
 		"ingest: skipping %s: its bytes passed the ingest.max_file_mb cap (%d bytes) during the read, although discovery measured %d bytes; recorded as a size_cap skip. Raise ingest.max_file_mb to include it",
 		f.RelPath, s.sourceReadCapBytes(), f.SizeBytes,
 	)
-	doc.Status = "skipped"
+	doc.Status = string(model.DocumentStatusSkipped)
 	doc.SkipReason = model.SkipReasonSizeCap
 	doc.SizeBytes = 0
 	doc.ContentHash = ""
@@ -3689,7 +3697,7 @@ func (s *Service) sizeCapSkippedDocument(doc model.Document, f DiscoveredFile) m
 // it is deliberately narrow: no other builder pairs status="skipped" with
 // skip_reason="size_cap".
 func isSizeCapSkip(doc model.Document) bool {
-	return doc.Status == "skipped" && doc.SkipReason == model.SkipReasonSizeCap
+	return doc.Status == string(model.DocumentStatusSkipped) && doc.SkipReason == model.SkipReasonSizeCap
 }
 
 // settleSizeCapSkip is the whole terminal handling of a document whose SOURCE READ
@@ -3869,7 +3877,7 @@ func (s *Service) persistOversizeSkips(ctx context.Context, oversize map[string]
 			RelPath:    relPath,
 			DocType:    ClassifyDocType(relPath),
 			SizeBytes:  size,
-			Status:     "skipped",
+			Status:     string(model.DocumentStatusSkipped),
 			SkipReason: model.SkipReasonSizeCap,
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
@@ -3906,7 +3914,7 @@ func (s *Service) persistSymlinkSkips(ctx context.Context, symlinks map[string]s
 		doc := model.Document{
 			RelPath:    relPath,
 			DocType:    ClassifyDocType(relPath),
-			Status:     "skipped",
+			Status:     string(model.DocumentStatusSkipped),
 			SkipReason: model.SkipReasonSymlinkIgnored,
 		}
 		if err := s.store.UpsertDocument(ctx, doc); err != nil {
@@ -4936,7 +4944,7 @@ func (s *Service) retireStaleSidecarTranscripts(ctx context.Context, doc model.D
 // is the more actionable signal, mirroring the generateRepresentations error
 // path. The live error counter is incremented separately by the caller.
 func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Document, cause error, secretPatterns []*regexp.Regexp) {
-	doc.Status = "error"
+	doc.Status = string(model.DocumentStatusError)
 	doc.ErrorMessage = RedactSecretsInMessage(cause.Error(), secretPatterns)
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("persist error status for %s: %v", doc.RelPath, err)
@@ -4960,7 +4968,7 @@ func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Documen
 // still fires even if the upsert failed — the stream event is the only signal a
 // `--json` consumer will see for it.
 func (s *Service) persistNonFatalDocSkip(ctx context.Context, doc model.Document, reason string) {
-	doc.Status = "skipped"
+	doc.Status = string(model.DocumentStatusSkipped)
 	doc.SkipReason = reason
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("persist skipped status for %s: %v", doc.RelPath, err)
@@ -5023,7 +5031,7 @@ func (s *Service) notifyDocumentSkip(doc model.Document) {
 	}
 	reason := doc.SkipReason
 	if strings.TrimSpace(reason) == "" {
-		if doc.Status == "secret_excluded" {
+		if doc.Status == string(model.DocumentStatusSecretExcluded) {
 			reason = model.SkipReasonSecretExcluded
 		} else {
 			reason = skipReasonForDocType(doc.DocType)
