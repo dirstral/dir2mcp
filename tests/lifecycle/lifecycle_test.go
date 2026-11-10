@@ -17,6 +17,8 @@ import (
 // store.normalizeEmbeddingStatus, mcp.normalizeFileStatus). The tests run the
 // old and the new rule side by side, so any change of fold behaviour fails.
 
+// oldNormalizeStatus is a verbatim copy of the store's normalizeStatus before the
+// typed states, kept to prove the new function folds every input the same way.
 func oldNormalizeStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "skipped":
@@ -32,6 +34,8 @@ func oldNormalizeStatus(status string) string {
 	}
 }
 
+// oldNormalizeEmbeddingStatus is a verbatim copy of the store's
+// normalizeEmbeddingStatus before the typed states.
 func oldNormalizeEmbeddingStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "ok":
@@ -43,6 +47,8 @@ func oldNormalizeEmbeddingStatus(status string) string {
 	}
 }
 
+// oldNormalizeFileStatus is a verbatim copy of the list_files status projection
+// before the typed states.
 func oldNormalizeFileStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "skipped", "secret_excluded":
@@ -64,6 +70,7 @@ var statusInputs = []string{
 	"indexed", "embedded", "deleted", "unknown", "ok ok", "skip", "errors", "\nerror\n",
 }
 
+// TestDocumentStatus_ConstantValues pins the string value of every document status.
 func TestDocumentStatus_ConstantValues(t *testing.T) {
 	want := map[model.DocumentStatus]string{
 		model.DocumentStatusOK:             "ok",
@@ -87,6 +94,7 @@ func TestDocumentStatus_ConstantValues(t *testing.T) {
 	}
 }
 
+// TestEmbeddingStatus_ConstantValues pins the string value of every embedding status.
 func TestEmbeddingStatus_ConstantValues(t *testing.T) {
 	want := map[model.EmbeddingStatus]string{
 		model.EmbeddingStatusOK:      "ok",
@@ -103,6 +111,7 @@ func TestEmbeddingStatus_ConstantValues(t *testing.T) {
 	}
 }
 
+// TestNormalizeDocumentStatus_MatchesOldRule checks the new fold against the old one.
 func TestNormalizeDocumentStatus_MatchesOldRule(t *testing.T) {
 	for _, in := range statusInputs {
 		got := string(model.NormalizeDocumentStatus(in))
@@ -115,6 +124,7 @@ func TestNormalizeDocumentStatus_MatchesOldRule(t *testing.T) {
 	}
 }
 
+// TestNormalizeEmbeddingStatus_MatchesOldRule checks the new fold against the old one.
 func TestNormalizeEmbeddingStatus_MatchesOldRule(t *testing.T) {
 	for _, in := range statusInputs {
 		got := string(model.NormalizeEmbeddingStatus(in))
@@ -127,6 +137,8 @@ func TestNormalizeEmbeddingStatus_MatchesOldRule(t *testing.T) {
 	}
 }
 
+// TestListFilesStatus_MatchesOldProjection checks the list_files projection against
+// the old one.
 func TestListFilesStatus_MatchesOldProjection(t *testing.T) {
 	enum := map[string]bool{}
 	for _, v := range model.ListFilesStatusEnum {
@@ -154,6 +166,8 @@ func TestLifecycleTables_WellFormed(t *testing.T) {
 	checkTable(t, model.EmbeddingLifecycle)
 }
 
+// checkTable checks that a transition table is well formed: known states, a Via note
+// on every edge and no orphan notes.
 func checkTable[S ~string](t *testing.T, tbl lifecycle.Table[S]) {
 	t.Helper()
 	listed := map[lifecycle.Edge]bool{}
@@ -205,6 +219,8 @@ func TestDocumentLifecycle_WritersAreListed(t *testing.T) {
 	}
 }
 
+// TestEmbeddingLifecycle_WritersAreListed checks that every embedding status the code
+// writes is a listed transition.
 func TestEmbeddingLifecycle_WritersAreListed(t *testing.T) {
 	tbl := model.EmbeddingLifecycle
 	for _, to := range []model.EmbeddingStatus{model.EmbeddingStatusPending, model.EmbeddingStatusError} {
@@ -224,6 +240,7 @@ func TestEmbeddingLifecycle_WritersAreListed(t *testing.T) {
 	}
 }
 
+// TestTable_GenericHelper checks the generic table helper and its log line.
 func TestTable_GenericHelper(t *testing.T) {
 	type st string
 	tbl := lifecycle.Table[st]{

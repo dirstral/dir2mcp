@@ -3134,6 +3134,8 @@ func (s *Server) lookupOrInitAudioDocumentForTool(ctx context.Context, relPath s
 	return s.initAudioDocumentOnDemand(ctx, strings.TrimSpace(relPath))
 }
 
+// initAudioDocumentOnDemand creates the document row for an audio file that
+// dir2mcp_transcribe is asked about before any scan has indexed it.
 func (s *Server) initAudioDocumentOnDemand(ctx context.Context, normalizedRel string) (model.Document, *toolExecutionError) {
 	if ingest.ClassifyDocType(normalizedRel) != "audio" {
 		return model.Document{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}

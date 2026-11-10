@@ -58,6 +58,7 @@ func StateMachinesMarkdown() string {
 	return b.String()
 }
 
+// writeStates writes the states to b as a comma-separated list of code spans.
 func writeStates[S ~string](b *strings.Builder, states []S) {
 	b.WriteString("States: ")
 	names := make([]string, 0, len(states))
@@ -68,6 +69,7 @@ func writeStates[S ~string](b *strings.Builder, states []S) {
 	b.WriteString(".\n")
 }
 
+// writeCodeList writes values to b as a comma-separated list of code spans.
 func writeCodeList(b *strings.Builder, values []string) {
 	for i, v := range values {
 		if i > 0 {

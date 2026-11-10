@@ -2545,6 +2545,9 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 	return fmt.Errorf("fetch document after upsert: %w", err)
 }
 
+// processDocument indexes one discovered file: it builds the document row from the
+// file's content, records the status transition, and generates the representations
+// of an ok document.
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
 	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
 	// flag. The scan loop is sequential (at most one asset in flight), so resetting
@@ -3580,6 +3583,8 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	return nil
 }
 
+// buildDocumentWithContent reads the file's content and returns its document row,
+// with the status (ok, skipped or secret_excluded) and the content hash.
 func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
 	docType := ClassifyDocType(f.RelPath)
 	doc := model.Document{

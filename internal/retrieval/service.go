@@ -3225,6 +3225,8 @@ func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
 	return base
 }
 
+// collectStoreStatsFallback counts the documents by status from the store when the
+// corpus stats query is not available.
 func collectStoreStatsFallback(ctx context.Context, st model.Store) (docStatusCounts, map[string]int64, int64, error) {
 	const pageSize = 500
 	offset := 0

@@ -1092,6 +1092,8 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 	return s.initLocked(ctx)
 }
 
+// UpsertDocument inserts or replaces the document row keyed by rel_path. It writes
+// status, deleted, error_message and skip_reason without reading the previous row.
 func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) error {
 	relPath, err := normalizeRelPath(doc.RelPath)
 	if err != nil {
@@ -3712,6 +3714,7 @@ func SpanFromRow(kind string, start, end int, extraJSON string) model.Span {
 	return spanFromRow(kind, start, end, extraJSON)
 }
 
+// MarkEmbedded sets embedding_status to ok for the chunks with the given labels.
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
 	return s.markEmbeddingStatus(ctx, labels, model.EmbeddingStatusOK, "", "")
 }
