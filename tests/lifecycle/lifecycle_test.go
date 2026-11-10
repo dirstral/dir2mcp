@@ -111,50 +111,53 @@ func TestEmbeddingStatus_ConstantValues(t *testing.T) {
 	}
 }
 
-// TestNormalizeDocumentStatus_MatchesOldRule checks the new fold against the old one.
-func TestNormalizeDocumentStatus_MatchesOldRule(t *testing.T) {
-	for _, in := range statusInputs {
-		got := string(model.NormalizeDocumentStatus(in))
-		if want := oldNormalizeStatus(in); got != want {
-			t.Errorf("NormalizeDocumentStatus(%q) = %q, old rule %q", in, got, want)
-		}
-		if !model.DocumentLifecycle.Valid(model.DocumentStatus(got)) {
-			t.Errorf("NormalizeDocumentStatus(%q) = %q is not a table state", in, got)
-		}
+// TestStatusFolds_MatchOldRules checks each new status fold against the rule it
+// replaced, and checks that every result is a state of its table or enum.
+func TestStatusFolds_MatchOldRules(t *testing.T) {
+	if got := strings.Join(model.ListFilesStatusEnum, ","); got != "ok,skipped,pending,error" {
+		t.Fatalf("ListFilesStatusEnum = %s, want ok,skipped,pending,error", got)
 	}
-}
-
-// TestNormalizeEmbeddingStatus_MatchesOldRule checks the new fold against the old one.
-func TestNormalizeEmbeddingStatus_MatchesOldRule(t *testing.T) {
-	for _, in := range statusInputs {
-		got := string(model.NormalizeEmbeddingStatus(in))
-		if want := oldNormalizeEmbeddingStatus(in); got != want {
-			t.Errorf("NormalizeEmbeddingStatus(%q) = %q, old rule %q", in, got, want)
-		}
-		if !model.EmbeddingLifecycle.Valid(model.EmbeddingStatus(got)) {
-			t.Errorf("NormalizeEmbeddingStatus(%q) = %q is not a table state", in, got)
-		}
-	}
-}
-
-// TestListFilesStatus_MatchesOldProjection checks the list_files projection against
-// the old one.
-func TestListFilesStatus_MatchesOldProjection(t *testing.T) {
 	enum := map[string]bool{}
 	for _, v := range model.ListFilesStatusEnum {
 		enum[v] = true
 	}
-	if got := strings.Join(model.ListFilesStatusEnum, ","); got != "ok,skipped,pending,error" {
-		t.Fatalf("ListFilesStatusEnum = %s, want ok,skipped,pending,error", got)
+	cases := []struct {
+		name  string
+		old   func(string) string
+		new   func(string) string
+		valid func(string) bool
+	}{
+		{
+			name:  "document",
+			old:   oldNormalizeStatus,
+			new:   func(s string) string { return string(model.NormalizeDocumentStatus(s)) },
+			valid: func(s string) bool { return model.DocumentLifecycle.Valid(model.DocumentStatus(s)) },
+		},
+		{
+			name:  "embedding",
+			old:   oldNormalizeEmbeddingStatus,
+			new:   func(s string) string { return string(model.NormalizeEmbeddingStatus(s)) },
+			valid: func(s string) bool { return model.EmbeddingLifecycle.Valid(model.EmbeddingStatus(s)) },
+		},
+		{
+			name:  "list_files",
+			old:   oldNormalizeFileStatus,
+			new:   model.ListFilesStatus,
+			valid: func(s string) bool { return enum[s] },
+		},
 	}
-	for _, in := range statusInputs {
-		got := model.ListFilesStatus(in)
-		if want := oldNormalizeFileStatus(in); got != want {
-			t.Errorf("ListFilesStatus(%q) = %q, old projection %q", in, got, want)
-		}
-		if !enum[got] {
-			t.Errorf("ListFilesStatus(%q) = %q is outside the schema enum", in, got)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, in := range statusInputs {
+				got := tc.new(in)
+				if want := tc.old(in); got != want {
+					t.Errorf("%s(%q) = %q, old rule %q", tc.name, in, got, want)
+				}
+				if !tc.valid(got) {
+					t.Errorf("%s(%q) = %q is not a valid state", tc.name, in, got)
+				}
+			}
+		})
 	}
 }
 
