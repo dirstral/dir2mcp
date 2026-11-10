@@ -354,6 +354,12 @@ type Service struct {
 	// protects reads/writes of logger when set during runtime.
 	loggerMu sync.RWMutex
 
+	// recheckLoop is the live file-watch loop that RecheckPath forwards to
+	// (SPEC §15.13). Watch publishes it while its worker runs and withdraws it
+	// on exit; nil means no watcher is running. Guarded by recheckMu.
+	recheckLoop *fsWatchLoop
+	recheckMu   sync.RWMutex
+
 	// optional cache policy for OCR results. maxBytes bounds the total
 	// bytes of files kept in the on‑disk cache; zero disables size pruning.
 	// ttl, if non‑zero, causes files older than the duration to be removed.

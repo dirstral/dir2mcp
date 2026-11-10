@@ -153,6 +153,7 @@ func (s *Service) Watch(ctx context.Context) error {
 		debounce: debounce,
 		pending:  make(map[string]*time.Timer),
 		fire:     make(chan watchJob, watchJobQueueCapacity),
+		rechecks: newRecheckQueue(),
 	}
 	return w.run(ctx)
 }
@@ -215,6 +216,11 @@ type fsWatchLoop struct {
 	pending map[string]*time.Timer
 	fire    chan watchJob
 
+	// rechecks holds the dir2mcp_recheck_path requests (SPEC §15.13) until the
+	// worker starts each reconcile. Nil in a loop built without one (tests that
+	// drive process directly); the worker then never wakes for a recheck.
+	rechecks *recheckQueue
+
 	// dropMu guards the queue-saturation report state below. It is a separate
 	// lock from mu on purpose: mu serializes the debounce timer map, and a drop
 	// is recorded from inside a fired timer, after that map entry is gone.
@@ -247,6 +253,10 @@ func (w *fsWatchLoop) run(ctx context.Context) error {
 	// A watcher is now running: let the stats surface report watch_overflows
 	// (even 0) rather than omitting it as "not applicable" (#591).
 	w.svc.indexingState.MarkWatchActive()
+	// Publish the loop to Service.RecheckPath for exactly the span in which a
+	// worker exists to serve a request (SPEC §15.13).
+	w.svc.setRecheckLoop(w)
+	defer w.svc.setRecheckLoop(nil)
 
 	workerDone := make(chan struct{})
 	go w.worker(ctx, rescanReq, workerDone)
@@ -310,6 +320,15 @@ func (w *fsWatchLoop) worker(ctx context.Context, rescanReq <-chan struct{}, don
 			return
 		case job := <-w.fire:
 			w.process(ctx, job)
+		case <-w.recheckSignal():
+			// One request per wake-up, so a queue of rechecks takes turns with
+			// the event jobs and the rescans instead of starving them.
+			if req, ok := w.rechecks.pop(); ok {
+				w.processRecheck(ctx, req)
+				if w.rechecks.size() > 0 {
+					w.rechecks.wake()
+				}
+			}
 		case <-rescanReq:
 			dropped := w.reportDropsUnderReconcile()
 			if err := w.svc.runScan(ctx); err != nil && ctx.Err() == nil {
@@ -321,6 +340,16 @@ func (w *fsWatchLoop) worker(ctx context.Context, rescanReq <-chan struct{}, don
 			}
 		}
 	}
+}
+
+// recheckSignal returns the channel that wakes the worker for a pending
+// recheck. A loop built without a queue returns nil, and a nil channel never
+// fires in a select.
+func (w *fsWatchLoop) recheckSignal() <-chan struct{} {
+	if w.rechecks == nil {
+		return nil
+	}
+	return w.rechecks.signal
 }
 
 // handleEvent classifies a raw fsnotify event and (re)arms the per-path
@@ -360,7 +389,14 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 	// Regular files already present in the new tree are armed for indexing;
 	// discovery filters are applied later in process().
 	armFile := func(path string) { w.arm(path, false) }
+	w.walkTree(absDir, addDir, armFile)
+}
 
+// walkTree visits every non-skipped directory under absDir (onDir) and every
+// regular file in them (onFile), under the symlink policy of the discovery
+// walker. registerNewTree and the recursive recheck of a directory (SPEC
+// §15.13) share it, so the two cover the same set of files.
+func (w *fsWatchLoop) walkTree(absDir string, onDir, onFile func(string)) {
 	// With symlink following on, descend symlinked subdirectories too so the
 	// watch coverage matches the discovery walker (internal/corpusfs/local.go),
 	// which follows them when IngestFollowSymlinks is set. The default (off) path
@@ -378,7 +414,7 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 			)
 			return
 		}
-		walkWatchTree(absDir, rootResolved, w.excluded, map[string]struct{}{}, addDir, armFile)
+		walkWatchTree(absDir, rootResolved, w.excluded, map[string]struct{}{}, onDir, onFile)
 		return
 	}
 	_ = filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
@@ -389,10 +425,10 @@ func (w *fsWatchLoop) registerNewTree(absDir string) {
 			if path != absDir && shouldSkipDirectory(w.excluded, d.Name()) {
 				return filepath.SkipDir
 			}
-			addDir(path)
+			onDir(path)
 			return nil
 		}
-		armFile(path)
+		onFile(path)
 		return nil
 	})
 }
@@ -1038,12 +1074,19 @@ func (s *Service) processDeleteSubtree(ctx context.Context, absRoot, relDir stri
 // case-insensitively. The prefix "docs" therefore also matches "docsets/a.md"
 // and "Docs/a.md". The byte-exact HasPrefix test below is what makes the
 // returned set safe to tombstone.
+//
+// relDir "." names the root (SPEC §15.13): every active document is under it.
 func (s *Service) activeDocumentsUnder(ctx context.Context, relDir string) ([]string, error) {
 	prefix := relDir + "/"
+	listPrefix := relDir
+	if relDir == RecheckRoot {
+		prefix = ""
+		listPrefix = ""
+	}
 	var out []string
 	offset := 0
 	for {
-		docs, total, err := s.store.ListFiles(ctx, relDir, "", subtreeListPageSize, offset)
+		docs, total, err := s.store.ListFiles(ctx, listPrefix, "", subtreeListPageSize, offset)
 		if err != nil {
 			if errors.Is(err, model.ErrNotImplemented) {
 				return nil, nil
