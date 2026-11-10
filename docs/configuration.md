@@ -840,6 +840,14 @@ second behind would then land in the neighbouring cue.) Set `ttml.language_codes
 value as `emit.smil_language_codes` (`iso639_2` for Wowza) so each `<div>`
 matches a track. Both keys also apply to `dir2mcp export --format ttml` (SPEC §8.6.10).
 
+The SMIL that `export --format ttml --out …` writes beside the TTML (with
+`media.subtitles.smil.enabled`) names the caption languages in the
+`<textstream>`'s `system-language` attribute: every language the TTML carries,
+primary first, in the same code form (`system-language="rus,eng"` under
+`iso639_2`). Earlier versions wrote `systemLanguage` with the primary language
+only. `system-language` is the attribute Wowza matches caption tracks on;
+`systemLanguage` on a `<video>` entry names the audio language.
+
 ### Translated broadcast cues follow the source speech (SPEC §8.6.3)
 
 ```yaml
