@@ -183,7 +183,7 @@ func TestRenderSMILMetadataAndFailOpen(t *testing.T) {
 		`name="videoCodec" content="h264"`,
 		`name="bitrate" content="800000"`,
 		`<video src="clip.mp4" width="1280" height="720"/>`,
-		`<textstream src="clip.ttml" systemLanguage="en"/>`,
+		`<textstream src="clip.ttml" system-language="en"/>`,
 	} {
 		if !strings.Contains(full, want) {
 			t.Fatalf("SMIL missing %q in:\n%s", want, full)

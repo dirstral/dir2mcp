@@ -107,3 +107,24 @@ func TestRenderTTMLWith_DivsKeepColliding639Codes(t *testing.T) {
 		t.Fatalf("want two por divs, pt-BR first:\n%s", got)
 	}
 }
+
+// TestTTMLLanguages pins the language list a companion SMIL is built from:
+// every language-tagged block or run, unique, in document order, never the
+// document root's own tag.
+func TestTTMLLanguages(t *testing.T) {
+	spans := subtitle.RenderTTML(layoutCues, "ru")
+	divs := subtitle.RenderTTMLWith(layoutCues, "ru", subtitle.TTMLOptions{Layout: "divs", LanguageCodes: "iso639_2"})
+	untagged := `<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru"><body><div><p begin="00:00:00.000" end="00:00:01.000">x</p></div></body></tt>`
+	for name, c := range map[string]struct {
+		doc  string
+		want string
+	}{
+		"spans":    {spans, "ru,en"},
+		"divs":     {divs, "rus,eng"},
+		"untagged": {untagged, ""},
+	} {
+		if got := strings.Join(subtitle.TTMLLanguages(c.doc), ","); got != c.want {
+			t.Fatalf("%s: TTMLLanguages = %q, want %q", name, got, c.want)
+		}
+	}
+}

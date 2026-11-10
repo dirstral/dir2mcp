@@ -9,8 +9,10 @@ import (
 )
 
 // SMILSubtitleRef names a companion subtitle document referenced by a SMIL
-// packaging file: the relative Src (e.g. "clip.ttml") and its Lang (BCP-47),
-// used for the <textstream> systemLanguage attribute.
+// packaging file: the relative Src (e.g. "clip.ttml") and its Lang: the
+// comma-separated caption language codes, written as the <textstream>
+// system-language attribute (the one Wowza matches caption tracks on;
+// systemLanguage on a <video> is the audio language, SPEC §8.6.10).
 type SMILSubtitleRef struct {
 	Src  string
 	Lang string
@@ -68,7 +70,7 @@ func RenderSMIL(in SMILInput) string {
 			continue
 		}
 		if lang := strings.TrimSpace(sub.Lang); lang != "" {
-			fmt.Fprintf(&b, "      <textstream src=%q systemLanguage=%q/>\n",
+			fmt.Fprintf(&b, "      <textstream src=%q system-language=%q/>\n",
 				escapeAttr(src), escapeAttr(lang))
 		} else {
 			fmt.Fprintf(&b, "      <textstream src=%q/>\n", escapeAttr(src))
