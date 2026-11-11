@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -79,6 +80,8 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 	rootResolved := ResolveRoot(absRoot)
 
 	files := make([]DiscoveredFile, 0, 256)
+	walkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	walker := discoverWalker{
 		rootAbs:      absRoot,
 		rootResolved: rootResolved,
@@ -86,8 +89,15 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 		excluded:     ResolveExcludedDirs(opts.ExcludeDirs),
 		files:        &files,
 		visitedDirs:  map[string]struct{}{rootResolved: {}},
+		cancel:       cancel,
 	}
-	if err := walker.walkDir(ctx, absRoot, "", nil); err != nil {
+	if opts.Workers > 1 && !opts.FollowSymlinks {
+		// The calling goroutine is one reader; Workers-1 more may run at once.
+		walker.slots = make(chan struct{}, opts.Workers-1)
+	}
+	err = walker.walkDir(walkCtx, absRoot, "", nil)
+	walker.wg.Wait()
+	if err := walker.walkErr(err); err != nil {
 		return nil, err
 	}
 
@@ -215,6 +225,74 @@ type discoverWalker struct {
 	excluded     ExcludedDirSet
 	files        *[]DiscoveredFile
 	visitedDirs  map[string]struct{}
+
+	// Parallel walk (Options.Workers > 1). slots holds one token per extra
+	// reader; nil keeps the walk sequential. mu guards files, visitedDirs, the
+	// caller's hooks and the scan cache, so a hook never runs concurrently with
+	// itself. The first error of any reader cancels the rest.
+	slots    chan struct{}
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	errOnce  sync.Once
+	firstErr error
+}
+
+// addFile records a discovered file. Safe for concurrent readers.
+func (w *discoverWalker) addFile(f DiscoveredFile) {
+	w.mu.Lock()
+	*w.files = append(*w.files, f)
+	w.mu.Unlock()
+}
+
+// claimDir marks dir visited and reports whether this call claimed it (false:
+// another path already walks it). Safe for concurrent readers.
+func (w *discoverWalker) claimDir(dir string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.visitedDirs[dir]; ok {
+		return false
+	}
+	w.visitedDirs[dir] = struct{}{}
+	return true
+}
+
+// fail records the first error of a parallel reader and cancels the walk.
+func (w *discoverWalker) fail(err error) {
+	w.errOnce.Do(func() {
+		w.firstErr = err
+		w.cancel()
+	})
+}
+
+// walkErr is the walk's outcome once every reader is done: a reader's error
+// wins over the cancellation it caused in the others.
+func (w *discoverWalker) walkErr(inline error) error {
+	if w.firstErr != nil {
+		return w.firstErr
+	}
+	return inline
+}
+
+// descend walks a claimed subdirectory: in a new reader when a slot is free,
+// otherwise in the calling goroutine (so the walk never waits on a slot).
+func (w *discoverWalker) descend(ctx context.Context, absDir, relDir string, rules []gitIgnoreRule) error {
+	if w.slots != nil {
+		select {
+		case w.slots <- struct{}{}:
+			w.wg.Add(1)
+			go func() {
+				defer w.wg.Done()
+				defer func() { <-w.slots }()
+				if err := w.walkDir(ctx, absDir, relDir, rules); err != nil {
+					w.fail(err)
+				}
+			}()
+			return nil
+		default:
+		}
+	}
+	return w.walkDir(ctx, absDir, relDir, rules)
 }
 
 type gitIgnoreRule struct {
@@ -263,6 +341,8 @@ func (w *discoverWalker) shouldAddFile(lstat os.FileInfo, relPath string, rules 
 // the default discovery behavior is byte-for-byte unchanged.
 func (w *discoverWalker) reportOversize(relPath string, size int64) {
 	if w.options.OnOversize != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
 		w.options.OnOversize(relPath, size)
 	}
 }
@@ -273,6 +353,8 @@ func (w *discoverWalker) reportOversize(relPath string, size int64) {
 // returns is unchanged: only the caller's ability to see the drop changes.
 func (w *discoverWalker) reportSkippedSymlink(relPath string) {
 	if w.options.OnSkippedSymlink != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
 		w.options.OnSkippedSymlink(relPath)
 	}
 }
@@ -291,11 +373,10 @@ func (w *discoverWalker) visitDir(ctx context.Context, fullPath, relPath, name s
 			nextDir = filepath.Clean(resolved)
 		}
 	}
-	if _, ok := w.visitedDirs[nextDir]; ok {
+	if !w.claimDir(nextDir) {
 		return nil
 	}
-	w.visitedDirs[nextDir] = struct{}{}
-	return w.walkDir(ctx, nextDir, relPath, rules)
+	return w.descend(ctx, nextDir, relPath, rules)
 }
 
 func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, parentRules []gitIgnoreRule) error {
@@ -448,7 +529,7 @@ func (w *discoverWalker) processFullEntry(ctx context.Context, absDir, relDir, n
 		Mode:          uint32(lstat.Mode()),
 	}
 	if w.shouldAddFile(lstat, relPath, rules) {
-		*w.files = append(*w.files, DiscoveredFile{
+		w.addFile(DiscoveredFile{
 			AbsPath:   fullPath,
 			RelPath:   relPath,
 			SizeBytes: lstat.Size(),
@@ -489,7 +570,9 @@ func (w *discoverWalker) walkDirFromCache(ctx context.Context, absDir, relDir st
 	if err != nil {
 		return false, nil //nolint:nilerr // unreadable dir is a miss; full path reports the error
 	}
+	w.mu.Lock()
 	sig, ok, err := w.options.ScanCache.LookupDir(relDir)
+	w.mu.Unlock()
 	// Nanoseconds, not seconds (#667): a second-resolution comparison accepted a
 	// directory whose child list had changed within the recorded Unix second.
 	// A signature written by an older build carries a seconds value here, which
@@ -572,7 +655,7 @@ func (w *discoverWalker) emitCachedChildren(ctx context.Context, confirmed []cac
 		if !w.shouldAddFile(p.lstat, p.relPath, rules) {
 			continue
 		}
-		*w.files = append(*w.files, DiscoveredFile{
+		w.addFile(DiscoveredFile{
 			AbsPath:   p.fullPath,
 			RelPath:   p.relPath,
 			SizeBytes: p.lstat.Size(),
@@ -605,10 +688,12 @@ func (w *discoverWalker) storeDirSignature(absDir, relDir string, stamp dirReadS
 	if !dirSignatureIsSettled(stamp.mtime, stamp.readAt) {
 		return
 	}
+	w.mu.Lock()
 	_ = w.options.ScanCache.StoreDir(relDir, CachedDirSignature{
 		DirMTimeUnixNano: stamp.mtime.UnixNano(),
 		Entries:          entries,
 	})
+	w.mu.Unlock()
 }
 
 // mtimeSettleWindow is how far in the past a directory's mtime must sit, relative
@@ -680,10 +765,9 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, true) {
 			return nil
 		}
-		if _, ok := w.visitedDirs[resolvedPath]; ok {
+		if !w.claimDir(resolvedPath) {
 			return nil
 		}
-		w.visitedDirs[resolvedPath] = struct{}{}
 		return w.walkDir(ctx, resolvedPath, relPath, rules)
 	}
 
@@ -698,7 +782,7 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		return nil
 	}
 
-	*w.files = append(*w.files, DiscoveredFile{
+	w.addFile(DiscoveredFile{
 		AbsPath:   resolvedPath,
 		RelPath:   relPath,
 		SizeBytes: stat.Size(),

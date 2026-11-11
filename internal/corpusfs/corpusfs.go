@@ -183,6 +183,12 @@ type Options struct {
 	MaxSizeBytes   int64
 	UseGitIgnore   bool
 	FollowSymlinks bool
+	// Workers bounds how many directories the LocalFS walker reads at the same
+	// time (config `ingest.discovery_workers`, SPEC §7.1). <= 1 is the
+	// sequential walk. The result does not depend on it. With FollowSymlinks on
+	// the walk stays sequential: which path claims a directory first decides
+	// the rel_path of its files, and that must not depend on timing.
+	Workers int
 	// ExcludeDirs is the directory ignore list (config `ingest.exclude_dirs`,
 	// SPEC §7.1). nil keeps the default list. A non-nil value REPLACES the
 	// default list in full; it does not add to it. `.dir2mcp` is always kept.

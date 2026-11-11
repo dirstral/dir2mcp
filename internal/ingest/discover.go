@@ -71,7 +71,10 @@ type DiscoverOptions struct {
 	MaxSizeBytes   int64
 	UseGitIgnore   bool
 	FollowSymlinks bool
-	MediaVariants  MediaVariantOptions
+	// Workers bounds concurrent directory reads (`ingest.discovery_workers`,
+	// SPEC §7.1); <= 1 walks sequentially. See corpusfs.Options.Workers.
+	Workers       int
+	MediaVariants MediaVariantOptions
 	// ExcludeDirs is the directory ignore list (config `ingest.exclude_dirs`,
 	// SPEC §7.1, issue #773). nil keeps the default list. A non-nil value
 	// REPLACES the default list in full. `.dir2mcp` is always kept.
@@ -120,6 +123,7 @@ func (o DiscoverOptions) corpusfsOptions() corpusfs.Options {
 		MaxSizeBytes:     o.MaxSizeBytes,
 		UseGitIgnore:     o.UseGitIgnore,
 		FollowSymlinks:   o.FollowSymlinks,
+		Workers:          o.Workers,
 		ExcludeDirs:      o.ExcludeDirs,
 		ScanCache:        o.ScanCache,
 		OnOversize:       o.OnOversize,

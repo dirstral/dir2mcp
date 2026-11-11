@@ -682,6 +682,12 @@ type Config struct {
 	IngestGitignore      bool
 	IngestFollowSymlinks bool
 	IngestMaxFileMB      int
+	// IngestDiscoveryWorkers bounds how many directories the discovery walk reads
+	// at once (config `ingest.discovery_workers`, SPEC §7.1, issue #1159). 1 (or
+	// 0) is the sequential walk; up to 64. Worth raising on a network filesystem,
+	// where each directory read waits a round trip. Discovery's result does not
+	// depend on it.
+	IngestDiscoveryWorkers int
 	// IngestExcludeDirs is the directory ignore list applied by discovery
 	// (config `ingest.exclude_dirs`, SPEC §7.1, issue #773). Discovery does not
 	// descend into a directory whose NAME matches an entry. An entry is a plain
@@ -1618,6 +1624,7 @@ type fileConfig struct {
 	IngestGitignore                     *bool
 	IngestFollowSymlinks                *bool
 	IngestMaxFileMB                     *int
+	IngestDiscoveryWorkers              *int
 	IngestExcludeDirs                   []string
 	IngestPDFMode                       *string
 	IngestImagesMode                    *string
@@ -1813,6 +1820,7 @@ type persistedConfig struct {
 	IngestGitignore                     bool          `yaml:"ingest_gitignore"`
 	IngestFollowSymlinks                bool          `yaml:"ingest_follow_symlinks"`
 	IngestMaxFileMB                     int           `yaml:"ingest_max_file_mb"`
+	IngestDiscoveryWorkers              int           `yaml:"ingest_discovery_workers"`
 	IngestDoclingTimeoutSec             int           `yaml:"ingest_docling_timeout_sec"`
 	IngestExcludeDirs                   []string      `yaml:"ingest_exclude_dirs"`
 	IngestPDFMode                       string        `yaml:"ingest_pdf_mode"`
@@ -2100,29 +2108,30 @@ func Default() Config {
 		RetrievalHierarchicalPromptVersion: DefaultHierarchicalPromptVersion,
 		// RerankEnabled left nil: auto mode (activates iff a rerank
 		// provider credential is present). See rerankEnabledEffective.
-		RerankProvider:        "cohere",
-		CohereAPIKey:          "",
-		CohereBaseURL:         "",
-		RerankModel:           "rerank-v3.5",
-		RerankCandidatePool:   50,
-		ChunkingMaxTokens:     0,
-		ChunkingOverlapTokens: 0,
-		IngestGitignore:       true,
-		IngestFollowSymlinks:  false,
-		IngestMaxFileMB:       20,
-		IngestExcludeDirs:     corpusfs.DefaultExcludedDirs(),
-		IngestPDFMode:         "ocr",
-		IngestImagesMode:      "ocr_auto",
-		IngestAudioMode:       "auto",
-		IngestArchivesMode:    "deep",
-		IngestExtractor:       "auto",
-		IngestOnUnsupported:   "lenient",
-		IngestMediaIdentity:   "full",
-		IndexBackend:          "memory",
-		IngestScanCache:       false,
-		IngestLateChunking:    false,
-		IngestWatch:           false,
-		IngestWatchDebounce:   500 * time.Millisecond,
+		RerankProvider:         "cohere",
+		CohereAPIKey:           "",
+		CohereBaseURL:          "",
+		RerankModel:            "rerank-v3.5",
+		RerankCandidatePool:    50,
+		ChunkingMaxTokens:      0,
+		ChunkingOverlapTokens:  0,
+		IngestGitignore:        true,
+		IngestFollowSymlinks:   false,
+		IngestMaxFileMB:        20,
+		IngestDiscoveryWorkers: 1,
+		IngestExcludeDirs:      corpusfs.DefaultExcludedDirs(),
+		IngestPDFMode:          "ocr",
+		IngestImagesMode:       "ocr_auto",
+		IngestAudioMode:        "auto",
+		IngestArchivesMode:     "deep",
+		IngestExtractor:        "auto",
+		IngestOnUnsupported:    "lenient",
+		IngestMediaIdentity:    "full",
+		IndexBackend:           "memory",
+		IngestScanCache:        false,
+		IngestLateChunking:     false,
+		IngestWatch:            false,
+		IngestWatchDebounce:    500 * time.Millisecond,
 		// One docling CLI call on one document (SPEC 7.4.B, #1105).
 		IngestDoclingTimeoutSec: DefaultDoclingTimeoutSec,
 		// "auto", not "mistral" (SPEC §8.2, §8.1.3): transcription is an optional
@@ -2322,6 +2331,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestGitignore:                     cfg.IngestGitignore,
 		IngestFollowSymlinks:                cfg.IngestFollowSymlinks,
 		IngestMaxFileMB:                     cfg.IngestMaxFileMB,
+		IngestDiscoveryWorkers:              cfg.IngestDiscoveryWorkers,
 		IngestDoclingTimeoutSec:             cfg.IngestDoclingTimeoutSec,
 		IngestExcludeDirs:                   append([]string(nil), cfg.IngestExcludeDirs...),
 		IngestPDFMode:                       cfg.IngestPDFMode,
@@ -3196,6 +3206,9 @@ func applyRetrievalContextualFileParsed(cfg *Config, fc fileConfig) {
 func applyIngestFileParsed(cfg *Config, fc fileConfig) {
 	applyChunkingFileParsed(cfg, fc)
 	applyIngestModesFileParsed(cfg, fc)
+	if fc.IngestDiscoveryWorkers != nil {
+		cfg.IngestDiscoveryWorkers = *fc.IngestDiscoveryWorkers
+	}
 	applySTTFileParsed(cfg, fc)
 }
 
@@ -4006,6 +4019,7 @@ var configKeyAliases = map[string]string{
 	"ingest_follow_symlinks":                   "ingest.follow_symlinks",
 	"follow_symlinks":                          "ingest.follow_symlinks",
 	"ingest_max_file_mb":                       "ingest.max_file_mb",
+	"ingest_discovery_workers":                 "ingest.discovery_workers",
 	"ingest_docling_timeout_sec":               "ingest.docling.timeout_sec",
 	"docling.timeout_sec":                      "ingest.docling.timeout_sec",
 	"max_file_mb":                              "ingest.max_file_mb",
@@ -4318,6 +4332,7 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"chunking.max_tokens":                func(c *fileConfig) **int { return &c.ChunkingMaxTokens },
 	"chunking.overlap_tokens":            func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
 	"ingest.max_file_mb":                 func(c *fileConfig) **int { return &c.IngestMaxFileMB },
+	"ingest.discovery_workers":           func(c *fileConfig) **int { return &c.IngestDiscoveryWorkers },
 	"ingest.docling.timeout_sec":         func(c *fileConfig) **int { return &c.IngestDoclingTimeoutSec },
 	"rerank.candidate_pool":              func(c *fileConfig) **int { return &c.RerankCandidatePool },
 	"media.audio_window_sec":             func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
@@ -4969,6 +4984,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeBool("ingest_gitignore", cfg.IngestGitignore)
 	writeBool("ingest_follow_symlinks", cfg.IngestFollowSymlinks)
 	writeInt("ingest_max_file_mb", cfg.IngestMaxFileMB)
+	writeInt("ingest_discovery_workers", cfg.IngestDiscoveryWorkers)
 	writeComment(inertIngestModeCommentLines...)
 	writeScalar("ingest_pdf_mode", cfg.IngestPDFMode)
 	writeScalar("ingest_images_mode", cfg.IngestImagesMode)
@@ -6770,6 +6786,18 @@ func validateSQLIdentifier(field, ident string) error {
 
 // validateNumericBounds rejects negative session/health durations, RAG,
 // chunking, and ingest size values.
+// validateIngestBounds checks the numeric ingest keys: the per-file size cap
+// and the discovery walk's reader count (SPEC §7.1: 1-64, 0 means 1).
+func (c *Config) validateIngestBounds() error {
+	if c.IngestMaxFileMB < 0 {
+		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
+	}
+	if c.IngestDiscoveryWorkers < 0 || c.IngestDiscoveryWorkers > 64 {
+		return fmt.Errorf("ingest.discovery_workers must be between 1 and 64 (0 means 1): %d", c.IngestDiscoveryWorkers)
+	}
+	return nil
+}
+
 func (c *Config) validateNumericBounds() error {
 	if c.SessionInactivityTimeout < 0 {
 		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
@@ -6802,8 +6830,8 @@ func (c *Config) validateNumericBounds() error {
 	if c.ChunkingMaxTokens > 0 && c.ChunkingOverlapTokens >= c.ChunkingMaxTokens {
 		return fmt.Errorf("chunking.overlap_tokens (%d) must be less than chunking.max_tokens (%d)", c.ChunkingOverlapTokens, c.ChunkingMaxTokens)
 	}
-	if c.IngestMaxFileMB < 0 {
-		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)
+	if err := c.validateIngestBounds(); err != nil {
+		return err
 	}
 	if err := c.validateDoclingTimeout(); err != nil {
 		return err

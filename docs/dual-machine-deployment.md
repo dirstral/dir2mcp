@@ -454,6 +454,21 @@ embedded, and the coordinator enqueues the chunk's current form on its next pass
   is only consulted for the local-filesystem backend (not the native
   `source.kind: s3` object listing).
 
+  The walk itself reads one directory at a time by default, and on NFS every
+  read waits a network round trip. A deep tree is then latency-bound: a 20-level
+  hash tree of ~2.6 million directories walks at ~85 directories a second, so one
+  pass takes days. Let the walk read several directories at once:
+
+  ```yaml
+  ingest:
+    discovery_workers: 16   # default 1 (sequential); 1-64 (SPEC §7.1)
+  ```
+
+  The result does not depend on the value: the same files, rules and scan-cache
+  contents, sorted the same way. With `ingest.follow_symlinks: true` the walk
+  stays sequential, because which path reaches a directory first decides its
+  files' paths. The key applies to the local-filesystem backend only.
+
 - **Video time-window reads currently download the whole object.** Range reads
   over S3 avoid whole-object downloads for plain byte-slice reads, but the
   ffmpeg/archive paths use `Localize`, which materializes the **entire object** to
