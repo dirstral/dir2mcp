@@ -786,6 +786,8 @@ media:
     ttml:
       enabled: true
       segmentation: broadcast   # chunk (default) | broadcast: short TTML cues, like VTT/SRT
+      layout: divs              # spans (default) | divs: one <div xml:lang> per language
+      language_codes: iso639_2  # bcp47 (default, "ru") | iso639_2 ("rus") for every xml:lang
     emit:
       enabled: true
       formats: [vtt, ttml]
@@ -826,6 +828,25 @@ What happens to `<stem>.smil` beside the video:
 rendition name and serves empty captions for the group name. Without a usable
 SMIL the TTML is named after the media file itself. `smil` requires write-back
 beside the media (an empty `emit.dir`) and its format among `emit.formats`.
+
+`ttml.layout: divs` matters for Wowza. Wowza makes one caption track per
+`<div xml:lang>` in the TTML and matches it to the languages the SMIL entry
+lists. The default layout (`spans`) puts both languages in each cue, so Wowza
+shows them together in one track and leaves the other track empty. With
+`divs`, each language is its own `<div>` with that transcript's own cue
+timings, the way livevtt's TTML was. (Under `spans` the translation is aligned
+onto the source cues; under `divs` it is not, because a translation that runs a
+second behind would then land in the neighbouring cue.) Set `ttml.language_codes` to the same
+value as `emit.smil_language_codes` (`iso639_2` for Wowza) so each `<div>`
+matches a track. Both keys also apply to `dir2mcp export --format ttml` (SPEC §8.6.10).
+
+The SMIL that `export --format ttml --out …` writes beside the TTML (with
+`media.subtitles.smil.enabled`) names the caption languages in the
+`<textstream>`'s `system-language` attribute: every language the TTML carries,
+primary first, in the same code form (`system-language="rus,eng"` under
+`iso639_2`). Earlier versions wrote `systemLanguage` with the primary language
+only. `system-language` is the attribute Wowza matches caption tracks on;
+`systemLanguage` on a `<video>` entry names the audio language.
 
 ### Translated broadcast cues follow the source speech (SPEC §8.6.3)
 

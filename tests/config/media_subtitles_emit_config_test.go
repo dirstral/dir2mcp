@@ -289,3 +289,29 @@ func TestMediaSubtitlesSMIL_DefaultsAndGates(t *testing.T) {
 		t.Fatalf("an unused SMIL patch must not invalidate the config: %v", err)
 	}
 }
+
+// TestMediaSubtitlesTTMLLayout_DefaultsAndValues pins SPEC §8.6.10: the TTML
+// layout and language-code keys default to the existing output, normalize case
+// and refuse any other value.
+func TestMediaSubtitlesTTMLLayout_DefaultsAndValues(t *testing.T) {
+	d := config.Default()
+	if d.MediaSubtitlesTTMLLayout != "spans" || d.MediaSubtitlesTTMLLanguageCodes != "bcp47" {
+		t.Fatalf("defaults changed: %q %q", d.MediaSubtitlesTTMLLayout, d.MediaSubtitlesTTMLLanguageCodes)
+	}
+	ok := config.Default()
+	ok.MediaSubtitlesTTMLLayout = " DIVS "
+	ok.MediaSubtitlesTTMLLanguageCodes = "ISO639_2"
+	if err := ok.Validate(); err != nil || ok.MediaSubtitlesTTMLLayout != "divs" || ok.MediaSubtitlesTTMLLanguageCodes != "iso639_2" {
+		t.Fatalf("valid values rejected or not normalized: %v (%q %q)", err, ok.MediaSubtitlesTTMLLayout, ok.MediaSubtitlesTTMLLanguageCodes)
+	}
+	for name, mutate := range map[string]func(*config.Config){
+		"bad layout": func(c *config.Config) { c.MediaSubtitlesTTMLLayout = "paragraphs" },
+		"bad codes":  func(c *config.Config) { c.MediaSubtitlesTTMLLanguageCodes = "iso639_1" },
+	} {
+		c := config.Default()
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s must be CONFIG_INVALID", name)
+		}
+	}
+}

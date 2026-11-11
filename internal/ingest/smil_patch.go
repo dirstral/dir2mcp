@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/text/language"
-
 	"github.com/dirstral/dir2mcp/internal/subtitle"
 )
 
@@ -207,15 +205,7 @@ func (s *Service) smilParams() []subtitle.SMILParam {
 // smilLanguageCode renders a language tag for system-language: unchanged under
 // "bcp47", or the ISO 639-2 three-letter code ("ru" → "rus") under "iso639_2".
 func (s *Service) smilLanguageCode(tag string) string {
-	tag = strings.TrimSpace(tag)
-	if !strings.EqualFold(s.cfg.MediaSubtitlesEmitSMILLanguageCodes, "iso639_2") {
-		return tag
-	}
-	base, err := language.ParseBase(strings.SplitN(tag, "-", 2)[0])
-	if err != nil {
-		return tag
-	}
-	return base.ISO3()
+	return subtitle.LanguageCode(strings.TrimSpace(tag), s.cfg.MediaSubtitlesEmitSMILLanguageCodes)
 }
 
 // smilSiblingExists reports whether name, relative to the SMIL's folder, is an

@@ -186,7 +186,7 @@ func TestExportTTMLSecondaryLangTagComesFromRepresentation730(t *testing.T) {
 }
 
 // TestExportTTMLSMILUsesResolvedLanguage730 pins that the companion SMIL's
-// <textstream systemLanguage> is the same resolved tag the TTML carries, with
+// <textstream system-language> is the same resolved tag the TTML carries, with
 // --lang omitted. It probes through a stub ffprobe so no real codec tooling is
 // needed.
 //
@@ -223,7 +223,7 @@ func TestExportTTMLSMILUsesResolvedLanguage730(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SMIL must be written (stderr=%s): %v", stderr.String(), err)
 	}
-	if !strings.Contains(string(smilRaw), `systemLanguage="en"`) {
+	if !strings.Contains(string(smilRaw), `system-language="en"`) {
 		t.Errorf("SMIL must carry the resolved language:\n%s", smilRaw)
 	}
 
@@ -233,5 +233,87 @@ func TestExportTTMLSMILUsesResolvedLanguage730(t *testing.T) {
 	}
 	if !strings.Contains(string(ttmlRaw), `xml:lang="en"`) {
 		t.Errorf("TTML and SMIL must agree on the resolved language:\n%s", ttmlRaw)
+	}
+}
+
+// TestExportTTMLSMILUsesTTMLLanguageCodes pins SPEC §8.6.10 (0.91.0): the
+// exported SMIL writes system-language with the same code mapping as the TTML's
+// xml:lang, so iso639_2 gives "eng" in both files and a player can match them.
+func TestExportTTMLSMILUsesTTMLLanguageCodes(t *testing.T) {
+	tmp := testutil.TempDir(t)
+	const rel = "media/talk.mp4"
+	seedExportStore(t, filepath.Join(tmp, ".dir2mcp"), rel, `{"language":"en"}`)
+	cfgPath := writeTTMLConfig(t, tmp, true)
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("media_subtitles_ttml_language_codes: iso639_2\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	stubFFprobeOnPATH(t)
+	if err := os.MkdirAll(filepath.Join(tmp, "media"), 0o755); err != nil {
+		t.Fatalf("mkdir media: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, rel), []byte("not-really-mp4"), 0o644); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+
+	outPath := filepath.Join(tmp, "out", "talk.ttml")
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		if code := app.RunWithContext(context.Background(),
+			[]string{"--config", cfgPath, "export", "--format", "ttml",
+				"--out", outPath, rel}); code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		}
+	})
+	smilRaw, err := os.ReadFile(strings.TrimSuffix(outPath, ".ttml") + ".smil")
+	if err != nil {
+		t.Fatalf("SMIL must be written (stderr=%s): %v", stderr.String(), err)
+	}
+	ttmlRaw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read TTML: %v", err)
+	}
+	if !strings.Contains(string(smilRaw), `system-language="eng"`) || !strings.Contains(string(ttmlRaw), `xml:lang="eng"`) {
+		t.Fatalf("SMIL and TTML must both carry the ISO 639-2 code eng:\nSMIL:\n%s\nTTML:\n%s", smilRaw, ttmlRaw)
+	}
+}
+
+// TestExportTTMLSMILListsEveryLanguage pins SPEC §8.6.10 (0.91.0): a bilingual
+// export's SMIL lists both languages, comma-separated, as the TTML carries
+// them, so a player matching tracks by code also finds the secondary track.
+func TestExportTTMLSMILListsEveryLanguage(t *testing.T) {
+	tmp := testutil.TempDir(t)
+	const rel = "media/talk.mp3"
+	seedBilingualStore(t, filepath.Join(tmp, ".dir2mcp"), rel)
+	cfgPath := writeTTMLConfig(t, tmp, true)
+	stubFFprobeOnPATH(t)
+	if err := os.MkdirAll(filepath.Join(tmp, "media"), 0o755); err != nil {
+		t.Fatalf("mkdir media: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, rel), []byte("not-really-mp3"), 0o644); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+
+	outPath := filepath.Join(tmp, "out", "talk.ttml")
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+	withWorkingDir(t, tmp, func() {
+		if code := app.RunWithContext(context.Background(),
+			[]string{"--config", cfgPath, "export", "--format", "ttml",
+				"--secondary-lang", "fr", "--out", outPath, rel}); code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		}
+	})
+	smilRaw, err := os.ReadFile(strings.TrimSuffix(outPath, ".ttml") + ".smil")
+	if err != nil {
+		t.Fatalf("SMIL must be written (stderr=%s): %v", stderr.String(), err)
+	}
+	if !strings.Contains(string(smilRaw), `system-language="en,fr"`) {
+		t.Fatalf("a bilingual export's SMIL must list both languages:\n%s", smilRaw)
 	}
 }

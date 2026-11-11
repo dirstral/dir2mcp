@@ -80,6 +80,8 @@ func runSMILCorpusWith(t *testing.T, root string, st *store.SQLiteStore, stateDi
 	cfg.MediaSubtitlesEmitSMILLanguageCodes = "iso639_2"
 	cfg.MediaSubtitlesEmitTTMLName = "top_rendition"
 	cfg.MediaSubtitlesTTMLSegmentation = "broadcast"
+	cfg.MediaSubtitlesTTMLLayout = "divs"
+	cfg.MediaSubtitlesTTMLLanguageCodes = "iso639_2"
 	cfg.MediaTranslateEnabled = true
 	cfg.MediaTranslateTargetLangs = []string{"en"}
 	svc := mustNewIngestService(t, cfg, st)
@@ -117,6 +119,13 @@ func TestSMILPatch_WiresTheTopRenditionTTMLOnceWithABackup(t *testing.T) {
 
 	if !fileExists(filepath.Join(root, "v", "abc_1080p.ttml")) || fileExists(filepath.Join(root, "v", "abc.ttml")) {
 		t.Fatalf("the TTML must be named after the top rendition (abc_1080p.ttml), not the group")
+	}
+	// Wowza builds one caption track per <div xml:lang> and matches it to the
+	// SMIL system-language, so the TTML carries one div per language with the
+	// same ISO 639-2 codes the SMIL entry lists.
+	ttml := readFile(t, filepath.Join(root, "v", "abc_1080p.ttml"))
+	if !strings.Contains(ttml, `<div xml:lang="rus">`) || !strings.Contains(ttml, `<div xml:lang="eng">`) || strings.Contains(ttml, "<span") {
+		t.Fatalf("the TTML must be one <div> per language (rus, eng), no spans:\n%s", ttml)
 	}
 	smilPath := filepath.Join(root, "v", "abc.smil")
 	got := readFile(t, smilPath)

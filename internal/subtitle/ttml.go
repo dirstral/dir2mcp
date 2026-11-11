@@ -268,3 +268,39 @@ func reindex(cues []Cue) {
 		cues[i].Index = i + 1
 	}
 }
+
+// TTMLLanguages lists the xml:lang values of a TTML document's language-tagged
+// <div>, <p> and <span> elements, unique and in document order (the document
+// root's own xml:lang is not one of them). A companion SMIL lists them as its
+// caption languages, so they match the TTML's language blocks or runs exactly,
+// in the code form the TTML was written with. A document that does not parse
+// yields what was read before the error.
+func TTMLLanguages(doc string) []string {
+	dec := xml.NewDecoder(strings.NewReader(doc))
+	seen := map[string]bool{}
+	var out []string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return out
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch start.Name.Local {
+		case "div", "p", "span":
+		default:
+			continue
+		}
+		for _, a := range start.Attr {
+			if a.Name.Local != "lang" || a.Name.Space != "http://www.w3.org/XML/1998/namespace" {
+				continue
+			}
+			if lang := strings.TrimSpace(a.Value); lang != "" && !seen[lang] {
+				seen[lang] = true
+				out = append(out, lang)
+			}
+		}
+	}
+}
