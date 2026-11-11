@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -168,6 +169,9 @@ func TestParallelWalk_FollowSymlinksStaysSequential(t *testing.T) {
 // TestParallelWalk_ErrorStopsTheWalk pins that a directory the walk cannot read
 // fails discovery for any worker count, as the sequential walk does.
 func TestParallelWalk_ErrorStopsTheWalk(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not deny directory reads on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads any directory")
 	}

@@ -96,6 +96,11 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 		walker.slots = make(chan struct{}, opts.Workers-1)
 	}
 	err = walker.walkDir(walkCtx, absRoot, "", nil)
+	if err != nil {
+		// Stop the other readers before waiting for them; otherwise they would
+		// finish their subtrees after the walk has already failed.
+		walker.fail(err)
+	}
 	walker.wg.Wait()
 	if err := walker.walkErr(err); err != nil {
 		return nil, err
