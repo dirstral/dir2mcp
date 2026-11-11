@@ -24,10 +24,16 @@ import (
 // buildHashTree writes a small version of the archive's layout: a hash tree
 // three levels deep, one media folder per leaf, plus the cases discovery
 // filters: an oversized file, a SMIL backup, an excluded directory, a
-// .gitignore'd file and a symlink.
-func buildHashTree(t *testing.T) string {
+// .gitignore'd file and (where the platform allows it) a symlink. haveLink
+// reports whether the symlink exists. under nests the whole tree below one
+// directory of that name ("" for none).
+func buildHashTree(t *testing.T, under string) (root string, haveLink bool) {
 	t.Helper()
-	root := t.TempDir()
+	top := t.TempDir()
+	root = top
+	if under != "" {
+		root = filepath.Join(top, under)
+	}
 	write := func(rel string, size int) {
 		p := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -55,13 +61,13 @@ func buildHashTree(t *testing.T) string {
 		t.Fatal(err)
 	}
 	write("02/00/00/noise.log", 8) // gitignored
-	if err := os.Symlink(filepath.Join(root, "03"), filepath.Join(root, "04", "link-to-03")); err != nil {
-		t.Fatal(err)
-	}
+	// Windows without the symlink privilege cannot create one; the tests then
+	// check everything else.
+	haveLink = os.Symlink(filepath.Join(root, "03"), filepath.Join(root, "04", "link-to-03")) == nil
 	// The scan cache stores a directory only once its mtime has settled (2 s),
 	// so age every directory; otherwise the cache paths would never run.
 	old := time.Now().Add(-time.Hour)
-	if err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(top, func(p string, d os.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return err
 		}
@@ -69,7 +75,7 @@ func buildHashTree(t *testing.T) string {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return root
+	return top, haveLink
 }
 
 // walkReport is one walk's observable outcome.
@@ -122,9 +128,22 @@ func walkWorkers(t *testing.T, root string, workers int, follow bool, cache *fak
 // cached second walk. Run under -race it also proves the walker serialises
 // the caller's hooks and the (non-thread-safe) cache.
 func TestParallelWalk_ResultDoesNotDependOnWorkers(t *testing.T) {
-	root := buildHashTree(t)
+	// "" is the archive's shape (many top-level folders); "only" puts the whole
+	// tree below one directory, where a scheduler that pins a reader to a
+	// subtree would fall back to a sequential walk.
+	for _, under := range []string{"", "only"} {
+		t.Run("under="+under, func(t *testing.T) { checkWorkersEquivalent(t, under) })
+	}
+}
+
+func checkWorkersEquivalent(t *testing.T, under string) {
+	root, haveLink := buildHashTree(t, under)
+	wantLinks := 0
+	if haveLink {
+		wantLinks = 1
+	}
 	want := walkWorkers(t, root, 1, false, nil)
-	if len(want.files) != 6*5*4*3+1 || len(want.oversize) != 1 || len(want.symlinks) != 1 {
+	if len(want.files) != 6*5*4*3+1 || len(want.oversize) != 1 || len(want.symlinks) != wantLinks {
 		t.Fatalf("fixture: %d files, oversize %v, symlinks %v", len(want.files), want.oversize, want.symlinks)
 	}
 	for _, workers := range []int{0, 2, 8, 64} {
@@ -157,7 +176,10 @@ func TestParallelWalk_ResultDoesNotDependOnWorkers(t *testing.T) {
 // gives the sequential result for any worker count: which path claims a
 // directory first decides its files' rel_path, so it must not race.
 func TestParallelWalk_FollowSymlinksStaysSequential(t *testing.T) {
-	root := buildHashTree(t)
+	root, haveLink := buildHashTree(t, "")
+	if !haveLink {
+		t.Skip("symlinks cannot be created here")
+	}
 	want := walkWorkers(t, root, 1, true, nil)
 	for _, workers := range []int{8, 64} {
 		if got := walkWorkers(t, root, workers, true, nil); !reflect.DeepEqual(got, want) {
@@ -175,7 +197,7 @@ func TestParallelWalk_ErrorStopsTheWalk(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads any directory")
 	}
-	root := buildHashTree(t)
+	root, _ := buildHashTree(t, "")
 	locked := filepath.Join(root, "05", "03")
 	if err := os.Chmod(locked, 0o000); err != nil {
 		t.Fatal(err)
@@ -194,7 +216,7 @@ func TestParallelWalk_ErrorStopsTheWalk(t *testing.T) {
 // TestParallelWalk_HonoursCancellation pins that a cancelled context stops a
 // parallel walk with the context's error.
 func TestParallelWalk_HonoursCancellation(t *testing.T) {
-	root := buildHashTree(t)
+	root, _ := buildHashTree(t, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := corpusfs.NewLocalFS(root).Walk(ctx, root, corpusfs.Options{MaxSizeBytes: 1024, Workers: 8})

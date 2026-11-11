@@ -92,16 +92,11 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 		cancel:       cancel,
 	}
 	if opts.Workers > 1 && !opts.FollowSymlinks {
-		// The calling goroutine is one reader; Workers-1 more may run at once.
-		walker.slots = make(chan struct{}, opts.Workers-1)
+		walker.walkParallel(walkCtx, absRoot, opts.Workers)
+		err = nil
+	} else {
+		err = walker.walkDir(walkCtx, absRoot, "", nil)
 	}
-	err = walker.walkDir(walkCtx, absRoot, "", nil)
-	if err != nil {
-		// Stop the other readers before waiting for them; otherwise they would
-		// finish their subtrees after the walk has already failed.
-		walker.fail(err)
-	}
-	walker.wg.Wait()
 	if err := walker.walkErr(err); err != nil {
 		return nil, err
 	}
@@ -231,16 +226,28 @@ type discoverWalker struct {
 	files        *[]DiscoveredFile
 	visitedDirs  map[string]struct{}
 
-	// Parallel walk (Options.Workers > 1). slots holds one token per extra
-	// reader; nil keeps the walk sequential. mu guards files, visitedDirs, the
-	// caller's hooks and the scan cache, so a hook never runs concurrently with
-	// itself. The first error of any reader cancels the rest.
-	slots    chan struct{}
-	wg       sync.WaitGroup
+	// Parallel walk (Options.Workers > 1). Workers take directories from a
+	// shared queue; a directory's subdirectories go back on the queue instead
+	// of being walked recursively, so every worker stays busy until the tree is
+	// done, whatever its shape. parallel is false for the sequential walk. mu
+	// guards files, visitedDirs, the caller's hooks and the scan cache, so a
+	// hook never runs concurrently with itself. The first error of any worker
+	// cancels the rest.
+	parallel bool
+	qmu      sync.Mutex
+	qcond    *sync.Cond
+	queue    []dirTask
+	pending  int // queued plus in-progress tasks
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	errOnce  sync.Once
 	firstErr error
+}
+
+// dirTask is one directory waiting for a parallel worker.
+type dirTask struct {
+	absDir, relDir string
+	rules          []gitIgnoreRule
 }
 
 // addFile records a discovered file. Safe for concurrent readers.
@@ -279,25 +286,76 @@ func (w *discoverWalker) walkErr(inline error) error {
 	return inline
 }
 
-// descend walks a claimed subdirectory: in a new reader when a slot is free,
-// otherwise in the calling goroutine (so the walk never waits on a slot).
+// descend walks a claimed subdirectory: recursively in the sequential walk,
+// or as a queued task for the parallel workers.
 func (w *discoverWalker) descend(ctx context.Context, absDir, relDir string, rules []gitIgnoreRule) error {
-	if w.slots != nil {
-		select {
-		case w.slots <- struct{}{}:
-			w.wg.Add(1)
-			go func() {
-				defer w.wg.Done()
-				defer func() { <-w.slots }()
-				if err := w.walkDir(ctx, absDir, relDir, rules); err != nil {
-					w.fail(err)
-				}
-			}()
-			return nil
-		default:
-		}
+	if w.parallel {
+		w.enqueue(dirTask{absDir: absDir, relDir: relDir, rules: rules})
+		return nil
 	}
 	return w.walkDir(ctx, absDir, relDir, rules)
+}
+
+// walkParallel runs workers that each list one directory at a time until no
+// directory is queued or being listed. Errors go through fail.
+func (w *discoverWalker) walkParallel(ctx context.Context, absRoot string, workers int) {
+	w.parallel = true
+	w.qcond = sync.NewCond(&w.qmu)
+	w.enqueue(dirTask{absDir: absRoot})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				task, ok := w.dequeue()
+				if !ok {
+					return
+				}
+				if err := w.walkDir(ctx, task.absDir, task.relDir, task.rules); err != nil {
+					w.fail(err)
+				}
+				w.taskDone()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func (w *discoverWalker) enqueue(task dirTask) {
+	w.qmu.Lock()
+	w.queue = append(w.queue, task)
+	w.pending++
+	w.qmu.Unlock()
+	w.qcond.Signal()
+}
+
+// dequeue takes the most recently queued directory (depth first, so the queue
+// stays small) and reports false once nothing is queued or in progress.
+func (w *discoverWalker) dequeue() (dirTask, bool) {
+	w.qmu.Lock()
+	defer w.qmu.Unlock()
+	for len(w.queue) == 0 {
+		if w.pending == 0 {
+			return dirTask{}, false
+		}
+		w.qcond.Wait()
+	}
+	last := len(w.queue) - 1
+	task := w.queue[last]
+	w.queue[last] = dirTask{}
+	w.queue = w.queue[:last]
+	return task, true
+}
+
+func (w *discoverWalker) taskDone() {
+	w.qmu.Lock()
+	w.pending--
+	done := w.pending == 0
+	w.qmu.Unlock()
+	if done {
+		w.qcond.Broadcast()
+	}
 }
 
 type gitIgnoreRule struct {
