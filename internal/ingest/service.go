@@ -4856,6 +4856,9 @@ func (s *Service) resolveSidecarTranscript(ctx context.Context, doc model.Docume
 // caller finalizes only after recognition has had its chance, since recognition
 // is an independent representation source (#622).
 func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, bool, error) {
+	// SPEC §8.6.13: the no-speech record describes one derivation. This one
+	// starts from none; a decode that finds no speech writes it again.
+	s.clearNoSpeechIdentity(ctx, doc.RelPath)
 	done, err := s.resolveSidecarTranscript(ctx, doc, forceReindex)
 	if err != nil || done {
 		return false, false, err
@@ -4914,7 +4917,6 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		}
 		if produced {
 			s.addRepresentations(1)
-			s.clearNoSpeechIdentity(ctx, doc.RelPath)
 			return false, false, nil
 		}
 		// §8.6.13 skip action (#961): the transcript was refused because its windowed

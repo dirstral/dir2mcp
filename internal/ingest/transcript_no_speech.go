@@ -10,6 +10,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/statefs"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // This file implements the SPEC 0.93.0 no-speech outcome. A speech-to-text
@@ -215,18 +216,20 @@ func (s *Service) settlePendingNoSpeech(ctx context.Context, doc model.Document,
 	return true, true
 }
 
-// noSpeechIdentitySettingPrefix keys the durable record of the STT derivation
-// identity that found no speech in a document (SPEC §8.6.13). A no-speech track
-// has no transcript representation to carry its identity in meta_json, so the
-// record lives in the store's settings table, one key per rel_path.
-const noSpeechIdentitySettingPrefix = "no_speech_identity:"
-
 // settingsStore is the optional store capability behind the no-speech identity
-// record. A store without it records nothing, and a no-speech outcome is then
+// record (store.NoSpeechIdentitySettingKey, SPEC §8.6.13). A no-speech track has
+// no transcript representation whose meta_json could carry its identity, so the
+// record is one settings row per rel_path. Its lifecycle keeps it from going
+// stale: it is deleted whenever the document's transcript is derived again
+// (content change, forced reindex, retry, identity change), written only when
+// that derivation finds no speech, and deleted with the document by
+// MarkDocumentDeleted (which a delete, a rename and a move all reach). A store
+// without the capability records nothing, and a no-speech outcome is then
 // decoded again only when its content changes.
 type settingsStore interface {
 	GetSetting(ctx context.Context, key string) (string, error)
 	SetSetting(ctx context.Context, key, value string) error
+	DeleteSetting(ctx context.Context, key string) error
 }
 
 // recordNoSpeechIdentity stores the active STT derivation identity as the one
@@ -238,24 +241,22 @@ func (s *Service) recordNoSpeechIdentity(ctx context.Context, relPath string) {
 	if !ok {
 		return
 	}
-	if err := st.SetSetting(ctx, noSpeechIdentitySettingPrefix+relPath, s.activeTranscriptIdentity()); err != nil {
+	if err := st.SetSetting(ctx, store.NoSpeechIdentitySettingKey(relPath), s.activeTranscriptIdentity()); err != nil {
 		s.getLogger().Printf("stt: record the no-speech derivation identity of %s: %v", relPath, err)
 	}
 }
 
-// clearNoSpeechIdentity drops the no-speech record of relPath once it has a
-// transcript: that transcript's meta_json now carries the identity, and a stale
-// record would make every later run decode the document again.
+// clearNoSpeechIdentity deletes the no-speech record of relPath. It runs at the
+// start of every transcript derivation of the document, so a record only ever
+// describes the derivation that wrote it: a later decode with speech, a
+// sidecar that now wins, or a provider failure leaves no record behind, and a
+// decode that finds no speech again writes a fresh one.
 func (s *Service) clearNoSpeechIdentity(ctx context.Context, relPath string) {
 	st, ok := s.store.(settingsStore)
 	if !ok {
 		return
 	}
-	value, err := st.GetSetting(ctx, noSpeechIdentitySettingPrefix+relPath)
-	if err != nil || value == "" {
-		return
-	}
-	if err := st.SetSetting(ctx, noSpeechIdentitySettingPrefix+relPath, ""); err != nil {
+	if err := st.DeleteSetting(ctx, store.NoSpeechIdentitySettingKey(relPath)); err != nil {
 		s.getLogger().Printf("stt: clear the no-speech derivation identity of %s: %v", relPath, err)
 	}
 }
@@ -273,7 +274,7 @@ func (s *Service) noSpeechIdentityStale(ctx context.Context, existing model.Docu
 	if !ok {
 		return false
 	}
-	recorded, err := st.GetSetting(ctx, noSpeechIdentitySettingPrefix+existing.RelPath)
+	recorded, err := st.GetSetting(ctx, store.NoSpeechIdentitySettingKey(existing.RelPath))
 	if err != nil || recorded == "" {
 		return false
 	}
