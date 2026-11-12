@@ -28,6 +28,38 @@ func TestLibreOfficeConfig_ExtractorValueAccepted(t *testing.T) {
 	}
 }
 
+func TestLibreOfficeConfig_CommandKeySpellingsLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"nested ingest.libreoffice.command", "root_dir: ./repo\ningest:\n  libreoffice:\n    command: /usr/bin/soffice\n"},
+		{"nested libreoffice.command", "root_dir: ./repo\nlibreoffice:\n  command: /usr/bin/soffice\n"},
+		{"flat libreoffice_command", "root_dir: ./repo\nlibreoffice_command: /usr/bin/soffice\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+			writeFile(t, path, tc.body)
+			cfg, err := config.LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile failed: %v", err)
+			}
+			if cfg.IngestLibreOfficeCommand != "/usr/bin/soffice" {
+				t.Fatalf("IngestLibreOfficeCommand = %q, want /usr/bin/soffice", cfg.IngestLibreOfficeCommand)
+			}
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w.Error(), "libreoffice") {
+					t.Fatalf("recognized key must not warn, got: %v", w)
+				}
+			}
+		})
+	}
+	if got := config.Default().IngestLibreOfficeCommand; got != "" {
+		t.Fatalf("default IngestLibreOfficeCommand = %q, want empty (resolve from PATH)", got)
+	}
+}
+
 func TestLibreOfficeConfig_TimeoutDefault(t *testing.T) {
 	cfg := config.Default()
 	if cfg.IngestLibreOfficeTimeoutSec != 300 || config.DefaultLibreOfficeTimeoutSec != 300 {

@@ -522,41 +522,47 @@ ingest:
 
 No extraction engine reads the legacy binary Word format (`.doc`) directly. The
 `libreoffice` engine fills that gap. It is a T2 engine, like pandoc, and it is
-turned on by capability: it is active when a `soffice` (or `libreoffice`)
-binary AND a `pandoc` binary are on `PATH` and both pass a short probe. When
+turned on by capability: it is active when a LibreOffice binary AND a `pandoc`
+binary resolve and both pass a short probe (`--version`). The LibreOffice binary
+is `ingest.libreoffice.command` when it is set, else `soffice` on `PATH`, else
+`libreoffice` on `PATH`. When
 either is missing, the engine is off and each `.doc` is a durable skip
 (`skip_reason=unsupported_format`), the same as a missing pandoc for `.odt`.
 
 For each `.doc`, the engine:
 
-1. Copies the bytes into a new private temporary folder. It never writes next
-   to the source file, so a read-only corpus mount works.
+1. Copies the bytes into a new private temporary folder outside the corpus. It
+   never writes into the corpus, so a read-only corpus mount works.
 2. Runs `soffice --headless --norestore --convert-to docx` in that folder, with
-   a LibreOffice profile for that conversion only, so conversions can run in
-   parallel.
+   a LibreOffice profile and an output folder for that conversion only, so
+   conversions can run in parallel and two files with the same name never
+   share an output file.
 3. Reads the `.docx` with pandoc (the same path as the pandoc engine), so the
    text and its provenance are the same as for a `.docx`: flat
    `extracted_markdown`, no pages and no boxes. The representation records
    `provider: libreoffice`.
-4. Removes the temporary folder, also after a failure or a timeout.
+4. Removes the temporary folder after the read, also after a failure or a
+   timeout in either step.
 
 Under `ingest.extractor: auto` the engine runs beside the primary engine and
 reads only `.doc`. `ingest.extractor: libreoffice` pins it: only `.doc` is
 extracted, and there is no fallback to another engine. A pin of any other
 engine (for example `pandoc`) does not turn it on.
 
-Each conversion has a time limit:
+Each `.doc` has one time limit for the conversion and the pandoc read
+together:
 
 ```yaml
 ingest:
   libreoffice:
+    command: ""        # optional; e.g. /usr/bin/soffice. Empty = soffice, then libreoffice, from PATH
     timeout_sec: 600   # default: 300; must be greater than 0
 ```
 
 - Env equivalent: `DIR2MCP_LIBREOFFICE_TIMEOUT_SEC=600`. The env value wins over the file.
-- When the limit expires, dir2mcp kills the whole LibreOffice process group and records an error for that document only. Indexing continues with the next document. The error names the setting, for example `libreoffice conversion timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
+- When the limit expires, dir2mcp stops every process the engine started for the document (the whole LibreOffice process group, or the pandoc process) and records an error for that document only. Indexing continues with the next document. The error names the document and the setting, for example `libreoffice extract old/notes.doc: libreoffice extraction timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
 - A conversion that fails (for example an encrypted or damaged `.doc`) is a per-document error under the usual rules. The daemon log gets one line that names the engine and the document.
-- On a corpus indexed by an older version, the `.doc` files stored as `unsupported_format` skips are indexed on the next incremental run after both binaries are installed.
+- A `.doc` that an earlier scan recorded as an `unsupported_format` skip or error is extracted on the first scan in which the engine is available, also when its content is unchanged. You do not need `--force` or a reindex.
 
 See [optional extraction binaries](install.md#optional-extraction-binaries) for the install commands.
 

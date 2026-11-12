@@ -42,10 +42,14 @@ var (
 	sofficeProbeEntries = map[string]*sofficeProbeEntry{}
 )
 
-// resolveSofficeBinary returns the LibreOffice executable found on PATH (soffice
-// first, then libreoffice) and whether one resolved. The path itself is never
-// put in diagnostics.
-func resolveSofficeBinary() (string, bool) {
+// resolveSofficeBinary returns the LibreOffice executable for cfg and whether
+// one resolved: the first field of ingest.libreoffice.command when it is set,
+// else soffice on PATH, else libreoffice on PATH (spec 0.93.0 §7.4.B). The path
+// itself is never put in diagnostics.
+func resolveSofficeBinary(cfg config.Config) (string, bool) {
+	if fields := strings.Fields(cfg.IngestLibreOfficeCommand); len(fields) > 0 {
+		return fields[0], true
+	}
 	for _, name := range sofficeBinaryNames {
 		if p, err := exec.LookPath(name); err == nil {
 			return p, true
@@ -98,7 +102,7 @@ func runSofficeVersionProbe(ctx context.Context, bin string) error {
 // "what to install" wording in the startup banner, doctor and coverage hint.
 func libreofficeMissing(ctx context.Context, cfg config.Config) []string {
 	var missing []string
-	if bin, ok := resolveSofficeBinary(); !ok || sofficeFunctionalCheck(bin) != nil {
+	if bin, ok := resolveSofficeBinary(cfg); !ok || sofficeFunctionalCheck(bin) != nil {
 		missing = append(missing, "soffice (LibreOffice)")
 	}
 	if !pandocAvailableContext(ctx, cfg) {

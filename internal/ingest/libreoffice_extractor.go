@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/dirstral/dir2mcp/internal/config"
 )
 
 const (
@@ -36,35 +38,43 @@ const (
 // with the same provenance, as a .docx the pandoc engine reads: no pages, no
 // bboxes, no region spans.
 //
-// It never writes next to the source file: it gets the bytes, not the path, and
-// every file it creates lives under one os.MkdirTemp directory that it removes
-// before it returns, on success, failure and timeout alike.
+// It never writes into the corpus: it gets the bytes, not the path, and every
+// file it creates (the input copy, the per-conversion profile and the output
+// directory) lives under one os.MkdirTemp directory that it removes after the
+// read step, on success, failure and timeout alike.
 type libreofficeExtractor struct {
-	// soffice is the LibreOffice binary to run. Empty resolves soffice (then
-	// libreoffice) from PATH at call time.
+	// soffice is the configured LibreOffice command (ingest.libreoffice.command);
+	// its first field is the binary. Empty resolves soffice (then libreoffice)
+	// from PATH at call time.
 	soffice string
-	// timeout bounds one conversion (ingest.libreoffice.timeout_sec).
+	// timeout bounds one extraction of one document: the conversion AND the
+	// pandoc read together (ingest.libreoffice.timeout_sec).
 	timeout time.Duration
 	// pandoc reads the converted .docx.
 	pandoc *pandocExtractor
 }
 
-// NewLibreOfficeExtractor returns the libreoffice engine. pandocCmd is the
-// configured ingest.pandoc.command (blank resolves pandoc from PATH), so the
-// .docx step uses exactly the pandoc the pandoc engine uses. A timeout of 0 or
-// less falls back to the shipped default.
-func NewLibreOfficeExtractor(pandocCmd string, timeout time.Duration) *libreofficeExtractor {
+// NewLibreOfficeExtractor returns the libreoffice engine. sofficeCmd is the
+// configured ingest.libreoffice.command (blank resolves soffice, then
+// libreoffice, from PATH). pandocCmd is the configured ingest.pandoc.command
+// (blank resolves pandoc from PATH), so the .docx step uses exactly the pandoc
+// the pandoc engine uses. A timeout of 0 or less falls back to the default.
+func NewLibreOfficeExtractor(sofficeCmd, pandocCmd string, timeout time.Duration) *libreofficeExtractor {
 	if timeout <= 0 {
 		timeout = defaultLibreOfficeTimeout
 	}
-	return &libreofficeExtractor{timeout: timeout, pandoc: NewPandocExtractor(pandocCmd)}
+	return &libreofficeExtractor{
+		soffice: strings.TrimSpace(sofficeCmd),
+		timeout: timeout,
+		pandoc:  NewPandocExtractor(pandocCmd),
+	}
 }
 
 // defaultLibreOfficeTimeout mirrors config.DefaultLibreOfficeTimeoutSec for
 // callers that build the extractor without a config.
 const defaultLibreOfficeTimeout = 300 * time.Second
 
-// libreofficeTimeoutError is the per-document error for a conversion that hit
+// libreofficeTimeoutError is the per-document error for an extraction that hit
 // ingest.libreoffice.timeout_sec. It names the limit so the operator knows
 // which setting to raise.
 type libreofficeTimeoutError struct {
@@ -72,53 +82,70 @@ type libreofficeTimeoutError struct {
 }
 
 func (e *libreofficeTimeoutError) Error() string {
-	return fmt.Sprintf("libreoffice conversion timed out after %s (ingest.libreoffice.timeout_sec=%d)", e.limit, int64(e.limit/time.Second))
+	return fmt.Sprintf("libreoffice extraction timed out after %s (ingest.libreoffice.timeout_sec=%d)", e.limit, int64(e.limit/time.Second))
 }
 
 // Extract converts data (a .doc) to .docx and returns the Markdown pandoc
-// reads from it. relPath is not used: the conversion works on the bytes only,
-// so the source path never reaches a command line or a temp file name.
+// reads from it. One deadline (l.timeout) covers both steps; when it expires,
+// the LibreOffice process group or the pandoc process is killed. relPath is not
+// used: the conversion works on the bytes only, so the source path never
+// reaches a command line or a temp file name (the caller names the document in
+// the error).
 func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byte) (string, error) {
-	docx, err := l.convertToDocx(ctx, data)
+	bin, err := l.sofficeBinary()
 	if err != nil {
 		return "", err
 	}
+	work, err := os.MkdirTemp("", "dir2mcp-libreoffice-*")
+	if err != nil {
+		return "", fmt.Errorf("create libreoffice work dir: %w", err)
+	}
+	// Removed after the read step, and after a failure or a timeout in either
+	// step.
+	defer func() { _ = os.RemoveAll(work) }()
+
+	dctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
+	docx, err := l.convertToDocx(dctx, bin, work, data)
+	if err != nil {
+		return "", l.deadlineErr(ctx, dctx, err)
+	}
 	// The pandoc step infers the input format from the extension, so the
 	// converted bytes are handed over under a .docx name.
-	md, err := l.pandoc.Extract(ctx, "converted.docx", docx)
+	md, err := l.pandoc.Extract(dctx, "converted.docx", docx)
 	if err != nil {
-		return "", fmt.Errorf("read converted .docx: %w", err)
+		return "", l.deadlineErr(ctx, dctx, fmt.Errorf("read converted .docx: %w", err))
 	}
 	return md, nil
 }
 
-// sofficeBinary returns the LibreOffice executable to run.
-func (l *libreofficeExtractor) sofficeBinary() (string, error) {
-	if strings.TrimSpace(l.soffice) != "" {
-		return l.soffice, nil
+// deadlineErr maps an error that happened because the per-document deadline
+// expired (and not because the caller cancelled) to libreofficeTimeoutError.
+func (l *libreofficeExtractor) deadlineErr(parent, dctx context.Context, err error) error {
+	if errors.Is(dctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+		return &libreofficeTimeoutError{limit: l.timeout}
 	}
-	if bin, ok := resolveSofficeBinary(); ok {
+	return err
+}
+
+// sofficeBinary returns the LibreOffice executable to run: the first field of
+// ingest.libreoffice.command, else soffice or libreoffice from PATH.
+func (l *libreofficeExtractor) sofficeBinary() (string, error) {
+	if fields := strings.Fields(l.soffice); len(fields) > 0 {
+		return fields[0], nil
+	}
+	if bin, ok := resolveSofficeBinary(config.Config{}); ok {
 		return bin, nil
 	}
 	return "", errors.New("soffice (LibreOffice) not found on PATH")
 }
 
-// convertToDocx runs one headless LibreOffice conversion in a private work
-// directory and returns the .docx bytes. The work directory holds the input
-// copy, the output directory and a per-conversion LibreOffice profile, so
-// conversions can run in parallel (LibreOffice locks its profile) and leave
-// nothing behind.
-func (l *libreofficeExtractor) convertToDocx(ctx context.Context, data []byte) ([]byte, error) {
-	bin, err := l.sofficeBinary()
-	if err != nil {
-		return nil, err
-	}
-	work, err := os.MkdirTemp("", "dir2mcp-libreoffice-*")
-	if err != nil {
-		return nil, fmt.Errorf("create libreoffice work dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(work) }()
-
+// convertToDocx runs one headless LibreOffice conversion inside work and
+// returns the .docx bytes. work holds the input copy, the output directory and
+// a per-conversion LibreOffice profile, so conversions can run in parallel
+// (LibreOffice locks its profile) and two documents with the same name never
+// share an output file. The caller owns and removes work.
+func (l *libreofficeExtractor) convertToDocx(ctx context.Context, bin, work string, data []byte) ([]byte, error) {
 	profileDir := filepath.Join(work, "profile")
 	outDir := filepath.Join(work, "out")
 	for _, dir := range []string{profileDir, outDir} {
@@ -130,20 +157,17 @@ func (l *libreofficeExtractor) convertToDocx(ctx context.Context, data []byte) (
 	if err := os.WriteFile(inPath, data, 0o600); err != nil {
 		return nil, fmt.Errorf("write libreoffice input: %w", err)
 	}
-
-	if err := l.runConversion(ctx, bin, profileDir, outDir, inPath); err != nil {
+	if err := runSofficeConversion(ctx, bin, profileDir, outDir, inPath); err != nil {
 		return nil, err
 	}
 	return readConvertedDocx(filepath.Join(outDir, strings.TrimSuffix(libreofficeInputName, ".doc")+".docx"))
 }
 
-// runConversion runs soffice with the per-file timeout. The command runs in its
-// own process group, and both the timeout and a finished run kill that whole
-// group, so no soffice.bin helper survives the conversion.
-func (l *libreofficeExtractor) runConversion(ctx context.Context, bin, profileDir, outDir, inPath string) error {
-	cctx, cancel := context.WithTimeout(ctx, l.timeout)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, bin,
+// runSofficeConversion runs soffice under ctx. The command runs in its own
+// process group, and both a cancelled ctx (the deadline) and a finished run
+// kill that whole group, so no soffice.bin helper survives the conversion.
+func runSofficeConversion(ctx context.Context, bin, profileDir, outDir, inPath string) error {
+	cmd := exec.CommandContext(ctx, bin,
 		"--headless", "--norestore",
 		"-env:UserInstallation="+fileURL(profileDir),
 		"--convert-to", "docx",
@@ -163,9 +187,6 @@ func (l *libreofficeExtractor) runConversion(ctx context.Context, bin, profileDi
 	reapLibreOfficeGroup(cmd)
 	if runErr == nil {
 		return nil
-	}
-	if errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		return &libreofficeTimeoutError{limit: l.timeout}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()

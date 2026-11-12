@@ -251,7 +251,8 @@ and `dir2mcp status` and `dir2mcp doctor` tell you what to install.
 The `libreoffice` engine needs both binaries: it converts each `.doc` to
 `.docx` with headless LibreOffice in a private temporary folder, then reads the
 `.docx` with pandoc. It never writes next to the source file, so a read-only
-corpus mount works. dir2mcp looks for `soffice` first, then `libreoffice`.
+corpus mount works. dir2mcp uses `ingest.libreoffice.command` when it is set,
+else it looks for `soffice` first, then `libreoffice`.
 `libreoffice-writer-nogui` is the smallest package that converts Word files on
 Debian and Ubuntu; on Alpine the package is `libreoffice-writer`. See
 [document extraction](configuration.md#document-extraction-modes--fallback)

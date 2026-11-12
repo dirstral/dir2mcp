@@ -254,7 +254,7 @@ func describeExplicitLibreOffice(ctx context.Context, cfg config.Config) Extract
 	if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=libreoffice but " + strings.Join(missing, " and ") + " is unavailable or failed its functional check"}
 	}
-	return ExtractorDecision{Name: "libreoffice", Source: "explicit", Reason: "soffice and pandoc auto-detected"}
+	return ExtractorDecision{Name: "libreoffice", Source: "explicit", Reason: "LibreOffice and pandoc resolved and passed their probes"}
 }
 
 // DescribeLibreOfficeEngine describes the capability-activated libreoffice
@@ -284,7 +284,7 @@ func describeLibreOfficeEngine(ctx context.Context, cfg config.Config) Extractor
 		if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
 			return ExtractorDecision{Source: "disabled", Reason: strings.Join(missing, " and ") + " not found on PATH or failed its functional check"}
 		}
-		return ExtractorDecision{Name: "libreoffice", Source: "auto", Reason: "soffice and pandoc auto-detected"}
+		return ExtractorDecision{Name: "libreoffice", Source: "auto", Reason: "LibreOffice and pandoc resolved and passed their probes"}
 	default:
 		return ExtractorDecision{Source: "ineligible", Reason: "not eligible under ingest.extractor=" + policy}
 	}

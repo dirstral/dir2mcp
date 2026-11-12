@@ -347,6 +347,11 @@ type Config struct {
 	// LibreOffice process group is killed and the document gets a per-document
 	// error.
 	IngestLibreOfficeTimeoutSec int
+	// IngestLibreOfficeCommand optionally overrides the LibreOffice binary of
+	// the libreoffice extraction engine (config `ingest.libreoffice.command`,
+	// spec 0.93.0); its first field is the binary. Empty resolves `soffice`,
+	// then `libreoffice`, from PATH.
+	IngestLibreOfficeCommand string
 	// IngestPandocCommand optionally configures a local pandoc CLI command
 	// (its first field is the binary) used for the capability-activated pandoc
 	// document extractor (#393). Empty resolves `pandoc` from PATH.
@@ -1583,6 +1588,7 @@ type fileConfig struct {
 	IngestDoclingServeURL               *string
 	IngestDoclingTimeoutSec             *int
 	IngestLibreOfficeTimeoutSec         *int
+	IngestLibreOfficeCommand            *string
 	IngestPandocCommand                 *string
 	ElevenLabsBaseURL                   *string
 	ElevenLabsTTSVoiceID                *string
@@ -1759,22 +1765,23 @@ type fileConfig struct {
 }
 
 type persistedConfig struct {
-	RootDir         string   `yaml:"root_dir"`
-	StateDir        string   `yaml:"state_dir"`
-	ListenAddr      string   `yaml:"listen_addr"`
-	MCPPath         string   `yaml:"mcp_path"`
-	ProtocolVersion string   `yaml:"protocol_version"`
-	Public          bool     `yaml:"public"`
-	AuthMode        string   `yaml:"auth_mode"`
-	ServerName      string   `yaml:"server_name"`
-	RateLimitRPS    int      `yaml:"rate_limit_rps"`
-	RateLimitBurst  int      `yaml:"rate_limit_burst"`
-	TrustedProxies  []string `yaml:"trusted_proxies"`
-	PathExcludes    []string `yaml:"path_excludes"`
-	SecretPatterns  []string `yaml:"secret_patterns"`
-	DoclingCommand  string   `yaml:"docling_command"`
-	DoclingServeURL string   `yaml:"docling_serve_url"`
-	PandocCommand   string   `yaml:"pandoc_command"`
+	RootDir            string   `yaml:"root_dir"`
+	StateDir           string   `yaml:"state_dir"`
+	ListenAddr         string   `yaml:"listen_addr"`
+	MCPPath            string   `yaml:"mcp_path"`
+	ProtocolVersion    string   `yaml:"protocol_version"`
+	Public             bool     `yaml:"public"`
+	AuthMode           string   `yaml:"auth_mode"`
+	ServerName         string   `yaml:"server_name"`
+	RateLimitRPS       int      `yaml:"rate_limit_rps"`
+	RateLimitBurst     int      `yaml:"rate_limit_burst"`
+	TrustedProxies     []string `yaml:"trusted_proxies"`
+	PathExcludes       []string `yaml:"path_excludes"`
+	SecretPatterns     []string `yaml:"secret_patterns"`
+	DoclingCommand     string   `yaml:"docling_command"`
+	DoclingServeURL    string   `yaml:"docling_serve_url"`
+	PandocCommand      string   `yaml:"pandoc_command"`
+	LibreOfficeCommand string   `yaml:"libreoffice_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -2289,6 +2296,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		DoclingCommand:                      cfg.DoclingCommand,
 		DoclingServeURL:                     cfg.IngestDoclingServeURL,
 		PandocCommand:                       cfg.IngestPandocCommand,
+		LibreOfficeCommand:                  cfg.IngestLibreOfficeCommand,
 		SessionInactivityTimeout:            cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:                  cfg.SessionMaxLifetime,
 		HealthCheckInterval:                 cfg.HealthCheckInterval,
@@ -3057,6 +3065,9 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.IngestPandocCommand != nil {
 		cfg.IngestPandocCommand = *fc.IngestPandocCommand
+	}
+	if fc.IngestLibreOfficeCommand != nil {
+		cfg.IngestLibreOfficeCommand = *fc.IngestLibreOfficeCommand
 	}
 	if fc.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fc.ElevenLabsBaseURL
@@ -3954,6 +3965,8 @@ var configKeyAliases = map[string]string{
 	"ingest.docling.serve_url":                 "docling_serve_url",
 	"pandoc.command":                           "pandoc_command",
 	"ingest.pandoc.command":                    "pandoc_command",
+	"libreoffice.command":                      "libreoffice_command",
+	"ingest.libreoffice.command":               "libreoffice_command",
 	"stt.elevenlabs.api_key":                   "elevenlabs_api_key",
 	"secrets.elevenlabs_api_key":               "elevenlabs_api_key",
 	"secrets.x402_facilitator_url":             "x402_facilitator_url",
@@ -4602,6 +4615,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestDoclingServeURL = strPtr(value)
 	case "pandoc_command":
 		cfg.IngestPandocCommand = strPtr(value)
+	case "libreoffice_command":
+		cfg.IngestLibreOfficeCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "rag.evidence_threshold":
@@ -4931,6 +4946,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("ingest_docling_timeout_sec", cfg.IngestDoclingTimeoutSec)
 	writeInt("ingest_libreoffice_timeout_sec", cfg.IngestLibreOfficeTimeoutSec)
 	writeScalar("pandoc_command", cfg.PandocCommand)
+	writeScalar("libreoffice_command", cfg.LibreOfficeCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())

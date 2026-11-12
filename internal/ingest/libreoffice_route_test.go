@@ -41,7 +41,7 @@ func TestSelectExtractionRoute_LibreOffice(t *testing.T) {
 }
 
 func TestLibreOfficeTimeout_DefaultWhenUnset(t *testing.T) {
-	if got := NewLibreOfficeExtractor("", 0).timeout; got != defaultLibreOfficeTimeout {
+	if got := NewLibreOfficeExtractor("", "", 0).timeout; got != defaultLibreOfficeTimeout {
 		t.Fatalf("timeout = %s, want default %s", got, defaultLibreOfficeTimeout)
 	}
 	if int64(defaultLibreOfficeTimeout/time.Second) != config.DefaultLibreOfficeTimeoutSec {
