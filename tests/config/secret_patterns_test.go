@@ -107,6 +107,7 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 		{"baikonur slug", "https://example.org/news/bajkonur-pu" + skDash + "soyuz-28-tm-77-kosmonavty-na-orbite", false},
 		{"task id with sk_ mid-word", "ta" + skUnder + synthLowerRun(32), false},
 		{"task id in prose", "see job ta" + skUnder + synthLowerRun(32) + " for details", false},
+		{"sk_ after an underscore", "task_" + skUnder + synthLowerRun(32), false},
 		{"key that only ends in token", "my" + tok + "=" + synthRun(30), false},
 		// The two must-not-hit samples SPEC §7.2 (spec 0.93.0) lists verbatim.
 		{"spec redirect sample", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org", false},

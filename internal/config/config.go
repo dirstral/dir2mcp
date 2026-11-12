@@ -2016,9 +2016,10 @@ func Default() Config {
 			// document that quotes them.
 			`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			// Stripe-style `sk_` and generic `api_` keys. The leading boundary
-			// requires the prefix to start a word, so an identifier that holds
-			// `sk_` or `api_` in the middle (`task_...`, `rapi_...`) is not a key.
-			`(?:^|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`,
+			// requires the prefix to start a word (an underscore does not start
+			// one), so an identifier that holds `sk_` or `api_` in the middle
+			// (`task_...`, `task_sk_...`, `rapi_...`) is not a key.
+			`(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`,
 			// OpenAI/Mistral-style hyphenated secret keys, e.g. "sk-proj-..."
 			// and "sk-...". Case-sensitive lowercase "sk-" prefix; the {20,}
 			// run of key chars keeps this from matching ordinary hyphenated

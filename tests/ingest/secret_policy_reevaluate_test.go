@@ -84,12 +84,13 @@ func forgetSecretPolicyIdentity(t *testing.T, st *store.SQLiteStore, dbPath stri
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	res, err := db.ExecContext(context.Background(), `DELETE FROM settings WHERE key = ?`, store.SecretPolicyIdentitySetting)
+	res, err := db.ExecContext(context.Background(), `DELETE FROM settings WHERE key IN (?, ?)`,
+		store.SecretPolicyIdentitySetting, store.SecretPolicyPatternsSetting)
 	if err != nil {
 		t.Fatalf("delete secret policy identity: %v", err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		t.Fatalf("delete secret policy identity: rows=%d err=%v, want exactly 1 recorded row", n, err)
+	if n, err := res.RowsAffected(); err != nil || n != 2 {
+		t.Fatalf("delete secret policy identity: rows=%d err=%v, want the 2 recorded rows", n, err)
 	}
 	recorded, err := st.SecretPolicyIdentity(context.Background())
 	if err != nil {

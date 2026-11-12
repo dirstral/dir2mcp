@@ -70,6 +70,7 @@ var ErrSecretExcluded = errors.New("content withheld: it matched a configured se
 func (s *Service) beginDocumentSecretScope(patterns []*regexp.Regexp) {
 	s.docSecretPatterns = patterns
 	s.secretExcludedThisDoc = false
+	s.secretWithholdFailedThisDoc = false
 }
 
 // screenDerivedSecrets reports whether derived text must be withheld because it
@@ -141,7 +142,12 @@ func (s *Service) withholdDocumentForSecret(ctx context.Context, doc model.Docum
 		doc.RelPath, kind,
 	)
 
-	s.retireDocumentRepresentations(ctx, doc.RelPath)
+	if err := s.retireRepresentationsForPath(ctx, doc.RelPath, "secret policy"); err != nil {
+		// Still record the row as withheld below: that hides the document from
+		// list_files and status. The flag keeps its done marker blank, so the
+		// next scan retries the retirement (see finalizeSecretExcluded).
+		s.secretWithholdFailedThisDoc = true
+	}
 
 	doc.Status = string(model.DocumentStatusSecretExcluded)
 	doc.SkipReason = model.SkipReasonSecretExcluded
@@ -149,6 +155,7 @@ func (s *Service) withholdDocumentForSecret(ctx context.Context, doc model.Docum
 	doc.ErrorMessage = ""
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("secret policy: record secret_excluded for %s failed: %v", doc.RelPath, err)
+		s.secretWithholdFailedThisDoc = true
 	}
 
 	s.creditSecretExcludedSkip(doc)
@@ -181,31 +188,6 @@ func (s *Service) creditSecretExcludedSkip(doc model.Document) {
 	s.notifyDocumentSkip(doc)
 }
 
-// retireDocumentRepresentations tombstones every live representation of a
-// document together with its chunks, which is what removes them from retrieval
-// (§6.6: SQLite `deleted = 1` is the source of truth a vector hit is tested
-// against, so the vectors disappear from the running session and stay gone after
-// a restart).
-//
-// It reuses the #692 reconciliation store surface rather than adding a second
-// delete path. Each producer screens its own text BEFORE persisting it, so in the
-// ordinary case there is nothing to retire; this covers the document that had a
-// clean representation written earlier in the SAME run (a clean transcript
-// followed by a translation that carries the credential).
-//
-// Best-effort with a loud log, never fatal: a store that cannot retire must not
-// convert a withheld document into a failed run. The document row is still
-// recorded `secret_excluded` either way.
-// The returned error is deliberately DROPPED here, preserving the decision above.
-// The size-cap caller (#682) does propagate it, and the two differ for a reason
-// worth stating: a size-cap verdict is reproducible, so failing the document and
-// retrying next scan costs a re-read and nothing else, while a derived secret
-// verdict is not reproducible (the incremental gate will not re-run OCR or STT for
-// an unchanged file), so refusing to settle it would risk losing the verdict.
-func (s *Service) retireDocumentRepresentations(ctx context.Context, relPath string) {
-	_ = s.retireRepresentationsForPath(ctx, relPath, "secret policy")
-}
-
 // retireRepresentationsForPath is the shared retirement step: it tombstones every
 // live representation of relPath together with its chunks, and labels its logs
 // with the policy that asked for it.
@@ -222,7 +204,7 @@ func (s *Service) retireDocumentRepresentations(ctx context.Context, relPath str
 // all is a capability gap, not a failure, so it logs and returns nil; and a
 // document with nothing live to retire is a success. The caller decides what to do
 // with a real failure, because the right answer differs by policy (see
-// retireDocumentRepresentations and settleSizeCapSkip).
+// withholdDocumentForSecret and settleSizeCapSkip).
 func (s *Service) retireRepresentationsForPath(ctx context.Context, relPath, policy string) error {
 	lister, listOK := s.store.(activeRepresentationLister)
 	retirer, retireOK := s.store.(representationRetirer)
@@ -291,5 +273,12 @@ func carrySecretExclusion(doc *model.Document, existing model.Document) {
 // the freshly re-read row is STILL `secret_excluded`, so a status another path
 // wrote out of band is never resurrected into a done state.
 func (s *Service) finalizeSecretExcluded(ctx context.Context, doc *model.Document, contentHash string) error {
+	if s.secretWithholdFailedThisDoc {
+		// The withheld row keeps a blank content_hash, which is the "not
+		// finalized" state: the next scan reprocesses the document, withholds it
+		// again and retries the retirement. Settling it now would leave live
+		// chunks under a row no later scan looks at again.
+		return fmt.Errorf("secret policy: withholding %s did not complete; the next scan retries", doc.RelPath)
+	}
 	return s.finalizeContentHashForStatus(ctx, doc, contentHash, string(model.DocumentStatusSecretExcluded))
 }
