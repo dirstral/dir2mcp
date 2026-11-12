@@ -536,6 +536,13 @@ type Service struct {
 	// scan compares again and retries the step instead of never looking again.
 	reconcileIncomplete bool
 
+	// pendingSecretPolicy is the secret policy identity (SPEC §7.2) this scan
+	// re-evaluates the corpus against. It is set at the start of a scan whose
+	// effective security.secret_patterns differ from the recorded set, and it is
+	// recorded by finishScan once the post-scan sweep completed. Empty means
+	// this scan has no re-evaluation pass.
+	pendingSecretPolicy string
+
 	// deferGateDocError suppresses the EAGER per-document status=error marking that
 	// the output quality gate normally applies (recordQualityGateDocError), scoping a
 	// gate rejection to the failing TRACK instead of the whole document (SPEC
@@ -2130,8 +2137,10 @@ func (s *Service) runScan(ctx context.Context) error {
 	}
 	// A changed pattern set (a binary upgrade with new defaults, or an operator
 	// edit) must reach documents withheld under the old set, which the
-	// incremental gates would otherwise never re-read (spec 0.93.0).
-	s.reevaluateSecretExclusions(ctx, compiledSecrets)
+	// incremental gates would otherwise never re-read, and indexed documents
+	// that the new set matches (SPEC §7.2, spec 0.93.0). The first half is
+	// armed here; finishScan runs the second.
+	s.beginSecretPolicyReevaluation(ctx, compiledSecrets)
 
 	existing, err := s.listActiveDocuments(ctx)
 	if err != nil {
@@ -2188,25 +2197,28 @@ func (s *Service) runScan(ctx context.Context) error {
 		if err := s.scanPass(ctx, passDerivation, discovered, compiledSecrets, forceReindex, seen); err != nil {
 			return err
 		}
-		return s.finishScan(ctx, existing, seen)
+		return s.finishScan(ctx, existing, seen, compiledSecrets)
 	}
 
 	if err := s.scanPass(ctx, passSingle, discovered, compiledSecrets, forceReindex, seen); err != nil {
 		return err
 	}
-	return s.finishScan(ctx, existing, seen)
+	return s.finishScan(ctx, existing, seen, compiledSecrets)
 }
 
 // finishScan closes out a completed scan: it tombstones the documents that are
 // no longer present, then records the pipeline output identity this scan
 // reconciled the corpus against (#692). The identity is recorded LAST, and only
 // on success, so an interrupted scan reconciles again next run rather than
-// claiming a cleanup it did not finish.
-func (s *Service) finishScan(ctx context.Context, existing, seen map[string]struct{}) error {
+// claiming a cleanup it did not finish. The secret policy sweep (SPEC §7.2) runs
+// here for the same reason: it must see the corpus this scan left, and it
+// records its identity only when it completed.
+func (s *Service) finishScan(ctx context.Context, existing, seen map[string]struct{}, secretPatterns []*regexp.Regexp) error {
 	if err := s.markMissingAsDeleted(ctx, existing, seen); err != nil {
 		return err
 	}
 	s.commitOutputReconciliation(ctx)
+	s.finishSecretPolicyReevaluation(ctx, secretPatterns)
 	return nil
 }
 
@@ -2618,6 +2630,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// before the gate and the upsert so an unchanged withheld document stays
 	// withheld instead of being written back as "ok".
 	carrySecretExclusion(&doc, existingDoc)
+	s.retireNewlyWithheld(ctx, existingDoc, doc)
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
@@ -3540,6 +3553,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// withheld for a secret in its DERIVED text must not be written back as "ok"
 	// when the container is re-extracted with the member's bytes unchanged.
 	carrySecretExclusion(&doc, existingDoc)
+	s.retireNewlyWithheld(ctx, existingDoc, doc)
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 
 	// Withhold the content_hash done marker until representations commit so an

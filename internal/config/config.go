@@ -2004,14 +2004,17 @@ func Default() Config {
 			`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
 			// Generic token assignment (SPEC §7.2, 0.93.0). The key name must be
 			// a whole word: `token` alone, or `token` after one credential word
-			// such as access, auth, api, bearer, secret, session, refresh,
-			// client, oauth, github or slack (with an optional `_`/`-`, and any
-			// prefix words before it, e.g. MY_APP_SECRET_TOKEN or X-Auth-Token).
+			// such as access, auth, api, bearer, secret, password, reset,
+			// session, service, deploy, vault, ci, job, github or slack (with an
+			// optional `_`/`-`, and any prefix words before it, e.g.
+			// MY_APP_SECRET_TOKEN, PASSWORD_RESET_TOKEN or X-Auth-Token). A
+			// credential key under another last word (`foo_token`) needs an
+			// operator rule.
 			// The leading boundary stops a match inside a longer key name, so a
 			// URL query value such as YouTube's `redir_token=`, a pagination
 			// `next_page_token=` and a form `csrf_token=` no longer withhold the
 			// document that quotes them.
-			`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
+			`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			// Stripe-style `sk_` and generic `api_` keys. The leading boundary
 			// requires the prefix to start a word, so an identifier that holds
 			// `sk_` or `api_` in the middle (`task_...`, `rapi_...`) is not a key.

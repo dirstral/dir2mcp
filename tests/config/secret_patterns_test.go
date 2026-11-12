@@ -107,6 +107,10 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 		{"baikonur slug", "https://example.org/news/bajkonur-pu" + skDash + "soyuz-28-tm-77-kosmonavty-na-orbite", false},
 		{"task id with sk_ mid-word", "ta" + skUnder + synthLowerRun(32), false},
 		{"task id in prose", "see job ta" + skUnder + synthLowerRun(32) + " for details", false},
+		{"key that only ends in token", "my" + tok + "=" + synthRun(30), false},
+		// The two must-not-hit samples SPEC §7.2 (spec 0.93.0) lists verbatim.
+		{"spec redirect sample", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org", false},
+		{"spec slug sample", "https://example.org/news/krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
 
 		// MUST match.
 		{"bare token colon", tok + ": " + synthRun(24), true},
@@ -116,6 +120,9 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 		{"prefixed secret token env", "MY_APP_SECRET_" + strings.ToUpper(tok) + "=" + synthRun(30), true},
 		{"auth token header", "X-Auth-T" + tok[1:] + ": " + synthRun(30), true},
 		{"access token query", "access_" + tok + "=" + synthRun(30), true},
+		{"password reset token env", "PASSWORD_RESET_" + strings.ToUpper(tok) + "=" + synthRun(24), true},
+		{"vault token env", "VAULT_" + strings.ToUpper(tok) + "=" + synthRun(30), true},
+		{"ci job token env", "CI_JOB_" + strings.ToUpper(tok) + "=" + synthRun(30), true},
 		{"openai project key env", "OPENAI_API_KEY=" + skDash + "proj-" + synthRun(40), true},
 		{"quoted hyphen key", `"` + skDash + synthRun(40) + `"`, true},
 		{"stripe style key", "key = " + skUnder + synthLowerRun(32), true},

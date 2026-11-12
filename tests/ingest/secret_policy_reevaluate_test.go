@@ -227,3 +227,65 @@ func TestSecretPolicy_NarrowedOperatorListReevaluates(t *testing.T) {
 	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "memo.md")
 }
+
+// requireWithheldAndRetired fails unless the document is `secret_excluded` and
+// has no live representation left for retrieval to return.
+func requireWithheldAndRetired(t *testing.T, st *store.SQLiteStore, relPath string) {
+	t.Helper()
+	doc := requireStatus(t, st, relPath, model.DocumentStatusSecretExcluded)
+	if doc.SkipReason != model.SkipReasonSecretExcluded {
+		t.Errorf("%s skip_reason = %q, want %q", relPath, doc.SkipReason, model.SkipReasonSecretExcluded)
+	}
+	reps, err := st.ActiveRepresentations(context.Background(), relPath)
+	if err != nil {
+		t.Fatalf("ActiveRepresentations(%s): %v", relPath, err)
+	}
+	if len(reps) != 0 {
+		t.Errorf("%s still has %d live representation(s); its text is searchable", relPath, len(reps))
+	}
+}
+
+// TestSecretPolicy_BroaderListWithholdsIndexedDocuments is the other direction
+// of SPEC §7.2: an operator adds a pattern, and the indexed documents it
+// matches are withheld with their representations retired, on an incremental
+// scan. The archive member is the case the content gate never re-reads: its
+// container is unchanged, so only the post-scan sweep can reach it.
+func TestSecretPolicy_BroaderListWithholdsIndexedDocuments(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "memo.md"), "Project codename: BLUEHERON-internal-2026\n")
+	writeFile(t, filepath.Join(root, "clean.md"), "The quarterly report covers delivery and revenue.\n")
+	data := buildZip(t, map[string]string{"inner.txt": "Codename BLUEHERON-archive-2026 in a member.\n"})
+	if err := os.WriteFile(filepath.Join(root, "bundle.zip"), data, 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	st, _ := newPolicyStore(t)
+
+	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
+	requireSearchable(t, st, "memo.md")
+	requireSearchable(t, st, "bundle.zip/inner.txt")
+	before, err := st.SecretPolicyIdentity(context.Background())
+	if err != nil {
+		t.Fatalf("SecretPolicyIdentity: %v", err)
+	}
+
+	custom := append(append([]string(nil), config.Default().SecretPatterns...), `BLUEHERON-[a-z]+-[0-9]{4}`)
+	runPolicyScan(t, policyConfig(root, stateDir, custom), st)
+	requireWithheldAndRetired(t, st, "memo.md")
+	requireWithheldAndRetired(t, st, "bundle.zip/inner.txt")
+	requireSearchable(t, st, "clean.md")
+
+	after, err := st.SecretPolicyIdentity(context.Background())
+	if err != nil {
+		t.Fatalf("SecretPolicyIdentity: %v", err)
+	}
+	if after == "" || after == before {
+		t.Errorf("identity after the broader scan = %q (before %q); want a new recorded value", after, before)
+	}
+
+	// The verdict sticks on the next incremental scan under the same list.
+	runPolicyScan(t, policyConfig(root, stateDir, custom), st)
+	requireWithheldAndRetired(t, st, "memo.md")
+	requireWithheldAndRetired(t, st, "bundle.zip/inner.txt")
+}

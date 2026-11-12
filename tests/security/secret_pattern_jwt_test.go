@@ -12,7 +12,7 @@ import (
 )
 
 const jwtPattern = `(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`
-const bearerPattern = `(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
+const bearerPattern = `(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
 
 func readCorpus(t *testing.T, filePath string) []string {
 	t.Helper()

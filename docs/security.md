@@ -38,7 +38,7 @@ The defaults (SPEC §7.2, spec 0.93.0):
 | AWS access key ID | `AKIA[0-9A-Z]{16}` |
 | AWS secret assignment | `(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?\|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}` |
 | JWT with an auth context | `(?i)(?:authorization\s*[:=]\s*bearer\s+\|(?:access\|id\|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` |
-| Generic token assignment | `(?i)(?:^\|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access\|auth\|api\|bearer\|secret\|private\|session\|refresh\|personal\|client\|oauth\|github\|gh\|gitlab\|slack\|npm\|pypi\|hf\|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}` |
+| Generic token assignment | `(?i)(?:^\|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access\|auth\|api\|app\|bearer\|secret\|private\|password\|reset\|session\|refresh\|personal\|client\|oauth\|service\|account\|admin\|deploy\|webhook\|install\|invite\|vault\|ci\|job\|runner\|registry\|github\|gh\|gitlab\|slack\|npm\|pypi\|hf\|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}` |
 | `sk_` and `api_` keys | `(?:^\|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}\|api_[A-Za-z0-9]{32})` |
 | `sk-` keys (OpenAI, Mistral) | `(?:^\|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}` |
 | Provider key assignment | `[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}` |
@@ -55,17 +55,25 @@ identifier such as `task_...` do not match. Before spec 0.93.0 these rules had
 no boundary, and documents that quoted such links were withheld.
 
 When the effective list changes (a new version with new defaults, or an edit
-to your config), the next scan evaluates every withheld document again. You do
-not need to run `dir2mcp reindex`. The store records a fingerprint of the list
-(`secret_policy_identity` in the settings table). When the fingerprint
-changes, the scan clears the content hash of each `secret_excluded` document,
-and of each archive that holds one, so the normal pipeline reads them again. A
-document that no longer matches is indexed; a document that still matches
-stays withheld. Documents that are not withheld are not read again for this
-reason. So when you add a pattern, run `dir2mcp reindex`: an incremental scan
-does not apply a new rule to every document that is already indexed (for
-example a media file or an S3 object that the fast path skips, text that
-dir2mcp derived from a document, or an archive member).
+to your config), the next scan applies the new list in both directions. You do
+not need to run `dir2mcp reindex`.
+
+- **Withheld documents are evaluated again.** At the start of the scan, dir2mcp
+  clears the content hash of each `secret_excluded` document, and of each
+  archive that holds one. The normal pipeline then reads them again. A document
+  that the new list does not match is indexed. A document that it still
+  matches stays withheld.
+- **Indexed documents are checked.** After the scan, dir2mcp tests the
+  searchable text of each indexed document (its live chunks, which hold the
+  raw text and the text that dir2mcp derived) against the new list. A document
+  that matches is withheld, and its representations and chunks are retired.
+  This step reads the state database only. It does not run an extractor or call
+  a provider.
+
+The store records a fingerprint of the list (`secret_policy_identity` in the
+settings table). It records the new fingerprint only after both steps
+complete. If a step fails or the scan stops, the next scan runs both steps
+again.
 
 ### What a support bundle discloses
 

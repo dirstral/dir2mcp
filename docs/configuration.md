@@ -417,7 +417,7 @@ security:
     - 'AKIA[0-9A-Z]{16}'
     - '(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}'
     - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
-    - '(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
+    - '(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
     - '(?:^|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})'
     - '(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}'
     - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
@@ -434,11 +434,11 @@ for what each rule matches.
 The generic token rule names its credential words. A token under another
 name, such as `DISCORD_TOKEN=`, needs its own rule in your list.
 
-After a change to the effective list, the next scan evaluates the withheld
-documents again; no reindex is necessary to release a document. When you add
-a pattern, run `dir2mcp reindex` so the new rule reaches every indexed
-document. The scan logs
-`secret policy: security.secret_patterns changed since the last scan; N withheld document(s) or archive(s) will be evaluated again`.
+After a change to the effective list, the next scan applies it in both
+directions; no reindex is necessary. A withheld document that the new list
+does not match is indexed again, and an indexed document that the new list
+matches is withheld. The scan logs
+`secret policy: security.secret_patterns changed since the last scan; ...`.
 
 ### Document extraction: modes & fallback
 
