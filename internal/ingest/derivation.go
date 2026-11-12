@@ -204,10 +204,10 @@ func (s *Service) ActiveOCRIdentity() string {
 // representation's meta_json, so it cannot drift from the engine that produced
 // the text.
 //
-// engine is "docling", "docling-serve", "pandoc", "mistral" (a bespoke-OCR
+// engine is "docling", "docling-serve", "pandoc", "libreoffice", "mistral" (a bespoke-OCR
 // provider profile), or "custom" for an injected extractor. It is EMPTY when no
 // extraction engine is wired at all. ocrModel is empty for the local engines:
-// docling and pandoc are tools, not models, so they have no model id.
+// docling, pandoc and libreoffice are tools, not models, so they have no model id.
 //
 // It reports the PRIMARY engine only. Under `ingest.extractor: auto` the
 // capability-activated pandoc engine (#393) may run alongside the primary for
@@ -294,6 +294,9 @@ func (s *Service) activeOCRIdentityForPath(relPath string) string {
 		// pandoc has no model concept; mirror pandocExtractionMetaJSON (provider
 		// "pandoc", no model/version) so recorded == active for an unchanged doc.
 		return derivationIdentity(string(provider.CapOCR), "pandoc", "", "", "")
+	case routeLibreOffice:
+		// Same shape for the libreoffice engine (spec 0.93.0): provider-only.
+		return derivationIdentity(string(provider.CapOCR), "libreoffice", "", "", "")
 	case routeStructured, routeFlatOCR:
 		// The primary extractor is the structured/flat engine for these routes, so
 		// its identity is the right one.
@@ -406,7 +409,7 @@ func (s *Service) transcriptStale(ctx context.Context, reader representationMeta
 // by a different OCR/extraction model than the active one (§8.6.7). It self-skips
 // when no extractor is configured.
 func (s *Service) ocrStale(ctx context.Context, reader representationMetaReader, relPath string) bool {
-	if s.extractor == nil && s.pandocExtractor == nil {
+	if !s.anyExtractionEngine() {
 		return false
 	}
 	// Route-aware: under `auto`, a pandoc-extracted born-digital doc (#393) must be

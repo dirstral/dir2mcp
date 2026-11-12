@@ -304,10 +304,11 @@ vary by deployment. The commonly used variables are:
 |---|---|---|
 | `MISTRAL_API_KEY` | Conditional | Required for embeddings, Mistral-based extraction/STT, and generation; not required for docling-only read-only extraction flows |
 | `DIR2MCP_SKIP_EMBED_PROBE` | No | When set to any non-empty value, skips the startup embedding-credential probe (a one-shot embed that validates the key/model before serving). Provider resolution and adapter-build checks still run; only the network probe is skipped, so an invalid credential resurfaces at first real embed instead of at startup. Intended for air-gapped bring-up and hermetic CI |
-| `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `mistral`, or `off` |
+| `DIR2MCP_INGEST_EXTRACTOR` | No | Extraction mode: `auto` (default), `docling`, `docling-serve`, `pandoc`, `libreoffice`, `mistral`, or `off` |
 | `DIR2MCP_DOCLING_COMMAND` | No | Optional local command template for document extraction (default: `docling --to json --output {output} {input}`). dir2mcp replaces `{input}` with the document path and `{output}` with a new temporary directory for each call, then reads the output file from that directory (JSON with the default template). Do not use `--output -`: docling writes a file named `-` and dir2mcp reads no output. When set/available, it is preferred for PDF/image/office-style document extraction. The default requests structured JSON so ingestion preserves reading order, section hierarchy, and per-element page/bbox provenance (region citations); a custom `--to md` template still works and falls back to flat Markdown |
 | `DIR2MCP_DOCLING_SERVE_URL` | No | HTTP endpoint of a running [docling-serve](https://github.com/docling-project/docling-serve) container (e.g. `http://127.0.0.1:5001`). Required when `ingest.extractor=docling-serve`; under `auto` it is used only when the docling CLI is not on `PATH` |
 | `DIR2MCP_DOCLING_TIMEOUT_SEC` | No | Time limit in seconds for one docling CLI call on one document (default: `3600`). Must be an integer greater than `0`. Same as `ingest.docling.timeout_sec`; see [docling time limit per document](#docling-time-limit-per-document) |
+| `DIR2MCP_LIBREOFFICE_TIMEOUT_SEC` | No | Time limit in seconds for one LibreOffice conversion of one legacy `.doc` file (default: `300`). Must be an integer greater than `0`. Same as `ingest.libreoffice.timeout_sec`; see [legacy Word .doc (libreoffice engine)](#legacy-word-doc-libreoffice-engine) |
 | `DIR2MCP_INGEST_WATCH` | No | When `true`, a running `dir2mcp up` keeps a filesystem watcher live and incrementally indexes added/changed/deleted files (default: `false`) |
 | `DIR2MCP_INGEST_WATCH_DEBOUNCE` | No | Per-file debounce window for coalescing editor write bursts before re-indexing (default: `500ms`) |
 | _(Mistral endpoint)_ | — | The Mistral base URL is **not** configurable via an environment variable. To proxy Mistral or point at a private/custom endpoint, add a `providers:` entry with a `base_url` (see [Self-hosted / GPU-VPS provider endpoints](#self-hosted--gpu-vps-provider-endpoints-embed--ocr--stt)) |
@@ -414,10 +415,11 @@ PDFs and images are converted to text by an **extractor**, selected with `ingest
 | `auto` (default) | Prefer the local `docling` CLI; else a reachable `docling-serve`; else Mistral OCR; else a functional `pandoc` (born-digital formats only); else disabled. |
 | `docling` | Local docling CLI only (fails if not on `PATH`). |
 | `docling-serve` | docling-serve HTTP only; requires a reachable `serve_url` (no fallback). |
+| `libreoffice` | The libreoffice engine only: legacy Word `.doc` (needs `soffice` and `pandoc`; no fallback, so every other format is a coverage gap). See [legacy Word .doc](#legacy-word-doc-libreoffice-engine). |
 | `mistral` | Mistral OCR only (requires `MISTRAL_API_KEY`). |
 | `off` | No extraction (PDFs/images contribute no extracted text). |
 
-Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → pandoc → disabled**. `pandoc` is normally the *secondary* T2 engine, additive to whichever primary resolves; it becomes the **primary** only when none of the three resolve and a functional pandoc is on `PATH` (`OCR: pandoc (no docling/OCR; pandoc covers born-digital formats)`). That state still leaves PDFs and images uncovered, because pandoc reads born-digital formats only. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document. Under `auto` the banner also lists the `pandoc` engine on its own `Pandoc:` row whenever it is secondary, with the reason when it is unavailable (e.g. `Pandoc: unavailable (pandoc not found on PATH; T2 engine for .docx/.odt/.rtf/.epub)`), because a missing pandoc is what leaves those formats uncovered.
+Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → pandoc → disabled**. `pandoc` is normally the *secondary* T2 engine, additive to whichever primary resolves; it becomes the **primary** only when none of the three resolve and a functional pandoc is on `PATH` (`OCR: pandoc (no docling/OCR; pandoc covers born-digital formats)`). That state still leaves PDFs and images uncovered, because pandoc reads born-digital formats only. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document. Under `auto` the banner also lists the `pandoc` engine on its own `Pandoc:` row whenever it is secondary, with the reason when it is unavailable (e.g. `Pandoc: unavailable (pandoc not found on PATH; T2 engine for .docx/.odt/.rtf/.epub)`), because a missing pandoc is what leaves those formats uncovered. The `libreoffice` engine for legacy `.doc` gets a `LibreOffice:` row the same way (e.g. `LibreOffice: unavailable (soffice (LibreOffice) not found on PATH or failed its functional check; T2 engine for legacy .doc)`).
 
 **Best-available *per format* (§7.4.B.1).** Selection is capability-aware: for each format, `auto` picks the highest-fidelity *active* engine that can actually read it, so no document is silently handed to an engine that can't (e.g. `.docx`/`.tiff` go to docling but are never routed to Mistral OCR, which can't import them), and a higher-fidelity engine is never bypassed. HTML is a dual-path format: when a structured engine (docling) is active it is routed there to preserve headings/tables/links (`extracted_markdown` with structured spans); otherwise it falls back to flat `raw_text` — so HTML is never dropped and never regresses when docling is absent.
 
@@ -430,6 +432,7 @@ An extractor counts as *available* only when it can actually **run**, not merely
 **Troubleshooting:**
 - *`OCR: disabled`* — no extractor is available, and no functional pandoc either: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`. Until then, each PDF and image is a durable skip (`skip_reason=unsupported_format`), and the `Coverage` section names them. Plain text and code still index.
 - *`OCR: pandoc (no docling/OCR; ...)`* — the cascade found no docling and no Mistral OCR, so pandoc became the primary. `.docx/.odt/.rtf/.epub` are covered; PDFs and images are not, and the `Coverage` section names them.
+- *Legacy `.doc` files are skipped as `unsupported_format`*: no engine reads `.doc` until both `soffice` (LibreOffice) and `pandoc` are on `PATH`. The `doctor` and `up` coverage hint names the binary that is missing. After you install them, the next incremental run indexes the skipped `.doc` files; no `--force` or reindex is necessary.
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
 - *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
 - *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.
@@ -511,9 +514,51 @@ ingest:
 - Env equivalent: `DIR2MCP_DOCLING_TIMEOUT_SEC=7200`. The env value wins over the file.
 - A value of `0` or less stops startup with a config error. An env value that is not an integer is ignored, and startup shows a warning.
 - When the limit expires, dir2mcp stops the docling process and records an error for that document only. Indexing continues with the next document. The error names the document and the limit, for example `docling timed out on reports/annual.pdf after 1h0m0s (limit set by ingest.docling.timeout_sec)`.
-- At the same moment, the daemon log gets one line for the timeout, for example `docling: timed out on reports/annual.pdf after 1h0m0s (ingest.docling.timeout_sec=3600); the document is recorded as failed`. Other extraction failures (docling, docling-serve, Mistral OCR, pandoc) also get one log line each, with the engine, the document path and a short reason. The line never carries document text.
+- At the same moment, the daemon log gets one line for the timeout, for example `docling: timed out on reports/annual.pdf after 1h0m0s (ingest.docling.timeout_sec=3600); the document is recorded as failed`. Other extraction failures (docling, docling-serve, Mistral OCR, pandoc, libreoffice) also get one log line each, with the engine, the document path and a short reason. The line never carries document text.
 - Large PDFs with many tables are slow on CPU. One 2.6 MB PDF of about 195 pages took about 13 minutes with docling on CPU on an idle 16-core host, and about 20 minutes on the same host under load. The first default of 900 seconds failed that document. On a slower or busier host, set a higher limit.
 - The limit applies to the docling CLI only. `docling-serve` uses its own request limit.
+
+### Legacy Word .doc (libreoffice engine)
+
+No extraction engine reads the legacy binary Word format (`.doc`) directly. The
+`libreoffice` engine fills that gap. It is a T2 engine, like pandoc, and it is
+turned on by capability: it is active when a `soffice` (or `libreoffice`)
+binary AND a `pandoc` binary are on `PATH` and both pass a short probe. When
+either is missing, the engine is off and each `.doc` is a durable skip
+(`skip_reason=unsupported_format`), the same as a missing pandoc for `.odt`.
+
+For each `.doc`, the engine:
+
+1. Copies the bytes into a new private temporary folder. It never writes next
+   to the source file, so a read-only corpus mount works.
+2. Runs `soffice --headless --norestore --convert-to docx` in that folder, with
+   a LibreOffice profile for that conversion only, so conversions can run in
+   parallel.
+3. Reads the `.docx` with pandoc (the same path as the pandoc engine), so the
+   text and its provenance are the same as for a `.docx`: flat
+   `extracted_markdown`, no pages and no boxes. The representation records
+   `provider: libreoffice`.
+4. Removes the temporary folder, also after a failure or a timeout.
+
+Under `ingest.extractor: auto` the engine runs beside the primary engine and
+reads only `.doc`. `ingest.extractor: libreoffice` pins it: only `.doc` is
+extracted, and there is no fallback to another engine. A pin of any other
+engine (for example `pandoc`) does not turn it on.
+
+Each conversion has a time limit:
+
+```yaml
+ingest:
+  libreoffice:
+    timeout_sec: 600   # default: 300; must be greater than 0
+```
+
+- Env equivalent: `DIR2MCP_LIBREOFFICE_TIMEOUT_SEC=600`. The env value wins over the file.
+- When the limit expires, dir2mcp kills the whole LibreOffice process group and records an error for that document only. Indexing continues with the next document. The error names the setting, for example `libreoffice conversion timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
+- A conversion that fails (for example an encrypted or damaged `.doc`) is a per-document error under the usual rules. The daemon log gets one line that names the engine and the document.
+- On a corpus indexed by an older version, the `.doc` files stored as `unsupported_format` skips are indexed on the next incremental run after both binaries are installed.
+
+See [optional extraction binaries](install.md#optional-extraction-binaries) for the install commands.
 
 ### docling extraction over HTTP (docling-serve)
 

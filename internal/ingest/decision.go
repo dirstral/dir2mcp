@@ -16,7 +16,8 @@ import (
 // the construction cost.
 type ExtractorDecision struct {
 	// Name is the selected extractor identifier: "docling",
-	// "docling-serve", "pandoc", "mistral-ocr", or "" when no extractor is available.
+	// "docling-serve", "pandoc", "libreoffice", "mistral-ocr", or "" when no
+	// extractor is available.
 	Name string
 	// Source describes how the choice was made: "explicit" (user
 	// pinned via ingest.extractor), "auto" (auto-detected as the
@@ -65,6 +66,8 @@ func describeDocumentExtractor(ctx context.Context, cfg config.Config) Extractor
 		return describeExplicitDoclingServe(ctx, cfg)
 	case "pandoc":
 		return describeExplicitPandoc(ctx, cfg)
+	case "libreoffice":
+		return describeExplicitLibreOffice(ctx, cfg)
 	case "mistral":
 		if mistralOCRAvailable(cfg) {
 			return ExtractorDecision{Name: "mistral-ocr", Source: "explicit"}
@@ -237,6 +240,51 @@ func describePandocEngine(ctx context.Context, cfg config.Config) ExtractorDecis
 			return ExtractorDecision{Source: "disabled", Reason: "pandoc present but failed its functional check"}
 		}
 		return ExtractorDecision{Name: "pandoc", Source: "auto", Reason: pandocResolvedReason(source)}
+	default:
+		return ExtractorDecision{Source: "ineligible", Reason: "not eligible under ingest.extractor=" + policy}
+	}
+}
+
+// describeExplicitLibreOffice resolves the libreoffice engine (T2, spec 0.93.0)
+// for ingest.extractor=libreoffice. The engine is available only when BOTH a
+// functional soffice and a functional pandoc resolve; otherwise extraction is
+// disabled with the missing binaries named (no fallback to another engine),
+// mirroring the explicit pandoc pin.
+func describeExplicitLibreOffice(ctx context.Context, cfg config.Config) ExtractorDecision {
+	if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=libreoffice but " + strings.Join(missing, " and ") + " is unavailable or failed its functional check"}
+	}
+	return ExtractorDecision{Name: "libreoffice", Source: "explicit", Reason: "soffice and pandoc auto-detected"}
+}
+
+// DescribeLibreOfficeEngine describes the capability-activated libreoffice
+// engine (T2, spec 0.93.0) for the SPEC §7.7 startup engine list, mirroring
+// DescribePandocEngine:
+//
+//   - `auto`: an additive engine for legacy .doc. Name="libreoffice"/
+//     Source="auto" when soffice and pandoc are functional; Source="disabled"
+//     with the missing binaries named otherwise.
+//   - `libreoffice` (pin): identical to the primary decision.
+//   - any other pin, or `off`: Source="ineligible".
+//
+// No resolved path flows into Reason.
+func DescribeLibreOfficeEngine(cfg config.Config) ExtractorDecision {
+	return describeLibreOfficeEngine(context.Background(), cfg)
+}
+
+func describeLibreOfficeEngine(ctx context.Context, cfg config.Config) ExtractorDecision {
+	policy := strings.ToLower(strings.TrimSpace(cfg.IngestExtractor))
+	if policy == "" {
+		policy = "auto"
+	}
+	switch policy {
+	case "libreoffice":
+		return describeExplicitLibreOffice(ctx, cfg)
+	case "auto":
+		if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
+			return ExtractorDecision{Source: "disabled", Reason: strings.Join(missing, " and ") + " not found on PATH or failed its functional check"}
+		}
+		return ExtractorDecision{Name: "libreoffice", Source: "auto", Reason: "soffice and pandoc auto-detected"}
 	default:
 		return ExtractorDecision{Source: "ineligible", Reason: "not eligible under ingest.extractor=" + policy}
 	}

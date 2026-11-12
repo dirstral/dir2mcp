@@ -623,15 +623,16 @@ func extractorIsStructured(name string) bool {
 // uses (ingest.ExtractionCovered → selectExtractionRoute), so the doctor names
 // exactly the formats that will be skipped with an unsupported-format diagnostic
 // (#394/#395) — including the pandoc (T2, #393) tier the coarse structured/flat
-// boolean cannot express. `structured`/`flatOCR`/`pandoc` are the active engines
-// derived from the extractor decision; `policy` is ingest.extractor. Extension-less
-// assets (bucketed under "") are ignored — they carry no format to name.
-func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, structured, flatOCR, pandoc bool) (exts []string, docs int64) {
+// boolean cannot express, and the libreoffice (T2, spec 0.93.0) tier for legacy
+// .doc. `engines` are the active engines derived from the extractor decision;
+// `policy` is ingest.extractor. Extension-less assets (bucketed under "") are
+// ignored: they carry no format to name.
+func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, engines ingest.ActiveEngines) (exts []string, docs int64) {
 	for ext, n := range extCounts {
 		if ext == "" {
 			continue
 		}
-		if ingest.ExtractionCovered(policy, structured, flatOCR, pandoc, ext) {
+		if ingest.ExtractionCovered(policy, engines, ext) {
 			continue
 		}
 		exts = append(exts, ext)
@@ -643,24 +644,29 @@ func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, s
 
 // uncoveredExtractionRemedy tailors the remediation hint to the engines NOT yet
 // active. It names only engines that would actually help: docling for the
-// OpenXML-Office/tiff/bmp formats and pandoc (T2, #393) for the born-digital
-// OpenDocument/RTF/EPUB family. Formats no installable engine can read (e.g.
-// .gif/.svg/.odp/.ods/legacy .doc) get a pre-conversion hint. `structured`/`pandoc`
-// report which of those engines is already active, so an already-active engine is
-// never suggested.
-func uncoveredExtractionRemedy(uncovered []string, structured, pandoc bool) string {
+// OpenXML-Office/tiff/bmp formats, pandoc (T2, #393) for the born-digital
+// OpenDocument/RTF/EPUB family, and the libreoffice engine (T2, spec 0.93.0) for
+// legacy .doc. Formats no installable engine can read (e.g. .gif/.svg/.odp/.ods)
+// get a pre-conversion hint. `engines` reports which engines are already active,
+// so an already-active engine is never suggested. libreofficeHint is the
+// install hint that names the missing soffice and/or pandoc binary
+// (ingest.LibreOfficeInstallHint); it is used only when a .doc is uncovered.
+func uncoveredExtractionRemedy(uncovered []string, engines ingest.ActiveEngines, libreofficeHint string) string {
 	// The §7.7 coverage report MUST, for each uncovered class, name the engine to
 	// add AND the ingest.on_unsupported knob that governs whether the gap is a
 	// warning (lenient, the default) or a per-document error (strict).
 	const onUnsupportedHint = " Or set ingest.on_unsupported: strict to fail instead of skip these documents."
 
-	doclingWouldCover, pandocWouldCover := false, false
+	doclingWouldCover, pandocWouldCover, libreofficeWouldCover := false, false, false
 	for _, ext := range uncovered {
-		if !structured && ingest.ExtractorSupportsExt(true, ext) {
+		if !engines.Structured && ingest.ExtractorSupportsExt(true, ext) {
 			doclingWouldCover = true
 		}
-		if !pandoc && ingest.PandocSupportsExt(ext) {
+		if !engines.Pandoc && ingest.PandocSupportsExt(ext) {
 			pandocWouldCover = true
+		}
+		if !engines.LibreOffice && ingest.LibreOfficeSupportsExt(ext) {
+			libreofficeWouldCover = true
 		}
 	}
 
@@ -670,6 +676,15 @@ func uncoveredExtractionRemedy(uncovered []string, structured, pandoc bool) stri
 	}
 	if pandocWouldCover {
 		fixes = append(fixes, "install pandoc (#393) for the born-digital OpenDocument/RTF/EPUB formats")
+	}
+	if libreofficeWouldCover {
+		hint := strings.TrimSpace(libreofficeHint)
+		if hint == "" {
+			// Both binaries are present yet the engine is not active: the
+			// policy pins another engine.
+			hint = "set ingest.extractor to auto or libreoffice for legacy .doc"
+		}
+		fixes = append(fixes, hint)
 	}
 	if len(fixes) == 0 {
 		// Every engine that could help is already active (or none reads these):

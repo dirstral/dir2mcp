@@ -658,7 +658,7 @@ const bespokeOCREngine = "mistral"
 // cascade costs an exec.LookPath, a docling functional check and an HTTP
 // reachability probe, and stats is polled.
 //
-//   - a local engine (docling, docling-serve, pandoc) reports its own name. The
+//   - a local engine (docling, docling-serve, pandoc, libreoffice) reports its own name. The
 //     spec types models.ocr as a plain string with no enum (§15.6), so an engine
 //     name is a legal value; these tools have no model id to report instead.
 //   - a bespoke-OCR engine reports the model id on the wire, which is what the
@@ -3351,6 +3351,8 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 			ing.SetDocumentExtractor(extractor)
 		}
 		ing.ActivatePandocEngine(s.cfg)
+		// The libreoffice engine (T2, spec 0.93.0) reads legacy .doc the same way.
+		ing.ActivateLibreOfficeEngine(s.cfg)
 		if !ing.CanExtractSourceText(doc) {
 			return "", "", &toolExecutionError{
 				Code:      "CONFIG_INVALID",
@@ -5048,7 +5050,7 @@ func statsOutputSchema() map[string]interface{} {
 					// to read it.
 					"ocr": map[string]interface{}{
 						"type":        "string",
-						"description": "Extraction engine in effect. A bespoke-OCR backend reports its model id; the local engines report their own name (docling, docling-serve, pandoc); a deployment with no extraction engine reports \"(no extraction engine)\".",
+						"description": "Extraction engine in effect. A bespoke-OCR backend reports its model id; the local engines report their own name (docling, docling-serve, pandoc, libreoffice); a deployment with no extraction engine reports \"(no extraction engine)\".",
 					},
 					// stt_provider is NOT a closed enum (bs-007 and stats.json:
 					// "any STT-capable provider ... is valid"). The old
