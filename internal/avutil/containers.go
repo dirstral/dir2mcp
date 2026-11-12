@@ -49,9 +49,12 @@ var contentSniffedVideoExts = map[string]bool{
 
 // segmentMuxerExt maps a source extension that ffmpeg cannot use to pick an
 // output muxer to one that names the same container. A camcorder .mod file is
-// an MPEG program stream, and ffmpeg has no muxer registered for ".mod".
+// an MPEG program stream, and ffmpeg has no muxer registered for ".mod". Some
+// ffmpeg builds map ".m4v" to the raw MPEG-4 video muxer, which drops the
+// audio track; the MP4 muxer writes the same container with audio.
 var segmentMuxerExt = map[string]string{
 	".mod": ".mpg",
+	".m4v": ".mp4",
 }
 
 func normExt(ext string) string {

@@ -186,6 +186,9 @@ func TestMediaContainerTablesAgree(t *testing.T) {
 	if got := avutil.SegmentOutputExt(".MOD"); got != ".mpg" {
 		t.Errorf("SegmentOutputExt(.MOD) = %q, want .mpg", got)
 	}
+	if got := avutil.SegmentOutputExt(".M4V"); got != ".mp4" {
+		t.Errorf("SegmentOutputExt(.M4V) = %q, want .mp4 (the raw .m4v muxer drops audio)", got)
+	}
 	if got := avutil.SegmentOutputExt(".mkv"); got != ".mkv" {
 		t.Errorf("SegmentOutputExt(.mkv) = %q, want .mkv", got)
 	}
@@ -310,6 +313,8 @@ func TestMediaContainerFastPath_StoredVideoTsIsNotReRead(t *testing.T) {
 	fs.addWithMTime("local/news.ts", "", ts, mtime)
 	fs.add("s3/news.ts", "etag-ts", tsS3)
 	fs.add("s3/tape.mpg", "etag-mpg", string(mpg))
+	camMOD := append(mpegPSBytes(), 0x02)
+	fs.add("s3/MOV001.MOD", "etag-mod", string(camMOD))
 
 	st := newRemoteScanStore()
 	st.seed(model.Document{
@@ -327,6 +332,12 @@ func TestMediaContainerFastPath_StoredVideoTsIsNotReRead(t *testing.T) {
 		SkipReason: model.SkipReasonBinaryIgnored,
 		SizeBytes:  int64(len(mpg)), ETag: "etag-mpg",
 		ContentHash: ingest.ComputeContentHash(mpg),
+	})
+	st.seed(model.Document{
+		DocID: 4, RelPath: "s3/MOV001.MOD", DocType: "binary_ignored", Status: "skipped",
+		SkipReason: model.SkipReasonBinaryIgnored,
+		SizeBytes:  int64(len(camMOD)), ETag: "etag-mod",
+		ContentHash: ingest.ComputeContentHash(camMOD),
 	})
 
 	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
@@ -347,5 +358,14 @@ func TestMediaContainerFastPath_StoredVideoTsIsNotReRead(t *testing.T) {
 	}
 	if doc, ok := st.get("s3/tape.mpg"); !ok || doc.DocType != "video" {
 		t.Errorf("s3/tape.mpg doc_type = %q, want video", doc.DocType)
+	}
+	// An S3 camcorder .MOD that an older classifier stored as binary_ignored has
+	// an unchanged ETag, but only its bytes can show the program stream, so the
+	// fast path must not skip it.
+	if got := fs.openCount("s3/MOV001.MOD"); got == 0 {
+		t.Error("s3/MOV001.MOD took the ETag fast path; a stored binary_ignored .mod must be re-read and sniffed")
+	}
+	if doc, ok := st.get("s3/MOV001.MOD"); !ok || doc.DocType != "video" {
+		t.Errorf("s3/MOV001.MOD doc_type = %q, want video", doc.DocType)
 	}
 }

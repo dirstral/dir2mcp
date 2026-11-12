@@ -28,7 +28,7 @@ func TestVideoContainers_Integration(t *testing.T) {
 		args []string
 	}{
 		{"clip.mkv", nil},
-		{"clip.m4v", nil},
+		{"clip.m4v", []string{"-f", "mp4"}},
 		{"clip.avi", []string{"-c:v", "mpeg4", "-c:a", "mp3"}},
 		{"clip.flv", []string{"-c:v", "flv", "-c:a", "mp3", "-ar", "44100"}},
 		{"clip.wmv", []string{"-c:v", "wmv2", "-c:a", "wmav2"}},

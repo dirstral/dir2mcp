@@ -2451,14 +2451,25 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 // format (.ts, .mts, .mod, see SniffMediaDocType): a stored "video" came from
 // the content, so it matches the path. A .ts or .mts that an older classifier
 // stored as code failed on the raw-text path and holds status error, which
-// every fast path already refuses, so it is re-read.
+// every fast path already refuses, so it is re-read. A .mod stored as
+// binary_ignored is stale too: only its bytes can show a program stream.
 func storedTypeStale(storedType, relPath string) bool {
 	if storedType == "" {
 		return false
 	}
 	pathType := ClassifyDocType(relPath)
-	if storedType == "video" && needsMediaSniff(relPath, pathType) {
-		return false
+	if needsMediaSniff(relPath, pathType) {
+		switch storedType {
+		case "video":
+			return false
+		case "binary_ignored":
+			// A .mod that an older classifier stored as binary_ignored may be a
+			// camcorder program stream. Only the bytes can tell, so the cheap
+			// signal (an S3 ETag) must not skip it. A tracker .mod stays
+			// binary_ignored and is re-read on each scan; such files are rare
+			// and small.
+			return true
+		}
 	}
 	if pathType == "binary_ignored" {
 		return storedType != "binary_ignored" && storedType != "text"
