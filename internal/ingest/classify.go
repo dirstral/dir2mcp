@@ -149,9 +149,10 @@ func trimIncompleteRune(sample []byte) []byte {
 }
 
 // mediaSniffPrefixBytes is how much of a file SniffMediaDocType needs: the
-// first bytes of three 192-byte BDAV packets fit in it. The ingest service
-// reads this prefix before it decides how to read the rest of the file.
-const mediaSniffPrefixBytes = 512
+// sync bytes of five packets fit in it for every transport-stream layout (the
+// largest is five 204-byte packets). The ingest service reads this prefix
+// before it decides how to read the rest of the file.
+const mediaSniffPrefixBytes = 1024
 
 const (
 	mpegTSPacketBytes = 188
@@ -160,13 +161,23 @@ const (
 	// before each 188-byte packet: the sync byte is at offset 4 and repeats
 	// every 192 bytes.
 	bdavHeaderBytes = 4
+	// fecTrailerBytes is the error-correction trailer that the 204-byte variant
+	// puts after each 188-byte packet: the sync byte repeats every 204 bytes.
+	fecTrailerBytes = 16
+	// mpegTSWantPackets is how many consecutive packets the sniff checks when
+	// the prefix holds them (SPEC §7.3 suggests five), and mpegTSMinPackets is
+	// the fewest it accepts from a shorter file.
+	mpegTSWantPackets = 5
+	mpegTSMinPackets  = 3
 )
 
-// mpegTSLayouts are the two packet layouts of a transport stream: the offset
-// of the first sync byte and the distance between two sync bytes.
+// mpegTSLayouts are the three packet layouts of a transport stream (SPEC
+// §7.3): the offset of the first sync byte and the distance between two sync
+// bytes.
 var mpegTSLayouts = []struct{ offset, stride int }{
 	{0, mpegTSPacketBytes},
 	{bdavHeaderBytes, bdavHeaderBytes + mpegTSPacketBytes},
+	{0, mpegTSPacketBytes + fecTrailerBytes},
 }
 
 // needsMediaSniff reports whether the type of relPath depends on its content:
@@ -184,8 +195,10 @@ func needsMediaSniff(relPath, pathType string) bool {
 // another format by the first bytes of the file (SPEC §7.3):
 //
 //   - .ts and .mts are TypeScript by extension. They are video when the
-//     content is an MPEG transport stream: the sync byte 0x47 at offsets 0, 188
-//     and 376, or at 4, 196 and 388 for the BDAV (M2TS) variant.
+//     content is an MPEG transport stream: the sync byte 0x47 at the start of
+//     each of the first five packets (three in a shorter file), with packets of
+//     188 bytes, 192 bytes from offset 4 (BDAV/M2TS), or 204 bytes (with an
+//     error-correction trailer).
 //   - .mod is video when the content starts with an MPEG program stream pack
 //     header (00 00 01 BA), as camcorder .mod files do.
 //
@@ -210,16 +223,24 @@ func SniffMediaDocType(docType, relPath string, prefix []byte) string {
 	return docType
 }
 
-// isMPEGTransportStream reports whether prefix starts three MPEG-TS packets,
-// in the plain 188-byte layout or the 192-byte BDAV layout.
+// isMPEGTransportStream reports whether prefix starts consecutive MPEG-TS
+// packets in one of the layouts: five when the prefix holds five, and at
+// least three from a shorter file.
 func isMPEGTransportStream(prefix []byte) bool {
 	for _, l := range mpegTSLayouts {
-		end := l.offset + 2*l.stride + 1
-		if len(prefix) < end {
+		n := 0
+		if len(prefix) > l.offset {
+			n = (len(prefix)-l.offset-1)/l.stride + 1
+		}
+		if n > mpegTSWantPackets {
+			n = mpegTSWantPackets
+		}
+		if n < mpegTSMinPackets {
 			continue
 		}
+		end := l.offset + (n-1)*l.stride + 1
 		synced := true
-		for i := 0; i < 3; i++ {
+		for i := 0; i < n; i++ {
 			if prefix[l.offset+i*l.stride] != mpegTSSyncByte {
 				synced = false
 				break

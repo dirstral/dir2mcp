@@ -400,14 +400,16 @@ containers, so each one gets a transcript of its audio track, a duration and
 time-span citations. Three extensions are shared with another format, so the
 content decides:
 
-- `.ts` and `.mts` are video when the file is an MPEG transport stream (the
-  sync byte `0x47` every 188 bytes, or every 192 bytes from offset 4 for the
-  BDAV/M2TS variant). Any other `.ts` or `.mts` file is TypeScript code.
+- `.ts` and `.mts` are video when the file is an MPEG transport stream: the
+  sync byte `0x47` starts each of the first five packets (three in a shorter
+  file), with packets of 188 bytes, 192 bytes from offset 4 (the BDAV/M2TS
+  variant) or 204 bytes (the variant with an error-correction trailer). Any
+  other `.ts` or `.mts` file is TypeScript code.
 - `.mod` is video when the file starts with an MPEG program stream pack header
   (`00 00 01 BA`), as camcorder files do. Any other `.mod` file is sniffed like an
   unknown extension. `go.mod` is always data.
 
-dir2mcp reads only the first 512 bytes of such a file to decide.
+dir2mcp reads only the first 1 KiB of such a file to decide.
 
 Any other file (an unknown extension, or a dotfile such as `.gitignore` or
 `.editorconfig`) is sniffed: when its first 8 KiB is valid UTF-8 with no

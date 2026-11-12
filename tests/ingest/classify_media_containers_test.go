@@ -50,6 +50,30 @@ func bdavBytes(n int) []byte {
 	return b.Bytes()
 }
 
+// fecBytes returns n 204-byte transport-stream packets: a 188-byte packet
+// followed by a 16-byte error-correction trailer, so the sync byte is at 0,
+// 204, 408.
+func fecBytes(n int) []byte {
+	var b bytes.Buffer
+	for i := 0; i < n; i++ {
+		pkt := make([]byte, 204)
+		pkt[0] = 0x47
+		pkt[1] = 0x40
+		pkt[3] = 0x10
+		b.Write(pkt)
+	}
+	return b.Bytes()
+}
+
+// brokenFifthSync returns six plain packets whose fifth packet has no sync
+// byte. The prefix holds five packets, so the sniff checks all five and the
+// file is not a transport stream.
+func brokenFifthSync() []byte {
+	b := mpegTSBytes(6)
+	b[4*188] = 0x00
+	return b
+}
+
 // mpegPSBytes returns a buffer that starts with an MPEG program stream pack
 // header (00 00 01 BA), as a camcorder .mod file does.
 func mpegPSBytes() []byte {
@@ -120,6 +144,9 @@ func TestSniffMediaDocType(t *testing.T) {
 		{"ts text with G at the sync offsets", "app.ts", textWithSyncLetters(), "code"},
 		{"ts too short for three packets", "app.ts", mpegTSBytes(1), "code"},
 		{"ts BDAV variant", "disc.ts", bdavBytes(4), "video"},
+		{"ts 204-byte variant", "dvb.ts", fecBytes(6), "video"},
+		{"ts five packets checked when the prefix holds them", "app.ts", brokenFifthSync(), "code"},
+		{"ts three packets accepted from a short file", "clip.ts", mpegTSBytes(3), "video"},
 		{"mts transport stream", "cam.mts", mpegTSBytes(4), "video"},
 		{"mts BDAV variant", "cam.mts", bdavBytes(4), "video"},
 		{"mts TypeScript module", "lib.mts", []byte(typeScriptSource), "code"},
