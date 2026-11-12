@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +59,47 @@ func policyConfig(root, stateDir string, patterns []string) config.Config {
 	return cfg
 }
 
+// newPolicyStore opens a store at a known path, so a test can edit the state
+// database the way an older binary left it.
+func newPolicyStore(t *testing.T) (*store.SQLiteStore, string) {
+	t.Helper()
+	dbPath := filepath.Join(testutil.TempDir(t), "meta.sqlite")
+	st := store.NewSQLiteStore(dbPath)
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st, dbPath
+}
+
+// forgetSecretPolicyIdentity deletes the recorded identity, which is the state
+// of a corpus indexed by a binary that predates it. The old-binary scan in these
+// tests runs the current code with the old patterns, so it records an identity;
+// deleting it makes the next scan an upgrade from an unrecorded policy, not a
+// change between two recorded ones.
+func forgetSecretPolicyIdentity(t *testing.T, st *store.SQLiteStore, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	res, err := db.ExecContext(context.Background(), `DELETE FROM settings WHERE key = ?`, store.SecretPolicyIdentitySetting)
+	if err != nil {
+		t.Fatalf("delete secret policy identity: %v", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("delete secret policy identity: rows=%d err=%v, want exactly 1 recorded row", n, err)
+	}
+	recorded, err := st.SecretPolicyIdentity(context.Background())
+	if err != nil {
+		t.Fatalf("SecretPolicyIdentity: %v", err)
+	}
+	if recorded != "" {
+		t.Fatalf("SecretPolicyIdentity after delete = %q, want empty", recorded)
+	}
+}
+
 func runPolicyScan(t *testing.T, cfg config.Config, st *store.SQLiteStore) {
 	t.Helper()
 	svc := mustNewIngestService(t, cfg, st)
@@ -106,13 +148,14 @@ func TestSecretPolicy_UpgradeReevaluatesWithheldDocuments(t *testing.T) {
 	writeFile(t, filepath.Join(root, "redirect.md"), redirectNote())
 	writeFile(t, filepath.Join(root, "slug.md"), slugNote())
 	writeFile(t, filepath.Join(root, "real.md"), "aws_key = AKIA2ZZZZZZZZZZZZZZQ\n")
-	st := newRealStore(t)
+	st, dbPath := newPolicyStore(t)
 
 	// Old binary.
 	runPolicyScan(t, policyConfig(root, stateDir, preSpec0930SecretPatterns), st)
 	requireStatus(t, st, "redirect.md", model.DocumentStatusSecretExcluded)
 	requireStatus(t, st, "slug.md", model.DocumentStatusSecretExcluded)
 	requireStatus(t, st, "real.md", model.DocumentStatusSecretExcluded)
+	forgetSecretPolicyIdentity(t, st, dbPath)
 
 	// New binary: incremental scan, no reindex.
 	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
@@ -157,10 +200,11 @@ func TestSecretPolicy_UpgradeReevaluatesWithheldArchiveMember(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "bundle.zip"), data, 0o600); err != nil {
 		t.Fatalf("write archive: %v", err)
 	}
-	st := newRealStore(t)
+	st, dbPath := newPolicyStore(t)
 
 	runPolicyScan(t, policyConfig(root, stateDir, preSpec0930SecretPatterns), st)
 	requireStatus(t, st, "bundle.zip/links.txt", model.DocumentStatusSecretExcluded)
+	forgetSecretPolicyIdentity(t, st, dbPath)
 
 	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "bundle.zip/links.txt")

@@ -33,4 +33,8 @@ func TestSecretPolicyIdentity(t *testing.T) {
 	if got := mustCompilePolicy(t, `alpha[0-9]*`, `beta`); got == base {
 		t.Error("editing a pattern did not change the identity")
 	}
+	// One pattern with a literal newline is not the same set as two patterns.
+	if mustCompilePolicy(t, "alpha", "beta") == mustCompilePolicy(t, "alpha\nbeta") {
+		t.Error("two patterns and one pattern that joins them with a newline share an identity")
+	}
 }

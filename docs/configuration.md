@@ -431,8 +431,13 @@ These are the spec 0.93.0 defaults. The generic token rule and the `sk-`,
 [Security defaults](security.md#secret-patterns-documents-withheld-for-their-content)
 for what each rule matches.
 
+The generic token rule names its credential words. A token under another
+name, such as `DISCORD_TOKEN=`, needs its own rule in your list.
+
 After a change to the effective list, the next scan evaluates the withheld
-documents again; no reindex is necessary. The scan logs
+documents again; no reindex is necessary to release a document. When you add
+a pattern, run `dir2mcp reindex` so the new rule reaches every indexed
+document. The scan logs
 `secret policy: security.secret_patterns changed since the last scan; N withheld document(s) or archive(s) will be evaluated again`.
 
 ### Document extraction: modes & fallback

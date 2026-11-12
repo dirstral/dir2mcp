@@ -47,7 +47,9 @@ The generic token rule matches `token`, or `token` after a credential word
 (for example `GITHUB_TOKEN=`, `X-Auth-Token:`, `access_token=`,
 `MY_APP_SECRET_TOKEN=`). It does not match a key name that only ends in
 `token`, such as `redir_token=` in a YouTube redirect link, `next_page_token=`
-or `csrf_token=`. The three key rules require the key to start a word, so the
+or `csrf_token=`. For the same reason it does not match a service name that is
+not in its list, such as `DISCORD_TOKEN=`. If your corpus can hold such
+credentials, add a rule for them to your list. The three key rules require the key to start a word, so the
 `sk-` inside a URL slug such as `krasnoyarsk-...` and the `sk_` inside an
 identifier such as `task_...` do not match. Before spec 0.93.0 these rules had
 no boundary, and documents that quoted such links were withheld.
@@ -60,7 +62,10 @@ changes, the scan clears the content hash of each `secret_excluded` document,
 and of each archive that holds one, so the normal pipeline reads them again. A
 document that no longer matches is indexed; a document that still matches
 stays withheld. Documents that are not withheld are not read again for this
-reason.
+reason. So when you add a pattern, run `dir2mcp reindex`: an incremental scan
+does not apply a new rule to every document that is already indexed (for
+example a media file or an S3 object that the fast path skips, text that
+dir2mcp derived from a document, or an archive member).
 
 ### What a support bundle discloses
 

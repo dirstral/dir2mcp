@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"regexp"
 	"sort"
-	"strings"
 )
 
 // Secret-policy re-evaluation (spec 0.93.0 follow-up).
@@ -31,9 +31,13 @@ import (
 // document, and of every archive that holds a withheld member, before it visits
 // any file. An empty content hash is the existing "not finalized" state, so the
 // normal pipeline re-reads those documents and decides again under the current
-// patterns. Documents that are not withheld are not touched: the raw-byte scan
-// already runs on every read, and a stricter pattern set reaching derived text of
-// an `ok` document is outside this mechanism.
+// patterns.
+//
+// Documents that are not withheld are not touched. This mechanism lets a
+// NARROWER set release false positives, which is cheap: it re-reads only the
+// withheld rows. A BROADER set is not applied to every `ok` document here,
+// because that would re-derive the whole corpus (OCR, STT, extraction) on any
+// pattern edit. An operator who adds a pattern runs `dir2mcp reindex`.
 //
 // The clear and the new identity commit in one transaction, and the clear is
 // durable: an interrupted scan leaves the remaining rows with an empty hash, so
@@ -42,7 +46,9 @@ import (
 // secretPolicyIdentity is the fingerprint of the effective pattern set. The
 // order of the patterns does not change a verdict (any match withholds), so the
 // pattern strings are sorted before hashing; an operator who reorders the list
-// does not trigger a pass.
+// does not trigger a pass. The sorted list is JSON-encoded before hashing, so
+// the encoding is unambiguous: a pattern that contains a newline can never hash
+// the same as two patterns.
 func secretPolicyIdentity(patterns []*regexp.Regexp) string {
 	sources := make([]string, 0, len(patterns))
 	for _, rx := range patterns {
@@ -52,7 +58,9 @@ func secretPolicyIdentity(patterns []*regexp.Regexp) string {
 		sources = append(sources, rx.String())
 	}
 	sort.Strings(sources)
-	sum := sha256.Sum256([]byte(strings.Join(sources, "\n")))
+	// Marshalling a []string cannot fail.
+	encoded, _ := json.Marshal(sources)
+	sum := sha256.Sum256(encoded)
 	return "v1:" + hex.EncodeToString(sum[:])
 }
 
