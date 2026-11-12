@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 )
@@ -158,19 +159,17 @@ func DiscoverFilesWithOptions(ctx context.Context, rootDir string, options Disco
 	return SelectMediaVariants(files, options.MediaVariants), nil
 }
 
-// mediaVariantExtensions is the set of media file extensions (audio + video)
-// that participate in variant grouping. Mirrors the audio/video sets used by
-// ingest classification plus common container/stream formats produced by
-// multi-rendition archives. Membership is what makes a file a "media rendition"
-// for §8.6.5; all other files are passed through untouched.
-var mediaVariantExtensions = map[string]bool{
-	// audio
-	".mp3": true, ".wav": true, ".m4a": true, ".flac": true,
-	".aac": true, ".ogg": true, ".opus": true,
-	// video / containers / streams
-	".mp4": true, ".mov": true, ".mkv": true, ".m4v": true,
-	".webm": true, ".flv": true, ".ts": true, ".avi": true,
-	".wmv": true, ".mpg": true, ".mpeg": true,
+// isMediaVariantExt reports whether an extension (lowercased, with the dot)
+// takes part in media variant grouping (§8.6.5). The audio and video
+// containers come from the avutil table that ingest classification also uses,
+// so a file grouped as a media rendition is always classified as media. .ts is
+// kept for the transport-stream renditions that multi-rendition archives
+// produce; grouping runs at discovery, before any content is read, so it goes
+// by the extension alone. .mts and .mod are not grouped: TypeScript modules and
+// tracker files use them far more often than video renditions do. All other
+// files are passed through untouched.
+func isMediaVariantExt(ext string) bool {
+	return ext == ".ts" || avutil.IsAudioContainerExt(ext) || avutil.IsVideoContainerExt(ext)
 }
 
 // renditionMarkerPattern matches one rendition marker embedded in a filename
@@ -264,7 +263,7 @@ var resolutionPattern = regexp.MustCompile(`(?i)[._-](?:(\d{3,4})[pi]|([248])k)(
 // isMediaVariantFile reports whether a relative path is a media rendition
 // eligible for variant grouping.
 func isMediaVariantFile(relPath string) bool {
-	return mediaVariantExtensions[strings.ToLower(path.Ext(relPath))]
+	return isMediaVariantExt(strings.ToLower(path.Ext(relPath)))
 }
 
 // SelectMediaVariants applies media multi-rendition dedup (spec §8.6.5) to the

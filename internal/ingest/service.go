@@ -2348,7 +2348,7 @@ func mediaStatUnchanged(f DiscoveredFile, existing model.Document, forceReindex 
 	if forceReindex || strings.TrimSpace(f.ETag) != "" {
 		return false
 	}
-	if !isSidecarMediaType(ClassifyDocType(f.RelPath)) {
+	if !isSidecarMediaType(fastPathDocType(f.RelPath, existing.DocType)) {
 		return false
 	}
 	if existing.Deleted || existing.Status == string(model.DocumentStatusError) {
@@ -2358,6 +2358,19 @@ func mediaStatUnchanged(f DiscoveredFile, existing model.Document, forceReindex 
 		return false
 	}
 	return existing.SizeBytes == f.SizeBytes && existing.MTimeUnix == f.MTimeUnix
+}
+
+// fastPathDocType is the type a fast path assumes for relPath without reading
+// it. It is the path classification, except for an extension that a video
+// container shares with another format (SniffMediaDocType): there a stored
+// "video" came from the content and stands. So a .ts video keeps the cheap
+// (size, mtime) skip of a media file and is not read whole on every scan.
+func fastPathDocType(relPath, storedType string) string {
+	pathType := ClassifyDocType(relPath)
+	if storedType == "video" && needsMediaSniff(relPath, pathType) {
+		return storedType
+	}
+	return pathType
 }
 
 // trySkipUnchangedDocument implements the cheap-signal incremental fast path
@@ -2402,7 +2415,7 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	// persisted value; re-read when either the ETag or the fingerprint differs
 	// (SPEC §7.8.3, #298). For non-media objects and media with no sidecar the
 	// fingerprint is empty on both sides, so the fast path behaves as before.
-	currentFP := s.sidecarFingerprint(ctx, f.RelPath, ClassifyDocType(f.RelPath))
+	currentFP := s.sidecarFingerprint(ctx, f.RelPath, fastPathDocType(f.RelPath, existing.DocType))
 	if currentFP != existing.SidecarFingerprint {
 		return false, nil
 	}
@@ -2433,11 +2446,20 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 // fast path exists to avoid that read. Such an object is re-classified when its
 // ETag changes or on reindex. Every other mismatch (an extension the table gained, for example
 // .mjs to code) is exact and needs no read to detect.
+//
+// The same holds for an extension that a video container shares with another
+// format (.ts, .mts, .mod, see SniffMediaDocType): a stored "video" came from
+// the content, so it matches the path. A .ts or .mts that an older classifier
+// stored as code failed on the raw-text path and holds status error, which
+// every fast path already refuses, so it is re-read.
 func storedTypeStale(storedType, relPath string) bool {
 	if storedType == "" {
 		return false
 	}
 	pathType := ClassifyDocType(relPath)
+	if storedType == "video" && needsMediaSniff(relPath, pathType) {
+		return false
+	}
 	if pathType == "binary_ignored" {
 		return storedType != "binary_ignored" && storedType != "text"
 	}
@@ -2953,8 +2975,10 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	// Audio AND video carry model-derived transcripts (issue #495): a video's
 	// source transcript was produced from its extracted audio track in the
 	// transcription pass, so its translation is derived here exactly like audio.
-	// Non-media assets have nothing to derive and nothing to write back.
-	if !isSidecarMediaType(docType) {
+	// Non-media assets have nothing to derive and nothing to write back. A path
+	// whose type the content decides (a .ts transport stream) is checked
+	// against the type the transcription pass stored, below.
+	if !isSidecarMediaType(docType) && !needsMediaSniff(f.RelPath, docType) {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -2965,7 +2989,7 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	}
 	// A document the transcription pass did not record as a healthy media asset has
 	// no source transcript to translate or to write back; skip it.
-	if isNotFoundError(err) || doc.Status != string(model.DocumentStatusOK) {
+	if isNotFoundError(err) || doc.Status != string(model.DocumentStatusOK) || (doc.DocType != "" && !isSidecarMediaType(doc.DocType)) {
 		s.markActiveSkipped()
 		return nil
 	}
@@ -3587,6 +3611,17 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 // with the status (ok, skipped or secret_excluded) and the content hash.
 func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
 	docType := ClassifyDocType(f.RelPath)
+	// SPEC §7.3: .ts, .mts and .mod are video only when the content says so.
+	// The type decides how the file is read (a video may take the sampled
+	// identity below and is never read whole only to classify it), so sniff a
+	// small prefix first.
+	if needsMediaSniff(f.RelPath, docType) {
+		prefix, err := s.readSourcePrefix(ctx, f.RelPath, mediaSniffPrefixBytes)
+		if err != nil {
+			return model.Document{RelPath: f.RelPath, DocType: docType}, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
+		}
+		docType = SniffMediaDocType(docType, f.RelPath, prefix)
+	}
 	doc := model.Document{
 		RelPath:   f.RelPath,
 		DocType:   docType,
@@ -4258,6 +4293,9 @@ func (s *Service) mediaSpansFor(ctx context.Context, doc model.Document, content
 		windowMS := s.resolveMediaWindowMS(s.cfg.MediaAudioWindowSec, audioWindowMS, audioWindowCapMS, "audio")
 		return s.capMediaSpans(doc, s.mediaTimeSpans(ctx, doc, windowMS))
 	case "video":
+		if !isEmbeddableVideo(doc.RelPath) {
+			return nil
+		}
 		windowMS := s.resolveMediaWindowMS(s.cfg.MediaVideoWindowSec, videoWindowMS, videoWindowCapMS, "video")
 		return s.capMediaSpans(doc, s.mediaTimeSpans(ctx, doc, windowMS))
 	default:
@@ -4441,6 +4479,19 @@ func windowSpans(totalMS, windowMS int) []model.Span {
 func isEmbeddableAudio(relPath string) bool {
 	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(relPath), ".")) {
 	case "mp3", "wav":
+		return true
+	default:
+		return false
+	}
+}
+
+// isEmbeddableVideo reports whether a video file's container is accepted for
+// direct multimodal embedding (SPEC 8.1.7 lists MP4 and MOV). A video in any
+// other container (.mkv, .ts, .mpg, ...) keeps its transcript path, as an
+// audio file outside MP3/WAV does.
+func isEmbeddableVideo(relPath string) bool {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(relPath), ".")) {
+	case "mp4", "mov":
 		return true
 	default:
 		return false

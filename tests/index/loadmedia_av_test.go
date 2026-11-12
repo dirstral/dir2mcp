@@ -28,6 +28,11 @@ func TestEmbeddingWorker_RunOnce_AudioVideoSegmentExtracted(t *testing.T) {
 	}{
 		{"audio", "talk.mp3", "audio/mp3"},
 		{"video", "clip.mp4", "video/mp4"},
+		// Every container ingest classifies as video carries its own type.
+		{"video", "clip.mkv", "video/x-matroska"},
+		{"video", "tape.MPG", "video/mpeg"},
+		{"video", "news.ts", "video/mp2t"},
+		{"video", "clip.webm", "video/webm"},
 	} {
 		t.Run(tc.modality, func(t *testing.T) {
 			root := t.TempDir()
