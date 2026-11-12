@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -43,9 +42,9 @@ const (
 // directory) lives under one os.MkdirTemp directory that it removes after the
 // read step, on success, failure and timeout alike.
 type libreofficeExtractor struct {
-	// soffice is the configured LibreOffice command (ingest.libreoffice.command);
-	// its first field is the binary. Empty resolves soffice (then libreoffice)
-	// from PATH at call time.
+	// soffice is the configured LibreOffice binary (ingest.libreoffice.command).
+	// The whole value is the path, so a path with spaces works. Empty resolves
+	// soffice (then libreoffice) from PATH at call time.
 	soffice string
 	// timeout bounds one extraction of one document: the conversion AND the
 	// pandoc read together (ingest.libreoffice.timeout_sec).
@@ -128,13 +127,11 @@ func (l *libreofficeExtractor) deadlineErr(parent, dctx context.Context, err err
 	return err
 }
 
-// sofficeBinary returns the LibreOffice executable to run: the first field of
-// ingest.libreoffice.command, else soffice or libreoffice from PATH.
+// sofficeBinary returns the LibreOffice executable to run: the configured
+// ingest.libreoffice.command, else soffice or libreoffice from PATH. It uses
+// the same resolution as the availability probe.
 func (l *libreofficeExtractor) sofficeBinary() (string, error) {
-	if fields := strings.Fields(l.soffice); len(fields) > 0 {
-		return fields[0], nil
-	}
-	if bin, ok := resolveSofficeBinary(config.Config{}); ok {
+	if bin, ok := resolveSofficeBinary(config.Config{IngestLibreOfficeCommand: l.soffice}); ok {
 		return bin, nil
 	}
 	return "", errors.New("soffice (LibreOffice) not found on PATH")
@@ -163,9 +160,12 @@ func (l *libreofficeExtractor) convertToDocx(ctx context.Context, bin, work stri
 	return readConvertedDocx(filepath.Join(outDir, strings.TrimSuffix(libreofficeInputName, ".doc")+".docx"))
 }
 
-// runSofficeConversion runs soffice under ctx. The command runs in its own
-// process group, and both a cancelled ctx (the deadline) and a finished run
-// kill that whole group, so no soffice.bin helper survives the conversion.
+// runSofficeConversion runs soffice under ctx. A cancelled ctx (the deadline)
+// stops the whole process tree (prepareLibreOfficeCmd), and on unix a finished
+// run also kills what is left of the process group, so no soffice.bin helper
+// survives the conversion. cmd.Dir is left unset on purpose: every path on the
+// command line is absolute, and a working directory would change how a
+// relative configured binary is found (Go resolves it against cmd.Dir).
 func runSofficeConversion(ctx context.Context, bin, profileDir, outDir, inPath string) error {
 	cmd := exec.CommandContext(ctx, bin,
 		"--headless", "--norestore",
@@ -174,10 +174,8 @@ func runSofficeConversion(ctx context.Context, bin, profileDir, outDir, inPath s
 		"--outdir", outDir,
 		inPath,
 	)
-	cmd.Dir = filepath.Dir(inPath)
 	cmd.Env = os.Environ()
-	setRecognizeBackendProcAttr(cmd)
-	cmd.Cancel = func() error { return signalRecognizeBackend(cmd.Process.Pid, syscall.SIGKILL) }
+	prepareLibreOfficeCmd(cmd)
 	cmd.WaitDelay = pandocWaitDelay
 	var logs bytes.Buffer
 	sink := &limitedBuffer{buf: &logs, limit: maxLibreOfficeLogBytes}

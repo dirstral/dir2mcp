@@ -4,9 +4,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -43,12 +43,21 @@ var (
 )
 
 // resolveSofficeBinary returns the LibreOffice executable for cfg and whether
-// one resolved: the first field of ingest.libreoffice.command when it is set,
-// else soffice on PATH, else libreoffice on PATH (spec 0.93.0 §7.4.B). The path
-// itself is never put in diagnostics.
+// one resolved: ingest.libreoffice.command when it is set, else soffice on
+// PATH, else libreoffice on PATH (spec 0.93.0 §7.4.B). The configured value is
+// one path, not a command template: it is not split on spaces, so a path such
+// as `C:\Program Files\LibreOffice\program\soffice.exe` works. A relative
+// path (one with a separator) is made absolute against the working directory,
+// so the probe and the conversion run the same file. The path itself is never
+// put in diagnostics.
 func resolveSofficeBinary(cfg config.Config) (string, bool) {
-	if fields := strings.Fields(cfg.IngestLibreOfficeCommand); len(fields) > 0 {
-		return fields[0], true
+	if bin := strings.TrimSpace(cfg.IngestLibreOfficeCommand); bin != "" {
+		if strings.ContainsAny(bin, `/\`) {
+			if abs, err := filepath.Abs(bin); err == nil {
+				bin = abs
+			}
+		}
+		return bin, true
 	}
 	for _, name := range sofficeBinaryNames {
 		if p, err := exec.LookPath(name); err == nil {
@@ -82,14 +91,13 @@ func sofficeFunctionalCheck(bin string) error {
 
 // runSofficeVersionProbe runs `<bin> --version` with a bounded timeout and
 // discards the output. LibreOffice can start helper processes, so the probe
-// runs in its own process group and a timeout kills the whole group.
+// is stoppable as a whole tree (prepareLibreOfficeCmd).
 func runSofficeVersionProbe(ctx context.Context, bin string) error {
 	pctx, cancel := context.WithTimeout(ctx, sofficeProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(pctx, bin, "--version")
 	cmd.Env = os.Environ()
-	setRecognizeBackendProcAttr(cmd)
-	cmd.Cancel = func() error { return signalRecognizeBackend(cmd.Process.Pid, syscall.SIGKILL) }
+	prepareLibreOfficeCmd(cmd)
 	cmd.WaitDelay = pandocWaitDelay
 	err := cmd.Run()
 	reapLibreOfficeGroup(cmd)

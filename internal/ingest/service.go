@@ -5471,6 +5471,10 @@ func (s *Service) generateFlatEngineMarkdownRepresentation(ctx context.Context, 
 	// the text this document will be searched by, so it is screened before the
 	// title and before any persistence.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindExtraction, md) {
+		// readOrComputeFlatEngine already cached the text. A withheld text
+		// must not stay on disk under <state>/cache/<engine>, the same rule the
+		// annotation path follows (PurgeExtractionCache, #407).
+		s.purgeFlatEngineCache(eng.name, content)
 		return nil
 	}
 

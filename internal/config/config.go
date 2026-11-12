@@ -349,7 +349,8 @@ type Config struct {
 	IngestLibreOfficeTimeoutSec int
 	// IngestLibreOfficeCommand optionally overrides the LibreOffice binary of
 	// the libreoffice extraction engine (config `ingest.libreoffice.command`,
-	// spec 0.93.0); its first field is the binary. Empty resolves `soffice`,
+	// spec 0.93.0). The whole value is one path (spaces allowed), not a command
+	// template. Empty resolves `soffice`,
 	// then `libreoffice`, from PATH.
 	IngestLibreOfficeCommand string
 	// IngestPandocCommand optionally configures a local pandoc CLI command

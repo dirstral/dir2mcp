@@ -555,12 +555,12 @@ together:
 ```yaml
 ingest:
   libreoffice:
-    command: ""        # optional; e.g. /usr/bin/soffice. Empty = soffice, then libreoffice, from PATH
+    command: ""        # optional; one path, spaces allowed, no arguments; e.g. /usr/bin/soffice. Empty = soffice, then libreoffice, from PATH
     timeout_sec: 600   # default: 300; must be greater than 0
 ```
 
 - Env equivalent: `DIR2MCP_LIBREOFFICE_TIMEOUT_SEC=600`. The env value wins over the file.
-- When the limit expires, dir2mcp stops every process the engine started for the document (the whole LibreOffice process group, or the pandoc process) and records an error for that document only. Indexing continues with the next document. The error names the document and the setting, for example `libreoffice extract old/notes.doc: libreoffice extraction timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
+- When the limit expires, dir2mcp stops every process the engine started for the document (the whole LibreOffice process tree, with `taskkill /T` on Windows, or the pandoc process) and records an error for that document only. Indexing continues with the next document. The error names the document and the setting, for example `libreoffice extract old/notes.doc: libreoffice extraction timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
 - A conversion that fails (for example an encrypted or damaged `.doc`) is a per-document error under the usual rules. The daemon log gets one line that names the engine and the document.
 - A `.doc` that an earlier scan recorded as an `unsupported_format` skip or error is extracted on the first scan in which the engine is available, also when its content is unchanged. You do not need `--force` or a reindex.
 

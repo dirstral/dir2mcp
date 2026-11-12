@@ -350,10 +350,9 @@ func TestLibreOfficeExtract_TimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatalf("bad helper PID %q: %v", raw, convErr)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if err := syscall.Kill(pid, 0); err != nil {
-			break // the helper is gone
-		}
+	// The loop ends when the helper is gone, or is a zombie that waits to be
+	// reaped (it has exited, so it does not count as a survivor).
+	for processRunning(pid) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("helper process %d survived the timeout; the process group was not killed", pid)
@@ -382,12 +381,12 @@ func TestLibreOfficeExtract_TimeoutCoversPandocRead(t *testing.T) {
 	assertDirEmpty(t, tmp)
 }
 
-// TestLibreOfficeCommandOverride checks ingest.libreoffice.command: its first
-// field is the binary, it wins over PATH, and the probe runs on it.
+// TestLibreOfficeCommandOverride checks ingest.libreoffice.command: it names
+// the binary, it wins over PATH, and the probe runs on it.
 func TestLibreOfficeCommandOverride(t *testing.T) {
 	custom := writeStubDir(t, map[string]string{"my-office": fakeSofficeOK})
 	usePathOnly(t, writeStubDir(t, map[string]string{"pandoc": fakePandocOK}))
-	cfg := config.Config{IngestExtractor: "auto", IngestLibreOfficeCommand: filepath.Join(custom, "my-office") + " --ignored"}
+	cfg := config.Config{IngestExtractor: "auto", IngestLibreOfficeCommand: filepath.Join(custom, "my-office")}
 	bin, ok := resolveSofficeBinary(cfg)
 	if !ok || bin != filepath.Join(custom, "my-office") {
 		t.Fatalf("resolveSofficeBinary = (%q, %v), want the configured binary", bin, ok)
@@ -403,6 +402,79 @@ func TestLibreOfficeCommandOverride(t *testing.T) {
 	if LibreOfficeActive(config.Config{IngestLibreOfficeCommand: filepath.Join(broken, "bad-office")}) {
 		t.Fatal("a configured binary that fails its probe must leave the engine inactive")
 	}
+}
+
+// TestLibreOfficeCommand_PathWithSpaces checks that a configured binary whose
+// path holds a space (for example under "Program Files") is one path, not a
+// command split on spaces.
+func TestLibreOfficeCommand_PathWithSpaces(t *testing.T) {
+	root := testutil.TempDir(t)
+	dir := filepath.Join(root, "Program Files", "LibreOffice")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "soffice")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+fakeSofficeOK+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	usePathOnly(t, writeStubDir(t, map[string]string{"pandoc": fakePandocOK}))
+	cfg := config.Config{IngestExtractor: "auto", IngestLibreOfficeCommand: bin}
+	if !LibreOfficeActive(cfg) {
+		t.Fatalf("a configured binary under a path with a space must be active: %s", LibreOfficeInstallHint(cfg))
+	}
+	if _, err := NewLibreOfficeExtractor(bin, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
+		t.Fatalf("Extract via a path with a space: %v", err)
+	}
+}
+
+// TestLibreOfficeCommand_RelativePath checks that a relative configured binary
+// (./tools/soffice) runs in the conversion as it did in the probe: the
+// conversion must not resolve it against a different working directory.
+func TestLibreOfficeCommand_RelativePath(t *testing.T) {
+	root := testutil.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tools", "soffice"), []byte("#!/bin/sh\n"+fakeSofficeOK+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	usePathOnly(t, writeStubDir(t, map[string]string{"pandoc": fakePandocOK}))
+	t.Chdir(root)
+	rel := "." + string(filepath.Separator) + filepath.Join("tools", "soffice")
+	if !LibreOfficeActive(config.Config{IngestLibreOfficeCommand: rel}) {
+		t.Fatal("the relative binary must pass its probe")
+	}
+	if _, err := NewLibreOfficeExtractor(rel, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
+		t.Fatalf("Extract via a relative binary: %v", err)
+	}
+}
+
+// TestLibreOfficeExtract_BinaryGoneAfterProbe checks that a configured binary
+// that does not exist (for example removed after its probe) gives an error,
+// not a panic: the command never starts, so it has no Process to reap.
+func TestLibreOfficeExtract_BinaryGoneAfterProbe(t *testing.T) {
+	usePathOnly(t, writeStubDir(t, map[string]string{"pandoc": fakePandocOK}))
+	tmp := isolateTempDir(t)
+	missing := filepath.Join(testutil.TempDir(t), "gone", "soffice")
+	_, err := NewLibreOfficeExtractor(missing, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x"))
+	if err == nil {
+		t.Fatal("Extract with a missing binary must return an error")
+	}
+	assertDirEmpty(t, tmp)
+}
+
+// processRunning reports whether pid is a live process. A zombie (state Z)
+// has exited and only waits for its parent to reap it, so it does not count.
+func processRunning(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	out, err := exec.Command("/bin/ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false // ps finds no such process
+	}
+	state := strings.TrimSpace(string(out))
+	return state != "" && !strings.HasPrefix(state, "Z")
 }
 
 func containsString(list []string, want string) bool {
@@ -430,9 +502,17 @@ func TestLibreOfficeConvert_RealSoffice(t *testing.T) {
 	if err := os.WriteFile(html, []byte(page), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mk := exec.Command(bin, "--headless", "--norestore", "-env:UserInstallation="+fileURL(filepath.Join(work, "profile")),
+	// The fixture command is bounded and stoppable as a tree, like the
+	// production conversion, so a stalled LibreOffice cannot hang the test.
+	fctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	mk := exec.CommandContext(fctx, bin, "--headless", "--norestore", "-env:UserInstallation="+fileURL(filepath.Join(work, "profile")),
 		"--convert-to", "doc:MS Word 97", "--outdir", work, html)
-	if out, err := mk.CombinedOutput(); err != nil {
+	prepareLibreOfficeCmd(mk)
+	mk.WaitDelay = pandocWaitDelay
+	out, err := mk.CombinedOutput()
+	reapLibreOfficeGroup(mk)
+	if err != nil {
 		t.Fatalf("make .doc fixture: %v: %s", err, out)
 	}
 	doc, err := os.ReadFile(filepath.Join(work, "fixture.doc"))
