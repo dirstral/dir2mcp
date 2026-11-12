@@ -171,6 +171,9 @@ type windowDecode struct {
 	// report is the decoder's language report for the window under item
 	// scope (§8.6.13 low-confidence rule). Zero under window scope.
 	report windowReport
+	// noSpeech is the window's core when its decode was a no-speech result
+	// (SPEC 0.93.0), nil otherwise.
+	noSpeech *CoverageRange
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.

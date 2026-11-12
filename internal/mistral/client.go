@@ -868,14 +868,14 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if text == "" {
 		// SPEC 0.93.0: Voxtral answers audio with nothing said with a
 		// well-formed `{"text":"","segments":[]}`. That is a successful decode
-		// that found no speech, not a provider failure; only a body that names
-		// neither field is malformed.
-		if providerhttp.HasAnyJSONField(raw, "text", "segments") {
+		// that found no speech, not a provider failure. A body that names
+		// neither field, or has one of the wrong type, is malformed.
+		if providerhttp.WellFormedEmptySTT(raw, []string{"text"}, "segments") {
 			return "", nil
 		}
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
-			Message:   "transcription response had neither a text nor a segments field",
+			Message:   "malformed transcription response: no text or segments field, or a field of the wrong type",
 			Retryable: false,
 		}
 	}

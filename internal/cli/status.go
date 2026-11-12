@@ -337,7 +337,7 @@ func skipReasonHint(reason string) string {
 	case model.SkipReasonTranscriptPartial:
 		return "the windowed decode covered less of the recording than media.stt.min_coverage requires: check the STT endpoint for the window failures, then re-index, or set media.stt.on_partial_transcript=warn to index the partial transcript anyway"
 	case model.SkipReasonNoSpeech:
-		return "the speech-to-text decode succeeded and found no speech (music, ambient sound or silence): nothing to transcribe, and they are not retried while unchanged"
+		return "the speech-to-text decode succeeded and found no speech (for example music or ambient sound): not an error, and not decoded again while the file is unchanged"
 	default:
 		return ""
 	}

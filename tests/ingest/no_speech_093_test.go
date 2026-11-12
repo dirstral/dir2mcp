@@ -19,6 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/whisperapi"
 	"github.com/dirstral/dir2mcp/tests/testutil"
@@ -80,6 +81,8 @@ type speechWindowTranscriber struct {
 	silentAt map[int]bool
 	silent   bool
 	failAll  error
+	// failAt fails the 1-based request indices it names with the given error.
+	failAt map[int]error
 }
 
 func (s *speechWindowTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -94,6 +97,9 @@ func (s *speechWindowTranscriber) TranscribeStructured(_ context.Context, _ stri
 	s.mu.Unlock()
 	if s.failAll != nil {
 		return model.TranscriptResult{}, s.failAll
+	}
+	if err := s.failAt[n]; err != nil {
+		return model.TranscriptResult{}, err
 	}
 	if s.silent || s.silentAt[n] {
 		return model.TranscriptResult{}, nil
@@ -166,6 +172,13 @@ func assertNoSpeechSkip(t *testing.T, st *store.SQLiteStore, state *appstate.Ind
 	if meta, err := st.RepresentationMetaByType(context.Background(), relPath, ingest.RepTypeTranscript); err == nil && meta != "" {
 		t.Errorf("%s: a no_speech recording must have no transcript representation, got meta %s", relPath, meta)
 	}
+	assertNoSpeechLog(t, logs)
+}
+
+// assertNoSpeechLog checks that the log names the no-speech outcome and holds
+// no provider-failure line.
+func assertNoSpeechLog(t *testing.T, logs *syncBuffer) {
+	t.Helper()
 	for _, bad := range []string{"WHISPER_FAILED", "transcription skipped", "no text content", "no representation produced"} {
 		if strings.Contains(logs.String(), bad) {
 			t.Errorf("log must not report %q for a no-speech recording:\n%s", bad, logs.String())
@@ -280,6 +293,26 @@ func TestNoSpeech_ForcedReindexReadsTheCache(t *testing.T) {
 	assertNoSpeechSkip(t, st, state, logs, "music.mp3")
 }
 
+// assertWholeCoverage checks that the persisted transcript records every one of
+// its windows as decoded and the whole recording as covered.
+func assertWholeCoverage(t *testing.T, st *store.SQLiteStore, relPath string, windows, totalMS int) {
+	t.Helper()
+	meta, err := st.RepresentationMetaByType(context.Background(), relPath, ingest.RepTypeTranscript)
+	if err != nil || meta == "" {
+		t.Fatalf("transcript representation missing: meta=%q err=%v", meta, err)
+	}
+	cov, present := transcriptCoverageFromMeta(t, meta)
+	if !present {
+		t.Fatal("a windowed transcript must record its coverage")
+	}
+	if cov.WindowsAttempted != windows || cov.WindowsDecoded != windows {
+		t.Errorf("coverage windows %d/%d, want %d/%d: a no-speech window counts as decoded", cov.WindowsDecoded, cov.WindowsAttempted, windows, windows)
+	}
+	if cov.DecodedMS != totalMS || cov.DurationMS != totalMS {
+		t.Errorf("coverage decoded_ms=%d duration_ms=%d, want both %d", cov.DecodedMS, cov.DurationMS, totalMS)
+	}
+}
+
 // TestNoSpeech_MixedWindowsAreFullCoverage: a 30-minute recording decodes in
 // four windows, and the middle two hold no speech. Every window decoded, so the
 // transcript covers the whole recording: a no-speech window is decoded audio,
@@ -305,34 +338,19 @@ func TestNoSpeech_MixedWindowsAreFullCoverage(t *testing.T) {
 	if n := atomic.LoadInt32(calls); n != 4 {
 		t.Fatalf("decode requests = %d, want 4 windows", n)
 	}
-	doc := mustGetDoc(t, st, "long.mp3")
-	if doc.Status != "ok" {
+	if doc := mustGetDoc(t, st, "long.mp3"); doc.Status != "ok" {
 		t.Fatalf("status=%q skip_reason=%q, want ok: two windows hold speech", doc.Status, doc.SkipReason)
 	}
-	meta, err := st.RepresentationMetaByType(context.Background(), "long.mp3", ingest.RepTypeTranscript)
-	if err != nil || meta == "" {
-		t.Fatalf("transcript representation missing: meta=%q err=%v", meta, err)
-	}
-	cov, present := transcriptCoverageFromMeta(t, meta)
-	if !present {
-		t.Fatal("a windowed transcript must record its coverage")
-	}
-	if cov.WindowsAttempted != 4 || cov.WindowsDecoded != 4 {
-		t.Errorf("coverage windows %d/%d, want 4/4: a no-speech window counts as decoded", cov.WindowsDecoded, cov.WindowsAttempted)
-	}
-	if cov.DecodedMS != totalMS || cov.DurationMS != totalMS {
-		t.Errorf("coverage decoded_ms=%d duration_ms=%d, want both %d", cov.DecodedMS, cov.DurationMS, totalMS)
-	}
+	assertWholeCoverage(t, st, "long.mp3", 4, totalMS)
 	// The merged transcript, as the run cached it (no STT identity is set, so
 	// the cache key is the media bytes alone).
 	raw, err := os.ReadFile(filepath.Join(stateDir, "cache", "transcribe", ingest.ComputeContentHash([]byte("fake-audio"))+".txt"))
 	if err != nil {
 		t.Fatalf("read the cached transcript: %v", err)
 	}
-	text := string(raw)
 	for _, want := range []string{"spoken line 1", "spoken line 4"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("the windows with speech must be joined: %q missing from %q", want, text)
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("the windows with speech must be joined: %q missing from %q", want, raw)
 		}
 	}
 	if strings.Contains(logs.String(), "skip window") || strings.Contains(logs.String(), "PARTIAL") {
@@ -411,11 +429,28 @@ func TestNoSpeech_WindowScopeRecordsDecodedWindows(t *testing.T) {
 	}
 }
 
+// fixedWhisperServer answers every request with body and counts the requests.
+func fixedWhisperServer(t *testing.T, body string) (*whisperapi.Client, *int32) {
+	t.Helper()
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	c := whisperapi.NewClient(srv.URL, "")
+	c.InitialBackoff = time.Millisecond
+	c.MaxBackoff = time.Millisecond
+	return c, &calls
+}
+
 // TestNoSpeech_IdentifierThatHearsNoSpeechIsNoIdentification pins the §8.2.4
-// item identifier path. An identifier whose probe holds no speech gives no
-// identification: no WHISPER_FAILED, a log line that says it found no speech,
-// and the item decodes on the default profile. When that decode finds speech
-// the item is indexed; when it finds none too, the item is a no_speech skip.
+// item identifier path. An identifier whose probe holds no speech and reports
+// no language gives no identification: no WHISPER_FAILED, a log line that says
+// it found no speech, and the item decodes on the default profile. When that
+// decode finds speech the item is indexed; when it finds none too, the item is
+// a no_speech skip.
 func TestNoSpeech_IdentifierThatHearsNoSpeechIsNoIdentification(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -433,7 +468,7 @@ func TestNoSpeech_IdentifierThatHearsNoSpeechIsNoIdentification(t *testing.T) {
 			st := newRealStore(t)
 			def := &speechWindowTranscriber{silent: tc.silent}
 			svc, state, logs := noSpeechService(t, root, testutil.TempDir(t), st, def, 0)
-			lid, lidCalls := noSpeechWhisperServer(t)
+			lid, lidCalls := fixedWhisperServer(t, `{"text":"","segments":[]}`)
 			svc.SetLanguageIdentifier(lid, "lid")
 
 			f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
@@ -461,6 +496,129 @@ func TestNoSpeech_IdentifierThatHearsNoSpeechIsNoIdentification(t *testing.T) {
 				assertNoSpeechSkip(t, st, state, logs, "talk.mp3")
 			}
 		})
+	}
+}
+
+// TestNoSpeech_IdentifierLanguageWithEmptyTextIsASignal: an identifier
+// response with empty text that still reports a language is a signal
+// (§8.2.3): the item is routed on that language, not treated as no speech.
+func TestNoSpeech_IdentifierLanguageWithEmptyTextIsASignal(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
+	st := newRealStore(t)
+	def := &speechWindowTranscriber{}
+	svc, _, logs := noSpeechService(t, root, testutil.TempDir(t), st, def, 0)
+	lid, _ := fixedWhisperServer(t, `{"text":"","language":"en","language_probability":0.95,"segments":[]}`)
+	svc.SetLanguageIdentifier(lid, "lid")
+
+	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `identifier "lid" resolved "en"`) {
+		t.Errorf("the reported language must be used as a signal:\n%s", out)
+	}
+	if strings.Contains(out, "found no speech") {
+		t.Errorf("a response that reports a language is not no identification:\n%s", out)
+	}
+	if doc := mustGetDoc(t, st, "talk.mp3"); doc.Status != "ok" {
+		t.Fatalf("status=%q skip_reason=%q, want ok", doc.Status, doc.SkipReason)
+	}
+}
+
+// TestNoSpeech_FailedWindowBesideNoSpeechIsAnError pins §8.6.13: when one
+// window failed and every other window holds no speech, the recording is an
+// error and retried, because the failed window can hold speech.
+func TestNoSpeech_FailedWindowBesideNoSpeechIsAnError(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
+	st := newRealStore(t)
+	tr := &speechWindowTranscriber{silent: true, failAt: map[int]error{3: &model.ProviderError{Code: "WHISPER_FAILED", Message: "upstream returned non-200 response"}}}
+	svc, state, _ := noSpeechService(t, root, testutil.TempDir(t), st, tr, 30*60*1000)
+
+	f := ingest.DiscoveredFile{RelPath: "long.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	doc := mustGetDoc(t, st, "long.mp3")
+	if doc.Status != "error" || doc.SkipReason != "" {
+		t.Fatalf("status=%q skip_reason=%q, want error: a failed window can hold speech", doc.Status, doc.SkipReason)
+	}
+	if !strings.Contains(doc.ErrorMessage, "every other window holds no speech") {
+		t.Errorf("error message must say why, got %q", doc.ErrorMessage)
+	}
+	if snap := state.Snapshot(); snap.Errors != 1 || snap.Skipped != 0 {
+		t.Errorf("run counters errors=%d skipped=%d, want 1/0", snap.Errors, snap.Skipped)
+	}
+}
+
+// TestNoSpeech_IdentityChangeDecodesAgain pins the §8.6.13 re-decode guard: a
+// no-speech recording is not decoded again while its content and the STT
+// derivation identity are unchanged, and is decoded again when the identity
+// changes, because another model can find speech that this one did not.
+func TestNoSpeech_IdentityChangeDecodesAgain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "clip.mp4"), "fake-video-bytes")
+	st := newRealStore(t)
+	f := ingest.DiscoveredFile{RelPath: "clip.mp4", SizeBytes: 16, MTimeUnix: time.Now().Unix()}
+	client, calls := noSpeechWhisperServer(t)
+
+	run := func(sttModel string) *speechWindowTranscriber {
+		svc, _, _ := noSpeechService(t, root, stateDir, st, client, 0)
+		svc.SetSTTIdentity("whisper", sttModel)
+		if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+			t.Fatalf("ProcessDocument (%s): %v", sttModel, err)
+		}
+		return nil
+	}
+	run("large-v3")
+	run("large-v3")
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("an unchanged no-speech recording must not be decoded again: STT requests = %d, want 1", got)
+	}
+	run("gigaam-v2")
+	if got := atomic.LoadInt32(calls); got != 2 {
+		t.Fatalf("an STT identity change must decode the recording again: STT requests = %d, want 2", got)
+	}
+	if doc := mustGetDoc(t, st, "clip.mp4"); doc.Status != "skipped" || doc.SkipReason != model.SkipReasonNoSpeech {
+		t.Errorf("status=%q skip_reason=%q, want skipped/no_speech", doc.Status, doc.SkipReason)
+	}
+	run("gigaam-v2")
+	if got := atomic.LoadInt32(calls); got != 2 {
+		t.Errorf("the new identity is recorded, so the next run decodes nothing: STT requests = %d, want 2", got)
+	}
+}
+
+// TestNoSpeech_LowDensityLeavesOutNoSpeechWindows pins §8.6.6: the low-density
+// check does not count no-speech windows in the duration. One short line in a
+// 30-minute recording of music is too sparse over 30 minutes and dense enough
+// over the one window that holds speech.
+func TestNoSpeech_LowDensityLeavesOutNoSpeechWindows(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
+	st := newRealStore(t)
+	client, _ := scriptedWhisperServer(t, map[int32]bool{1: true})
+	svc, _, logs := noSpeechService(t, root, testutil.TempDir(t), st, client, 30*60*1000)
+	cfg := quality.DefaultConfig()
+	cfg.Density.MinCharsPerMinute = 1.0
+	svc.SetQualityGate(quality.New(cfg))
+
+	f := ingest.DiscoveredFile{RelPath: "long.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	if doc := mustGetDoc(t, st, "long.mp3"); doc.Status != "ok" {
+		t.Fatalf("status=%q error=%q, want ok: no-speech windows are not low density\n%s", doc.Status, doc.ErrorMessage, logs.String())
+	}
+	if strings.Contains(logs.String(), "low_text_density") {
+		t.Errorf("the low-density check must not count no-speech windows:\n%s", logs.String())
 	}
 }
 

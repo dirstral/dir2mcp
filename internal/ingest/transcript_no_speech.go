@@ -3,8 +3,10 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/statefs"
@@ -13,14 +15,21 @@ import (
 // This file implements the SPEC 0.93.0 no-speech outcome. A speech-to-text
 // provider that answers a recording of music, ambient sound or silence with a
 // well-formed response holding empty text and no segments has decoded the audio
-// successfully and found nothing said. The adapters return that as an empty
-// result with no error. Here the pipeline gives it its own outcome:
+// successfully and found nothing said (a no-speech result, SPEC §8.2). The
+// adapters return that as an empty result with no error. Here the pipeline
+// gives it its own outcome:
 //
 //   - a decode window with no speech counts as decoded and adds to coverage, so
-//     it is never a shortfall under media.stt.min_coverage;
+//     it is never a shortfall under media.stt.min_coverage, and the §8.6.6
+//     low-density check leaves it out of the duration;
+//   - a failed window next to windows with no speech is still a failure: the
+//     failed window can hold speech, so the document is an error and retried;
 //   - a recording whose single decode, or every decode window, found no speech
-//     is recorded as status="skipped" with skip_reason="no_speech". It is not an
-//     error, so it is not retried while the file is unchanged.
+//     produces no transcript. When the document has no other searchable
+//     representation it is recorded as status="skipped" with
+//     skip_reason="no_speech"; otherwise it stays status="ok". It is not an
+//     error, and it is not decoded again while both the content and the STT
+//     derivation identity are unchanged (§8.6.13).
 
 // errNoSpeech reports that the decode of a recording succeeded and found no
 // speech anywhere in it. It travels on the error channel of the transcript read
@@ -80,6 +89,7 @@ func (s *Service) recordNoSpeechWindow(relPath string, plan windowSchedule, core
 		plan.label, core.StartMS, core.EndMS, relPath)
 	var out windowDecode
 	out.decoded, out.covered, out.languages = recordWindow(results, core, "", "", nil, cur, true, fallbackFrom)
+	out.noSpeech = &core
 	st.recordDecoded(out.covered, out.languages)
 	return out
 }
@@ -91,11 +101,12 @@ func (s *Service) recordNoSpeechWindow(relPath string, plan windowSchedule, core
 // must not keep answering from chunks of a transcript it no longer has. A
 // retirement that fails is an error, not a skip.
 func (s *Service) settleNoSpeech(ctx context.Context, doc model.Document, tc trackContext) (bool, bool, string, error) {
-	s.getLogger().Printf("stt: %s%s holds no speech: the decode succeeded and returned no text; recorded as skipped (skip_reason=%s, SPEC 0.93.0)",
-		doc.RelPath, trackSuffixForLog(tc), model.SkipReasonNoSpeech)
+	s.getLogger().Printf("stt: %s%s holds no speech: the decode succeeded and returned no text, so no transcript is produced (SPEC §8.6.13)",
+		doc.RelPath, trackSuffixForLog(tc))
 	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
 		return false, false, "", err
 	}
+	s.recordNoSpeechIdentity(ctx, doc.RelPath)
 	return false, false, model.SkipReasonNoSpeech, nil
 }
 
@@ -126,4 +137,151 @@ func cachedNoSpeech(text, markerPath string) bool {
 	}
 	_, err := os.Stat(markerPath)
 	return err == nil
+}
+
+// failedBesideNoSpeech is the §8.6.13 verdict on a windowed decode that
+// produced no text because some windows failed and every other window is a
+// no-speech result. It is an error, not a no-speech recording: a failed window
+// can hold speech, so the document is recorded as an error and retried. It
+// returns nil for every other decode, including one with refused windows,
+// which the §8.2.2 terminal-status rules judge.
+func failedBesideNoSpeech(relPath, text string, coverage *TranscriptCoverage) error {
+	if coverage == nil || len(coverage.Refused) > 0 || strings.TrimSpace(stripSegmentMarkers(text)) != "" {
+		return nil
+	}
+	if coverage.WindowsDecoded == 0 || coverage.WindowsDecoded >= coverage.WindowsAttempted {
+		return nil
+	}
+	return fmt.Errorf("windowed transcription %s: %d of %d windows failed and every other window holds no speech; a failed window can hold speech, so the recording is retried (SPEC §8.6.13)",
+		relPath, coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted)
+}
+
+// withNoSpeech records on a coverage record how much of the recording the
+// no-speech windows span, coalesced and clamped to the recording.
+func withNoSpeech(cov *TranscriptCoverage, spans []CoverageRange, totalMS int) *TranscriptCoverage {
+	if cov == nil || len(spans) == 0 {
+		return cov
+	}
+	total := 0
+	for _, r := range coalesceCoverageRanges(spans) {
+		if totalMS > 0 && r.EndMS > totalMS {
+			r.EndMS = totalMS
+		}
+		if r.EndMS > r.StartMS {
+			total += r.EndMS - r.StartMS
+		}
+	}
+	cov.NoSpeechMS = total
+	return cov
+}
+
+// speechDuration is the duration the §8.6.6 low-density check compares the
+// transcript with: the recording minus its no-speech windows (SPEC 0.93.0). A
+// recording with one window of speech and long windows of music is not
+// degenerate output. A result at or below zero disables the duration floor, as
+// an unknown duration does.
+func speechDuration(duration time.Duration, coverage *TranscriptCoverage) time.Duration {
+	if coverage == nil || coverage.NoSpeechMS <= 0 {
+		return duration
+	}
+	left := duration - time.Duration(coverage.NoSpeechMS)*time.Millisecond
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
+// settlePendingNoSpeech settles a no-speech recording once recognition has had
+// its chance (SPEC §8.6.13). settled is false when the transcript path did not
+// find a whole-recording no-speech result for this document. When recognition
+// produced a representation the document keeps it and stays status="ok", so it
+// is credited as indexed (suppress false). Otherwise it is recorded as
+// status="skipped" with skip_reason="no_speech" and counted as a skip
+// (suppress true, so the caller does not also credit it as indexed).
+func (s *Service) settlePendingNoSpeech(ctx context.Context, doc model.Document, recognized bool) (suppress, settled bool) {
+	if !s.pendingNoSpeechSkip {
+		return false, false
+	}
+	s.pendingNoSpeechSkip = false
+	if recognized {
+		s.getLogger().Printf("stt: %s holds no speech but keeps its recognition representation; it stays indexed (SPEC §8.6.13)", doc.RelPath)
+		return false, true
+	}
+	s.getLogger().Printf("stt: %s holds no speech and has no other searchable representation; recorded as skipped (skip_reason=%s, SPEC §8.6.13)",
+		doc.RelPath, model.SkipReasonNoSpeech)
+	s.addSkipped(1)
+	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonNoSpeech)
+	s.noSpeechSkippedThisDoc = true
+	return true, true
+}
+
+// noSpeechIdentitySettingPrefix keys the durable record of the STT derivation
+// identity that found no speech in a document (SPEC §8.6.13). A no-speech track
+// has no transcript representation to carry its identity in meta_json, so the
+// record lives in the store's settings table, one key per rel_path.
+const noSpeechIdentitySettingPrefix = "no_speech_identity:"
+
+// settingsStore is the optional store capability behind the no-speech identity
+// record. A store without it records nothing, and a no-speech outcome is then
+// decoded again only when its content changes.
+type settingsStore interface {
+	GetSetting(ctx context.Context, key string) (string, error)
+	SetSetting(ctx context.Context, key, value string) error
+}
+
+// recordNoSpeechIdentity stores the active STT derivation identity as the one
+// that found no speech in relPath. A failed write is logged: the cost is that an
+// identity change later does not re-decode this recording until its content
+// changes or it is reindexed with --force.
+func (s *Service) recordNoSpeechIdentity(ctx context.Context, relPath string) {
+	st, ok := s.store.(settingsStore)
+	if !ok {
+		return
+	}
+	if err := st.SetSetting(ctx, noSpeechIdentitySettingPrefix+relPath, s.activeTranscriptIdentity()); err != nil {
+		s.getLogger().Printf("stt: record the no-speech derivation identity of %s: %v", relPath, err)
+	}
+}
+
+// clearNoSpeechIdentity drops the no-speech record of relPath once it has a
+// transcript: that transcript's meta_json now carries the identity, and a stale
+// record would make every later run decode the document again.
+func (s *Service) clearNoSpeechIdentity(ctx context.Context, relPath string) {
+	st, ok := s.store.(settingsStore)
+	if !ok {
+		return
+	}
+	value, err := st.GetSetting(ctx, noSpeechIdentitySettingPrefix+relPath)
+	if err != nil || value == "" {
+		return
+	}
+	if err := st.SetSetting(ctx, noSpeechIdentitySettingPrefix+relPath, ""); err != nil {
+		s.getLogger().Printf("stt: clear the no-speech derivation identity of %s: %v", relPath, err)
+	}
+}
+
+// noSpeechIdentityStale reports whether the no-speech outcome recorded for a
+// media document was found by another STT derivation identity than the active
+// one (SPEC §8.6.13, §8.6.7). Another model can find speech that this one did
+// not, so the document is processed again. It is false when STT is off, for
+// a document that is not audio or video, and when no record exists.
+func (s *Service) noSpeechIdentityStale(ctx context.Context, existing model.Document) bool {
+	if s.transcriber == nil || existing.Deleted || !isSidecarMediaType(existing.DocType) {
+		return false
+	}
+	st, ok := s.store.(settingsStore)
+	if !ok {
+		return false
+	}
+	recorded, err := st.GetSetting(ctx, noSpeechIdentitySettingPrefix+existing.RelPath)
+	if err != nil || recorded == "" {
+		return false
+	}
+	active := s.activeTranscriptIdentity()
+	if recorded == active {
+		return false
+	}
+	s.getLogger().Printf("STT model changed for %s (no speech found with %q, configured %q); decoding it again (SPEC §8.6.13)",
+		existing.RelPath, recorded, active)
+	return true
 }

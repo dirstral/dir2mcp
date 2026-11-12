@@ -5104,7 +5104,7 @@ func statsOutputSchema() map[string]interface{} {
 						"reason": map[string]interface{}{
 							"type":        "string",
 							"minLength":   1,
-							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, no_speech, symlink_ignored. Render an unrecognized value verbatim.",
+							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, symlink_ignored, no_speech. no_speech: media whose STT decode found no speech in the whole recording (§8.2, §8.6.13): every decode returned a well-formed response with empty text and no segment that holds text, for example a recording that holds only music or ambient sound, and the document has no other searchable representation. It is not an error, and the recording is not decoded again while the file is unchanged. Render an unrecognized value verbatim.",
 						},
 						"count": map[string]interface{}{"type": "integer", "minimum": 1},
 					},

@@ -47,9 +47,11 @@ func TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 // TestElevenLabsTranscribe_MalformedResponseStaysAnError: a body that names no
 // text-bearing field stays a non-retryable ELEVENLABS_FAILED.
 func TestElevenLabsTranscribe_MalformedResponseStaysAnError(t *testing.T) {
-	_, err := elevenLabsSTTClient(`{"language_code":"eng"}`).Transcribe(context.Background(), "x.mp3", []byte("audio"))
-	var pe *model.ProviderError
-	if !errors.As(err, &pe) || pe.Code != "ELEVENLABS_FAILED" || pe.Retryable {
-		t.Fatalf("want non-retryable ELEVENLABS_FAILED, got %v", err)
+	for _, body := range []string{`{"language_code":"eng"}`, `{"text":null}`, `{"text":"","transcript":null}`} {
+		_, err := elevenLabsSTTClient(body).Transcribe(context.Background(), "x.mp3", []byte("audio"))
+		var pe *model.ProviderError
+		if !errors.As(err, &pe) || pe.Code != "ELEVENLABS_FAILED" || pe.Retryable {
+			t.Fatalf("%s: want non-retryable ELEVENLABS_FAILED, got %v", body, err)
+		}
 	}
 }

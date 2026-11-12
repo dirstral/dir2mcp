@@ -43,9 +43,11 @@ func TestTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 // TestTranscribe_MalformedResponseStaysAnError: a body with neither a text nor
 // a segments field stays a non-retryable MISTRAL_FAILED.
 func TestTranscribe_MalformedResponseStaysAnError(t *testing.T) {
-	_, err := voxtralClient(t, `{"model":"voxtral-mini-latest"}`).Transcribe(context.Background(), "x.mp3", []byte("audio"))
-	var pe *model.ProviderError
-	if !errors.As(err, &pe) || pe.Code != "MISTRAL_FAILED" || pe.Retryable {
-		t.Fatalf("want non-retryable MISTRAL_FAILED, got %v", err)
+	for _, body := range []string{`{"model":"voxtral-mini-latest"}`, `{"text":null,"segments":[]}`, `{"text":"","segments":{}}`} {
+		_, err := voxtralClient(t, body).Transcribe(context.Background(), "x.mp3", []byte("audio"))
+		var pe *model.ProviderError
+		if !errors.As(err, &pe) || pe.Code != "MISTRAL_FAILED" || pe.Retryable {
+			t.Fatalf("%s: want non-retryable MISTRAL_FAILED, got %v", body, err)
+		}
 	}
 }

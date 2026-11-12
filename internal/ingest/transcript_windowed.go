@@ -482,8 +482,11 @@ func (s *Service) decodeSingleWindowScoped(ctx context.Context, relPath string, 
 	}
 	stats.decoded = 1
 	stats.ranges = wd.covered
+	if wd.noSpeech != nil {
+		stats.noSpeech = []CoverageRange{*wd.noSpeech}
+	}
 	text, words := MergeTranscriptWindows(wd.decoded, totalMS)
-	return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), totalMS), nil
+	return text, words, withNoSpeech(withWindowMS(s.liveScopedCoverage(stats, totalMS), totalMS), stats.noSpeech, totalMS), nil
 }
 
 // withWindowMS records the decode window on a coverage record, for the
@@ -606,14 +609,14 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	// it does and does not cover.
 	if st != nil {
 		text, words := MergeTranscriptWindows(windows, stepMS)
-		return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), windowMS), nil
+		return text, words, withNoSpeech(withWindowMS(s.liveScopedCoverage(stats, totalMS), windowMS), stats.noSpeech, totalMS), nil
 	}
 	var rd redecodeOutcome
 	if unhinted && label == "transcription" {
 		windows, rd = s.redecodeLowConfidenceWindows(ctx, relPath, tmpPath, stt, plan, windows, stats.reports)
 	}
 	text, words := MergeTranscriptWindows(windows, stepMS)
-	coverage := withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS)
+	coverage := withNoSpeech(withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS), stats.noSpeech, totalMS)
 	rd.stamp(coverage)
 	return text, words, coverage, nil
 }
@@ -648,6 +651,9 @@ type windowStats struct {
 	// reports are the decoder's language reports of the decoded windows under
 	// item scope, in schedule order, for the §8.6.13 low-confidence rule.
 	reports []windowReport
+	// noSpeech are the cores of the windows whose decode was a no-speech result
+	// (SPEC 0.93.0), for the §8.6.6 low-density duration.
+	noSpeech []CoverageRange
 }
 
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
@@ -697,6 +703,9 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		}
 		if len(wd.decoded) == 0 {
 			continue
+		}
+		if wd.noSpeech != nil {
+			stats.noSpeech = append(stats.noSpeech, *wd.noSpeech)
 		}
 		stats.decoded++
 		stats.ranges = append(stats.ranges, wd.covered...)
@@ -753,17 +762,24 @@ func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath st
 		s.getLogger().Printf("windowed %s: cannot cut window [%d,%d]ms of %s: %v", plan.label, start, end, relPath, err)
 		return windowDecode{}, &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", plan.label, start, end, err)}
 	}
+	core := CoverageRange{StartMS: start, EndMS: end}
+	if i+1 < len(starts) && starts[i+1] < core.EndMS {
+		core.EndMS = starts[i+1]
+	}
 	if st != nil {
-		core := CoverageRange{StartMS: start, EndMS: end}
-		if i+1 < len(starts) && starts[i+1] < core.EndMS {
-			core.EndMS = starts[i+1]
-		}
 		return s.decodeWindowScoped(ctx, relPath, pieces, plan, core, st), nil
 	}
 	decoded, covered, results, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
-	lang, conf := decoderReport(results)
-	return windowDecode{decoded: decoded, covered: covered, err: decodeErr,
-		report: windowReport{span: CoverageRange{StartMS: start, EndMS: end}, lang: lang, conf: conf}}, nil
+	wd := windowDecode{decoded: decoded, covered: covered, err: decodeErr,
+		report: windowReport{span: CoverageRange{StartMS: start, EndMS: end}}}
+	if decodeErr == nil && noSpeechResults(results) {
+		// SPEC 0.93.0: a no-speech window reports no language, so the
+		// low-confidence re-decode rule does not read it.
+		wd.noSpeech = &core
+		return wd, nil
+	}
+	wd.report.lang, wd.report.conf = decoderReport(results)
+	return wd, nil
 }
 
 // decodeWindowPieces decodes every piece of one scheduled window and returns the
