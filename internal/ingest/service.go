@@ -7445,6 +7445,9 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 	// speech. Reported as errNoSpeech, never as a provider failure. The no
 	// audio track case returned above with no error and keeps its meaning.
 	if err == nil && decodedNoSpeech(text, coverage) {
+		if ferr := fallbackNoSpeech(relPath, coverage, route); ferr != nil {
+			return "", nil, nil, nil, ferr
+		}
 		return "", nil, coverage, route, errNoSpeech
 	}
 	if err == nil {

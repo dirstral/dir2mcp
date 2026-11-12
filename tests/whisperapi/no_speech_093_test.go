@@ -67,6 +67,26 @@ func TestTranscribe_NoSpeechKeepsTheLanguageReport(t *testing.T) {
 	}
 }
 
+// TestTranscribe_WordsWithoutTextStayAnError: a response with timed words but
+// no text contradicts itself. The server heard something, so it is not a
+// no-speech result; it stays a non-retryable WHISPER_FAILED and the audio is
+// decoded again on the next run.
+func TestTranscribe_WordsWithoutTextStayAnError(t *testing.T) {
+	for name, body := range map[string]string{
+		"top-level words": `{"text":"","segments":[],"words":[{"word":"hello","start":0,"end":1}]}`,
+		"segment words":   `{"text":"","segments":[{"start":0,"end":1,"text":"","words":[{"word":"hi","start":0,"end":1}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newClient(whisperServer(t, body).URL, "")
+			_, err := c.TranscribeStructured(context.Background(), "x.m4a", []byte("audio"))
+			var pe *model.ProviderError
+			if !errors.As(err, &pe) || pe.Code != "WHISPER_FAILED" || pe.Retryable {
+				t.Fatalf("want non-retryable WHISPER_FAILED, got %v", err)
+			}
+		})
+	}
+}
+
 // TestTranscribe_MalformedResponseStaysAnError pins the other half: a body that
 // names neither a text nor a segments field, or has one of the wrong type, is
 // malformed, so it stays a non-retryable WHISPER_FAILED.

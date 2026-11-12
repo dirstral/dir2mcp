@@ -71,6 +71,50 @@ func splitNoSpeech(err error) (bool, error) {
 	return false, err
 }
 
+// windowsWithText returns the windows whose decode holds text, in order.
+func windowsWithText(windows []TranscriptWindow) []TranscriptWindow {
+	out := make([]TranscriptWindow, 0, len(windows))
+	for _, w := range windows {
+		if strings.TrimSpace(stripSegmentMarkers(w.Res.Text)) != "" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// fallbackNoSpeech is the verdict on a no-speech decode that the default
+// profile produced because the selected route failed (§8.2.4,
+// on_route_error=default). The default heard nothing, but the route that
+// failed can hold the speech the default missed, and a route-fallback result
+// is provisional. It is not settled as no_speech: it is an error that is
+// retried on the next run, exactly as a failed window beside no-speech
+// windows is (§8.6.13). It returns nil for a decode that used no fallback.
+func fallbackNoSpeech(relPath string, coverage *TranscriptCoverage, route *itemRoute) error {
+	from := ""
+	if route != nil {
+		from = route.FallbackFrom
+	}
+	if from == "" && coverage != nil {
+		for _, l := range coverage.Languages {
+			if l.FallbackFrom != "" {
+				from = l.FallbackFrom
+				break
+			}
+		}
+	}
+	if from == "" {
+		return nil
+	}
+	return fmt.Errorf("transcription %s: route %q failed and the default profile found no speech; the failed route can hold speech, so the recording is retried (SPEC §8.2.4, §8.6.13)",
+		relPath, from)
+}
+
+// decodedWithoutSpeech reports whether a window's decode succeeded (err is nil)
+// and every piece of it is a no-speech result.
+func decodedWithoutSpeech(results []pieceResult, err error) bool {
+	return err == nil && noSpeechResults(results)
+}
+
 // noSpeechResults reports whether every decoded piece of a window came back
 // with no text: a decode that succeeded and heard nothing said.
 func noSpeechResults(results []pieceResult) bool {
@@ -204,8 +248,11 @@ func (s *Service) settlePendingNoSpeech(ctx context.Context, doc model.Document,
 		return false, false
 	}
 	s.pendingNoSpeechSkip = false
-	if recognized {
-		s.getLogger().Printf("stt: %s holds no speech but keeps its recognition representation; it stays indexed (SPEC §8.6.13)", doc.RelPath)
+	// The document keeps another searchable representation when recognition
+	// produced one now, or when one from an earlier run is still active (the
+	// transcripts of this derivation were retired before this point).
+	if recognized || s.hasIndexedRepresentations(ctx, doc.RelPath) {
+		s.getLogger().Printf("stt: %s holds no speech but keeps another searchable representation; it stays indexed (SPEC §8.6.13)", doc.RelPath)
 		return false, true
 	}
 	s.getLogger().Printf("stt: %s holds no speech and has no other searchable representation; recorded as skipped (skip_reason=%s, SPEC §8.6.13)",

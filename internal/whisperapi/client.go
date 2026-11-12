@@ -574,6 +574,16 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 				Retryable: false,
 			}
 		}
+		// Timed words with no text is a contradiction, not silence: the server
+		// heard something it did not write out. It stays an error, so the audio
+		// is decoded again rather than recorded as no speech.
+		if len(parsed.timedWords()) > 0 {
+			return model.TranscriptResult{}, &model.ProviderError{
+				Code:      "WHISPER_FAILED",
+				Message:   "contradictory transcription response: timed words but no text",
+				Retryable: false,
+			}
+		}
 		// The language report is kept: an identifier response with empty text
 		// that reports a language is still a signal (§8.2.3). The pipeline does
 		// not read the report of a no-speech decode window (§8.6.13).

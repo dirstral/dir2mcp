@@ -59,6 +59,11 @@ func MergeTranscriptWindows(windows []TranscriptWindow, stepMS int) (string, []m
 	if stepMS <= 0 {
 		stepMS = 1
 	}
+	// A window whose decode found no speech (SPEC 0.93.0) is decoded audio for
+	// coverage, but it gives the merge no text. It must not end the preceding
+	// window's core: that would drop the preceding window's overlap tail with
+	// nothing to replace it. So the merge sees only windows with text.
+	windows = windowsWithText(windows)
 	// Collect whole SEGMENTS (a [mm:ss] line plus the words that fall in it) rather
 	// than filtering lines and words separately: keeping a segment's text and word
 	// timings together lets the overlap de-duplication drop both as a unit.

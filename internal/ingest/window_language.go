@@ -207,7 +207,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if len(results) == 0 {
 		return out
 	}
-	if noSpeechResults(results) && err == nil {
+	if decodedWithoutSpeech(results, err) {
 		// SPEC 0.93.0: nothing said in this window, so there is no language to
 		// identify, no route to move to and no text to screen.
 		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
@@ -227,6 +227,12 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			fallbackFrom = fb
 			v = s.judgeWindow(results, cur, lang, core)
 		}
+	}
+	if decodedWithoutSpeech(results, ferr) {
+		// SPEC 0.93.0: a later candidate or the default profile found no speech
+		// in the window. It is a decoded window with no language, never a
+		// refusal for the language the first decode resolved.
+		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
 	}
 	if ferr != nil {
 		// A candidate that fails to decode is a failed window (§8.6.13), not a
