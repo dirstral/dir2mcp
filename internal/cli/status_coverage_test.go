@@ -163,6 +163,36 @@ func TestRenderCoverageBlock_RemediationHints(t *testing.T) {
 	}
 }
 
+// TestRenderCoverageBlock_NoSpeechSaysTheDecodeWorked pins the SPEC 0.93.0
+// line: a no_speech skip is printed with one line that says the decode
+// succeeded and found nothing said, so an operator does not go looking for a
+// provider fault behind audio that is "not indexed".
+func TestRenderCoverageBlock_NoSpeechSaysTheDecodeWorked(t *testing.T) {
+	snapshot := corpusSnapshot{
+		Timestamp: "2026-11-12T00:00:00Z",
+		Indexing: corpusIndexing{
+			Mode:    "incremental",
+			Skipped: 28,
+			SkipSummary: &model.SkipSummary{
+				Categories: map[string]int64{model.SkipReasonNoSpeech: 28},
+			},
+		},
+		DocCounts: map[string]int64{"video": 1500},
+		TotalDocs: 1500,
+	}
+	var out bytes.Buffer
+	app := &App{stdout: &out, stderr: &bytes.Buffer{}}
+	app.renderCoverageBlock(newStyles(&out, false), snapshot)
+
+	got := out.String()
+	if !strings.Contains(got, "no_speech") || !strings.Contains(got, "28") {
+		t.Fatalf("coverage block must name no_speech with its count:\n%s", got)
+	}
+	if !strings.Contains(got, "found no speech") {
+		t.Errorf("no_speech must carry its one-line explanation:\n%s", got)
+	}
+}
+
 func TestSkipReasonHint_UnknownReasonYieldsNoGuess(t *testing.T) {
 	// The skip_reasons enum is additive: a newer server may report a reason this
 	// binary has never heard of. Render it bare rather than inventing advice.

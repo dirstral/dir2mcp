@@ -204,6 +204,11 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if len(results) == 0 {
 		return out
 	}
+	if noSpeechResults(results) && err == nil {
+		// SPEC 0.93.0: nothing said in this window, so there is no language to
+		// identify, no route to move to and no text to screen.
+		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
+	}
 	idTag, idConf, idOK := s.identifyWindow(ctx, relPath, pieces, core, st)
 	lang, source, conf := st.resolveWith(results, idTag, idConf, idOK)
 	if fallbackFrom == "" {
@@ -421,7 +426,9 @@ func (s *Service) rerouteWindow(ctx context.Context, relPath string, pieces []wi
 		return results, cur
 	}
 	rerouted, derr := s.decodePieces(ctx, relPath, want.stt, pieces, plan)
-	if len(rerouted) == 0 {
+	// SPEC 0.93.0: a route that hears no speech where the first decode heard
+	// some has produced nothing either, so the first decode stands.
+	if len(rerouted) == 0 || !resultsHaveContent(rerouted) {
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s resolved to %q but route %q returned nothing (%v); keeping the %q decode",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, want.route, derr, cur.route)
 		return results, cur

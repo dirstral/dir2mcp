@@ -5104,7 +5104,7 @@ func statsOutputSchema() map[string]interface{} {
 						"reason": map[string]interface{}{
 							"type":        "string",
 							"minLength":   1,
-							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, symlink_ignored. Render an unrecognized value verbatim.",
+							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, no_speech, symlink_ignored. Render an unrecognized value verbatim.",
 						},
 						"count": map[string]interface{}{"type": "integer", "minimum": 1},
 					},

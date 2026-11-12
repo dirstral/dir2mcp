@@ -203,7 +203,13 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 
 	text, ok := parseTranscribeResult(parsed)
 	if !ok {
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "stt response had no text content", Retryable: false}
+		// SPEC 0.93.0: a well-formed response whose text fields are empty is a
+		// successful decode that found no speech, not a provider failure. Only
+		// a body that names none of the text-bearing fields is malformed.
+		if providerhttp.HasAnyJSONField(bodyBytes, "text", "transcript", "segments") {
+			return "", nil
+		}
+		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "stt response had neither a text, transcript nor segments field", Retryable: false}
 	}
 	return text, nil
 }

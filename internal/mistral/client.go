@@ -866,9 +866,16 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
+		// SPEC 0.93.0: Voxtral answers audio with nothing said with a
+		// well-formed `{"text":"","segments":[]}`. That is a successful decode
+		// that found no speech, not a provider failure; only a body that names
+		// neither field is malformed.
+		if providerhttp.HasAnyJSONField(raw, "text", "segments") {
+			return "", nil
+		}
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
-			Message:   "transcription response had no text content",
+			Message:   "transcription response had neither a text nor a segments field",
 			Retryable: false,
 		}
 	}

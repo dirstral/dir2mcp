@@ -315,7 +315,10 @@ func (a *App) renderCoverageBlock(s styles, snapshot corpusSnapshot) {
 // "here's what to install or configure" half of the honest-coverage report
 // (#414). It is empty for reasons that are working as intended (an archive
 // container, an ignored binary, an ignore-rule match): printing an action for
-// those would train operators to ignore the block.
+// those would train operators to ignore the block. no_speech is the exception
+// that proves the rule: it needs no action either, but an operator who sees
+// audio "not indexed" will otherwise go looking for a provider fault, so its
+// line says that the decode worked and found nothing said.
 //
 // An unrecognized reason (a newer server, per the additive skip_reasons enum)
 // also returns empty rather than guessing.
@@ -333,6 +336,8 @@ func skipReasonHint(reason string) string {
 		return "source language is outside the STT model's declared stt_languages coverage — route it via media.stt.language_providers to a model that covers it, or set media.stt.on_uncovered_language=warn to transcribe anyway"
 	case model.SkipReasonTranscriptPartial:
 		return "the windowed decode covered less of the recording than media.stt.min_coverage requires: check the STT endpoint for the window failures, then re-index, or set media.stt.on_partial_transcript=warn to index the partial transcript anyway"
+	case model.SkipReasonNoSpeech:
+		return "the speech-to-text decode succeeded and found no speech (music, ambient sound or silence): nothing to transcribe, and they are not retried while unchanged"
 	default:
 		return ""
 	}
