@@ -12,7 +12,7 @@ import (
 )
 
 const jwtPattern = `(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`
-const bearerPattern = `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
+const bearerPattern = `(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
 
 func readCorpus(t *testing.T, filePath string) []string {
 	t.Helper()
@@ -201,7 +201,7 @@ func TestSpecYAMLSecretPatterns_Compile_JWTAndBearer(t *testing.T) {
 		if strings.Contains(pattern, "authorization") && strings.Contains(pattern, "refresh") {
 			jwtFromSpec = pattern
 		}
-		if strings.Contains(pattern, "token\\s*[:=]") {
+		if strings.Contains(pattern, "token\\s*[:=]") && !strings.Contains(pattern, "authorization") {
 			bearerFromSpec = pattern
 		}
 	}

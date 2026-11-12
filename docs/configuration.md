@@ -405,6 +405,36 @@ unknown extension that an older version stored as binary keeps that result
 until its ETag changes. Only its bytes can show that it is text, and the S3
 fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
 
+### Secret patterns (`security.secret_patterns`)
+
+A document whose content matches one of these regular expressions is withheld
+as `secret_excluded`. A list in your config replaces the defaults, so copy the
+defaults into it when you only want to add a rule:
+
+```yaml
+security:
+  secret_patterns:
+    - 'AKIA[0-9A-Z]{16}'
+    - '(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}'
+    - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    - '(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
+    - '(?:^|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})'
+    - '(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}'
+    - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
+    - 'MYCORP-[A-Z0-9]{24}'   # your own rule
+```
+
+These are the spec 0.93.0 defaults. The generic token rule and the `sk-`,
+`sk_` and `api_` rules have a leading boundary, so a redirect link
+(`redir_token=...`), a pagination cursor, a CSRF field or a URL slug such as
+`krasnoyarsk-...` no longer withholds a document. See
+[Security defaults](security.md#secret-patterns-documents-withheld-for-their-content)
+for what each rule matches.
+
+After a change to the effective list, the next scan evaluates the withheld
+documents again; no reindex is necessary. The scan logs
+`secret policy: security.secret_patterns changed since the last scan; N withheld document(s) or archive(s) will be evaluated again`.
+
 ### Document extraction: modes & fallback
 
 PDFs and images are converted to text by an **extractor**, selected with `ingest.extractor` (env `DIR2MCP_INGEST_EXTRACTOR`):

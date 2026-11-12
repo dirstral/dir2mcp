@@ -76,13 +76,20 @@ var defaultPathExcludes = []string{
 	"**/id_rsa",
 }
 
+// defaultSecretPatternLiterals is the retrieval baseline: the SPEC §7.2
+// default patterns that open_file always applies, even when the caller sets its
+// own list. Each entry MUST be a verbatim copy of the matching entry in
+// config.Default().SecretPatterns; a unit test pins that. A drift here lets
+// open_file refuse a document that ingest indexed (or the reverse), which is
+// how the boundary-less generic-token and sk_/api_ rules withheld redirect
+// links and URL slugs on both surfaces (spec 0.93.0).
 var defaultSecretPatternLiterals = []string{
 	`AKIA[0-9A-Z]{16}`,
 	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 
 	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
-	`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
+	`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
+	`(?:^|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`,
 }
 
 const (

@@ -2128,6 +2128,10 @@ func (s *Service) runScan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A changed pattern set (a binary upgrade with new defaults, or an operator
+	// edit) must reach documents withheld under the old set, which the
+	// incremental gates would otherwise never re-read (spec 0.93.0).
+	s.reevaluateSecretExclusions(ctx, compiledSecrets)
 
 	existing, err := s.listActiveDocuments(ctx)
 	if err != nil {

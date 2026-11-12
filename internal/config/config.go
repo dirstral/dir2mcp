@@ -2002,13 +2002,27 @@ func Default() Config {
 			`AKIA[0-9A-Z]{16}`,
 			`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 			`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
-			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
+			// Generic token assignment (SPEC §7.2, 0.93.0). The key name must be
+			// a whole word: `token` alone, or `token` after one credential word
+			// such as access, auth, api, bearer, secret, session, refresh,
+			// client, oauth, github or slack (with an optional `_`/`-`, and any
+			// prefix words before it, e.g. MY_APP_SECRET_TOKEN or X-Auth-Token).
+			// The leading boundary stops a match inside a longer key name, so a
+			// URL query value such as YouTube's `redir_token=`, a pagination
+			// `next_page_token=` and a form `csrf_token=` no longer withhold the
+			// document that quotes them.
+			`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|bearer|secret|private|session|refresh|personal|client|oauth|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
+			// Stripe-style `sk_` and generic `api_` keys. The leading boundary
+			// requires the prefix to start a word, so an identifier that holds
+			// `sk_` or `api_` in the middle (`task_...`, `rapi_...`) is not a key.
+			`(?:^|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`,
 			// OpenAI/Mistral-style hyphenated secret keys, e.g. "sk-proj-..."
 			// and "sk-...". Case-sensitive lowercase "sk-" prefix; the {20,}
 			// run of key chars keeps this from matching ordinary hyphenated
-			// prose (issue #443).
-			`sk-[A-Za-z0-9-]{20,}`,
+			// prose (issue #443). The leading boundary requires `sk-` to start
+			// a word, so a transliterated URL slug such as `...krasnoyarsk-...`
+			// or `...pusk-soyuz-...` is not a key (SPEC §7.2, 0.93.0).
+			`(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}`,
 			// Generic provider-key assignment, e.g. "MISTRAL_API_KEY=<32 alnum>",
 			// "COHERE_API_KEY: ...", "GEMINI_API_KEY=...". Requires an
 			// uppercase provider prefix plus a 16+ char non-whitespace value so

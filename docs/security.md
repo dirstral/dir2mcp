@@ -23,6 +23,45 @@
   another host, so a 3xx from a provider endpoint is reported as a failure and
   the key stays on the configured host
 
+### Secret patterns: documents withheld for their content
+
+`security.secret_patterns` is a list of regular expressions. Ingest tests
+each document against it: the raw bytes, and every text that dir2mcp derives
+(extraction, OCR, transcript, translation). A match withholds the whole
+document. Its status is `secret_excluded`, and `search`, `ask` and
+`open_file` do not return it. A list in your config replaces the defaults.
+
+The defaults (SPEC §7.2, spec 0.93.0):
+
+| Rule | Pattern |
+| --- | --- |
+| AWS access key ID | `AKIA[0-9A-Z]{16}` |
+| AWS secret assignment | `(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?\|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}` |
+| JWT with an auth context | `(?i)(?:authorization\s*[:=]\s*bearer\s+\|(?:access\|id\|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` |
+| Generic token assignment | `(?i)(?:^\|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access\|auth\|api\|bearer\|secret\|private\|session\|refresh\|personal\|client\|oauth\|github\|gh\|gitlab\|slack\|npm\|pypi\|hf\|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}` |
+| `sk_` and `api_` keys | `(?:^\|[^A-Za-z0-9])(?:sk_[a-z0-9]{32}\|api_[A-Za-z0-9]{32})` |
+| `sk-` keys (OpenAI, Mistral) | `(?:^\|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}` |
+| Provider key assignment | `[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}` |
+
+The generic token rule matches `token`, or `token` after a credential word
+(for example `GITHUB_TOKEN=`, `X-Auth-Token:`, `access_token=`,
+`MY_APP_SECRET_TOKEN=`). It does not match a key name that only ends in
+`token`, such as `redir_token=` in a YouTube redirect link, `next_page_token=`
+or `csrf_token=`. The three key rules require the key to start a word, so the
+`sk-` inside a URL slug such as `krasnoyarsk-...` and the `sk_` inside an
+identifier such as `task_...` do not match. Before spec 0.93.0 these rules had
+no boundary, and documents that quoted such links were withheld.
+
+When the effective list changes (a new version with new defaults, or an edit
+to your config), the next scan evaluates every withheld document again. You do
+not need to run `dir2mcp reindex`. The store records a fingerprint of the list
+(`secret_policy_identity` in the settings table). When the fingerprint
+changes, the scan clears the content hash of each `secret_excluded` document,
+and of each archive that holds one, so the normal pipeline reads them again. A
+document that no longer matches is indexed; a document that still matches
+stays withheld. Documents that are not withheld are not read again for this
+reason.
+
 ### What a support bundle discloses
 
 `dir2mcp support-bundle` is meant to be pasted into a public issue, so it is

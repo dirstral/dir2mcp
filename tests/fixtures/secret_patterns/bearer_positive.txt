@@ -2,3 +2,6 @@ token=abcdefghijklmnopqrstuvwxyz012345
 token : ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
 TOKEN=abc.def_ghi-jklmnopqrstuvwxyz123456
 session_token=abcdefghijklmnopqrstuvwxyz0123456789
+GITHUB_TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv
+X-Auth-Token: Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
+access_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
