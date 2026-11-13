@@ -2,7 +2,9 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -185,4 +187,73 @@ func (s *Service) existingDocWithSecretVerdict(ctx context.Context, doc *model.D
 		return model.Document{}, err
 	}
 	return existing, nil
+}
+
+// secretReevalPendingLister is the optional store capability that names the
+// documents that wait for a secret-policy re-evaluation.
+type secretReevalPendingLister interface {
+	SecretReevalPendingPaths(ctx context.Context, relPaths []string) (map[string]struct{}, error)
+}
+
+// retireUncheckedTranslations retires the translated transcripts of a document
+// that waits for a secret-policy re-evaluation, in the transcription pass of
+// the two-phase split (SPEC §7.2, §8.6.11).
+//
+// That pass re-reads the document and checks its source transcript under the
+// new policy, then stamps the content hash, and the stamp clears the pending
+// mark. It does not produce translations: the derivation pass does. And the
+// derivation pass keeps a translation that is already present under the
+// current derivation identity, so it would never check an old translation
+// against the new policy. Without this step, a translation that a new pattern
+// matches would stay searchable after the mark is gone, for good.
+//
+// The retirement runs before the stamp. The derivation pass then finds no
+// translation, derives each one again (from the translation cache, so no
+// provider call repeats), and checks it under the new policy. A failure is
+// returned, so the caller does not stamp: the row keeps its empty hash and its
+// mark, and the next scan tries again.
+func (s *Service) retireUncheckedTranslations(ctx context.Context, relPath string) error {
+	if s.activePass != passTranscription {
+		return nil
+	}
+	pendingStore, ok := s.store.(secretReevalPendingLister)
+	if !ok {
+		return nil
+	}
+	pending, err := pendingStore.SecretReevalPendingPaths(ctx, []string{relPath})
+	if err != nil {
+		return fmt.Errorf("secret policy: read the pending mark of %s: %w", relPath, err)
+	}
+	if _, wait := pending[relPath]; !wait {
+		return nil
+	}
+	lister, ok := s.store.(activeRepresentationLister)
+	if !ok {
+		return nil
+	}
+	retirer, ok := s.store.(representationRetirer)
+	if !ok {
+		return nil
+	}
+	reps, err := lister.ActiveRepresentations(ctx, relPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("secret policy: list the representations of %s: %w", relPath, err)
+	}
+	var unchecked []int64
+	for _, rep := range reps {
+		if _, ok := translatedTranscriptLanguage(rep); ok {
+			unchecked = append(unchecked, rep.RepID)
+		}
+	}
+	if len(unchecked) == 0 {
+		return nil
+	}
+	if _, err := retirer.SoftDeleteRepresentations(ctx, relPath, unchecked); err != nil {
+		return fmt.Errorf("secret policy: retire the unchecked translations of %s: %w", relPath, err)
+	}
+	s.getLogger().Printf("secret policy: retired %d translation(s) of %s; the derivation pass derives and checks them again", len(unchecked), relPath)
+	return nil
 }
