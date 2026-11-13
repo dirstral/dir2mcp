@@ -3720,6 +3720,17 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if pool <= 0 {
 		pool = defaultRerankCandidatePool
 	}
+	// A hosted reranker receives the candidate text, so the serve-time secret
+	// rules run before it (SPEC §7.2, spec 0.93.0). See rerankSafeCandidates.
+	safe, err := s.rerankSafeCandidates(ctx, hits)
+	if err != nil {
+		s.logf("rerank: skipped, the secret-policy pending lookup failed: %v", err)
+		return s.diversifyAndTruncate(hits, k)
+	}
+	hits = safe
+	if len(hits) <= 1 {
+		return s.diversifyAndTruncate(hits, k)
+	}
 	// fused keeps the full pre-rerank order for fail-open fallback;
 	// cand is the (capped) slice actually sent to the provider. Never
 	// shrink the fallback to the pool: a misconfigured pool < k must
@@ -3730,9 +3741,13 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if len(cand) > pool {
 		cand = cand[:pool]
 	}
-	docs := s.rerankDocs(ctx, cand)
+	poolLen := len(cand)
+	cand, docs := s.rerankDocsNotSecret(ctx, cand)
+	if len(cand) == 0 {
+		return s.diversifyAndTruncate(fused, k)
+	}
 	var results []model.Reranked
-	err := usage.TimeStage(ctx, usage.StageRerank, func() error {
+	err = usage.TimeStage(ctx, usage.StageRerank, func() error {
 		var rerr error
 		results, rerr = rr.Rerank(ctx, rmodel, query, docs, k)
 		return rerr
@@ -3763,8 +3778,8 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 			out = append(out, h)
 		}
 	}
-	if len(fused) > len(cand) {
-		out = append(out, fused[len(cand):]...)
+	if len(fused) > poolLen {
+		out = append(out, fused[poolLen:]...)
 	}
 	return s.diversifyAndTruncate(out, k)
 }
@@ -3818,6 +3833,41 @@ func (s *Service) rerankedHits(cand []model.SearchHit, results []model.Reranked)
 // zero, the lookup errors, or the chunk carries no text (media chunks). The
 // per-candidate lookups only run when rerank is enabled, so the common
 // no-reranker path is untouched.
+// rerankSafeCandidates leaves out every candidate of a document that waits
+// for a secret-policy re-evaluation, before any candidate text goes to the
+// reranker. It works on a copy, so the caller's slice is not changed. A failed
+// lookup is returned: then no candidate can be proven safe to send, and the
+// caller must not call the provider. The final screen (screenServedHits) runs
+// the same lookup again and reports the error to the caller of the tool.
+func (s *Service) rerankSafeCandidates(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
+	return s.dropSecretReevalPending(ctx, append([]model.SearchHit(nil), hits...))
+}
+
+// rerankDocsNotSecret returns the candidates and their reranker texts, without
+// every candidate whose text matches the secret set. That text must not reach
+// a hosted reranker; screenSecretHits leaves the same hit out of the result.
+// The returned candidates keep their order. A candidate left out here is left
+// out of the result as well, as the final screen would do.
+func (s *Service) rerankDocsNotSecret(ctx context.Context, cand []model.SearchHit) ([]model.SearchHit, []string) {
+	docs := s.rerankDocs(ctx, cand)
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	if !matcher.Enabled() {
+		return cand, docs
+	}
+	keptHits := make([]model.SearchHit, 0, len(cand))
+	keptDocs := make([]string, 0, len(docs))
+	for i, doc := range docs {
+		if matcher.MatchString(doc) || matcher.MatchString(cand[i].Snippet) {
+			continue
+		}
+		keptHits = append(keptHits, cand[i])
+		keptDocs = append(keptDocs, doc)
+	}
+	return keptHits, keptDocs
+}
+
 func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []string {
 	docs := make([]string, len(cand))
 	fetcher, _ := s.store.(chunkByIDer)

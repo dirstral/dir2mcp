@@ -36,6 +36,12 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
+	// A seed document that waits for re-evaluation against a broader secret
+	// policy is withheld whole (SPEC §7.2, spec 0.93.0). Its text must not
+	// reach the embedder, so the check runs before relatedNeighbors embeds it.
+	if err := s.rejectPendingSeed(ctx, seed); err != nil {
+		return model.RelatedResult{}, err
+	}
 	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, k)
 	if err != nil {
 		return model.RelatedResult{}, err
@@ -92,6 +98,20 @@ type relatedSeed struct {
 	axis        string // text|code|both
 	excludeIDs  map[uint64]struct{}
 	textsByAxis map[string][]string
+}
+
+// rejectPendingSeed returns model.ErrForbidden when the seed document waits
+// for a secret-policy re-evaluation, for a chunk_id seed and a rel_path seed
+// alike. A failed lookup is returned: the seed cannot be proven safe to embed.
+func (s *Service) rejectPendingSeed(ctx context.Context, seed *relatedSeed) error {
+	pending, err := s.secretReevalPending(ctx, seed.relPath)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return model.ErrForbidden
+	}
+	return nil
 }
 
 // resolveRelatedSource dispatches to the chunk_id or rel_path seed resolver.

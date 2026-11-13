@@ -109,8 +109,12 @@ need to run `dir2mcp reindex`.
 - **Until the scan has read a marked document again, no tool returns any part
   of it.** `search` and `related` leave out its hits, `ask` leaves out its
   passages before it builds the prompt, and `open_file` returns `FORBIDDEN`.
-  A check of each excerpt is not enough here, because a credential can cross
-  a chunk boundary and then no single excerpt matches.
+  `related` returns `FORBIDDEN` when the seed chunk or seed document is such
+  a document, and it does not send the seed text to the embedder. A hosted
+  reranker does not receive the text of such a document. When dir2mcp cannot
+  read the pending marks, it sends no candidate text to the reranker and the
+  request fails. A check of each excerpt is not enough here, because a
+  credential can cross a chunk boundary and then no single excerpt matches.
 - **A change that can only match less skips that read and hides nothing.**
   Only three changes count: a removed secret pattern, an added allow pattern,
   and the shipped narrowings of the `sk-`, `sk_` and `api_` rules. Any other
@@ -127,9 +131,13 @@ Each tool that returns indexed text also tests that text against the lists in
 effect when it answers:
 
 - `search` and `related` leave out a hit whose snippet or chunk text matches.
-  `related` also does not send matching seed text to the embedder.
+  `related` also does not send matching seed text to the embedder, and a
+  hosted reranker does not receive matching candidate text.
 - `ask` does not place a matching chunk in the prompt, and does not cite it.
-- `open_file` returns `FORBIDDEN` for matching text.
+- `open_file` returns `FORBIDDEN` for matching text. It reads a source in
+  pieces, but it reaches the same decision as a check of the whole text: a
+  read boundary never releases text. When one decision needs more than
+  256 KiB of text past a boundary, `open_file` returns `FORBIDDEN`.
 - `annotate` and `transcribe` return `FORBIDDEN` for matching text.
 
 These tools also apply every shipped default secret pattern when your list

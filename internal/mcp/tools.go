@@ -1431,6 +1431,9 @@ func mapRelatedError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "INVALID_FIELD", Message: "chunk_id or rel_path does not resolve to an indexed segment", Retryable: false}
 	case errors.Is(err, model.ErrRelatedNotSupported):
 		return &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "related retrieval not available", Retryable: false}
+	case errors.Is(err, model.ErrForbidden):
+		// The seed document waits for a secret-policy re-evaluation (SPEC §7.2).
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrIndexNotReady) || errors.Is(err, model.ErrIndexNotConfigured):
 		return &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 	default:
