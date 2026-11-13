@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/dirstral/dir2mcp/internal/avutil"
 )
 
 var classifyBaseNames = map[string]string{
@@ -23,6 +25,17 @@ var classifyBaseNames = map[string]string{
 }
 
 func classifyByExtension(ext string) string {
+	// Audio and video containers come from the one table avutil keeps, so the
+	// classifier, rendition grouping and the media tools cannot disagree about
+	// which extension is media. The extensions a video container shares with
+	// another format (.ts, .mts, .mod) are not in it: the switch below gives
+	// them their other type, and SniffMediaDocType decides by content.
+	if avutil.IsAudioContainerExt(ext) {
+		return "audio"
+	}
+	if avutil.IsVideoContainerExt(ext) {
+		return "video"
+	}
 	switch ext {
 	case ".go", ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".kts", ".scala", ".sh", ".bash", ".zsh", ".sql",
 		// Common languages a repository holds that the first list missed; each
@@ -51,10 +64,6 @@ func classifyByExtension(ext string) string {
 		return "document"
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg":
 		return "image"
-	case ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus":
-		return "audio"
-	case ".mp4", ".mov":
-		return "video"
 	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar":
 		return "archive"
 	default:
@@ -88,7 +97,8 @@ func ClassifyDocType(relPath string) string {
 const sniffSampleBytes = 8 << 10
 
 // SniffTextDocType refines a path-based classification with the content, as
-// SPEC §7.3 requires ("extension + MIME sniff + binary heuristics"). A file
+// SPEC §7.3 requires ("extension + MIME sniff + binary heuristics"). It first
+// applies SniffMediaDocType, so a .ts transport stream is video. A file
 // whose extension is unknown (binary_ignored by path) is "text" when its first
 // 8 KiB is valid UTF-8 with no NUL byte: a dotfile such as .gitignore, a
 // language the extension table does not list, a README without an extension.
@@ -98,6 +108,7 @@ const sniffSampleBytes = 8 << 10
 // and would otherwise be indexed twice. Every other classification is returned
 // unchanged.
 func SniffTextDocType(docType, relPath string, content []byte) string {
+	docType = SniffMediaDocType(docType, relPath, content)
 	if docType != "binary_ignored" || len(content) == 0 {
 		return docType
 	}
@@ -135,4 +146,123 @@ func trimIncompleteRune(sample []byte) []byte {
 		}
 	}
 	return sample
+}
+
+// mediaSniffPrefixBytes is how much of a file SniffMediaDocType needs: the
+// sync bytes of five packets fit in it for every transport-stream layout (the
+// largest is five 204-byte packets). The ingest service reads this prefix
+// before it decides how to read the rest of the file.
+const mediaSniffPrefixBytes = 1024
+
+const (
+	mpegTSPacketBytes = 188
+	mpegTSSyncByte    = 0x47
+	// bdavHeaderBytes is the timestamp header that the BDAV (M2TS) variant puts
+	// before each 188-byte packet: the sync byte is at offset 4 and repeats
+	// every 192 bytes.
+	bdavHeaderBytes = 4
+	// fecTrailerBytes is the error-correction trailer that the 204-byte variant
+	// puts after each 188-byte packet: the sync byte repeats every 204 bytes.
+	fecTrailerBytes = 16
+	// mpegTSWantPackets is how many consecutive packets the sniff checks when
+	// the prefix holds them (SPEC §7.3 suggests five), and mpegTSMinPackets is
+	// the fewest it accepts from a shorter file.
+	mpegTSWantPackets = 5
+	mpegTSMinPackets  = 3
+)
+
+// mpegTSLayouts are the three packet layouts of a transport stream (SPEC
+// §7.3): the offset of the first sync byte and the distance between two sync
+// bytes.
+var mpegTSLayouts = []struct{ offset, stride int }{
+	{0, mpegTSPacketBytes},
+	{bdavHeaderBytes, bdavHeaderBytes + mpegTSPacketBytes},
+	{0, mpegTSPacketBytes + fecTrailerBytes},
+}
+
+// needsMediaSniff reports whether the type of relPath depends on its content:
+// the extension is one that a video container shares with another format, and
+// the path alone gave the other format. A basename rule (go.mod is data) wins
+// over the extension, so such a file is never sniffed.
+func needsMediaSniff(relPath, pathType string) bool {
+	if !avutil.IsContentSniffedVideoExt(filepath.Ext(relPath)) {
+		return false
+	}
+	return pathType == "code" || pathType == "binary_ignored"
+}
+
+// SniffMediaDocType resolves an extension that a video container shares with
+// another format by the first bytes of the file (SPEC §7.3):
+//
+//   - .ts and .mts are TypeScript by extension. They are video when the
+//     content is an MPEG transport stream: the sync byte 0x47 at the start of
+//     each of the first five packets (three in a shorter file), with packets of
+//     188 bytes, 192 bytes from offset 4 (BDAV/M2TS), or 204 bytes (with an
+//     error-correction trailer).
+//   - .mod is video when the content starts with an MPEG program stream pack
+//     header (00 00 01 BA), as camcorder .mod files do.
+//
+// The sync byte is the ASCII letter "G", so a transport stream must also hold
+// a byte that text never holds (a NUL, or invalid UTF-8) in the sampled window.
+// Real transport streams always do; a TypeScript file never does. Every other
+// classification is returned unchanged.
+func SniffMediaDocType(docType, relPath string, prefix []byte) string {
+	if !needsMediaSniff(relPath, docType) {
+		return docType
+	}
+	switch strings.ToLower(filepath.Ext(relPath)) {
+	case ".ts", ".mts":
+		if docType == "code" && isMPEGTransportStream(prefix) {
+			return "video"
+		}
+	case ".mod":
+		if docType == "binary_ignored" && isMPEGProgramStream(prefix) {
+			return "video"
+		}
+	}
+	return docType
+}
+
+// isMPEGTransportStream reports whether prefix starts consecutive MPEG-TS
+// packets in one of the layouts: five when the prefix holds five, and at
+// least three from a shorter file.
+func isMPEGTransportStream(prefix []byte) bool {
+	for _, l := range mpegTSLayouts {
+		n := 0
+		if len(prefix) > l.offset {
+			n = (len(prefix)-l.offset-1)/l.stride + 1
+		}
+		if n > mpegTSWantPackets {
+			n = mpegTSWantPackets
+		}
+		if n < mpegTSMinPackets {
+			continue
+		}
+		end := l.offset + (n-1)*l.stride + 1
+		synced := true
+		for i := 0; i < n; i++ {
+			if prefix[l.offset+i*l.stride] != mpegTSSyncByte {
+				synced = false
+				break
+			}
+		}
+		if synced && !looksLikeText(prefix[:end]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isMPEGProgramStream reports whether prefix starts with an MPEG program
+// stream pack header.
+func isMPEGProgramStream(prefix []byte) bool {
+	return bytes.HasPrefix(prefix, []byte{0x00, 0x00, 0x01, 0xBA})
+}
+
+// looksLikeText reports whether sample is valid UTF-8 with no NUL byte, the
+// same test SniffTextDocType applies. A multi-byte rune that the window edge
+// cut in two does not count against it.
+func looksLikeText(sample []byte) bool {
+	sample = trimIncompleteRune(sample)
+	return bytes.IndexByte(sample, 0) < 0 && utf8.Valid(sample)
 }

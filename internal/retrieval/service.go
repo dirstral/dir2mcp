@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -2650,22 +2651,18 @@ func isImageExt(ext string) bool {
 	}
 }
 
+// isAudioExt and isVideoExt read the avutil container tables that ingest
+// classification uses, so open_file treats exactly the classified media
+// extensions as media. isVideoExt also covers the extensions a video container
+// shares with another format (.ts, .mts, .mod): it only gates the media-only
+// store lookup, and a TypeScript file has text chunks, so the lookup answers
+// false for it.
 func isAudioExt(ext string) bool {
-	switch ext {
-	case ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus":
-		return true
-	default:
-		return false
-	}
+	return avutil.IsAudioContainerExt(ext)
 }
 
 func isVideoExt(ext string) bool {
-	switch ext {
-	case ".mp4", ".mov":
-		return true
-	default:
-		return false
-	}
+	return avutil.IsVideoContainerExt(ext) || avutil.IsContentSniffedVideoExt(ext)
 }
 
 // isMediaDocExt reports whether relPath's extension is an embeddable media type

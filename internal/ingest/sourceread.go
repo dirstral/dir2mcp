@@ -104,3 +104,29 @@ func (s *Service) readSourceBytes(ctx context.Context, relPath string) (content 
 func (s *Service) sourceOverCapError(relPath string) error {
 	return fmt.Errorf("%w: %s passed the ingest.max_file_mb cap (%d bytes) while being read", ErrFileTooLarge, relPath, s.sourceReadCapBytes())
 }
+
+// readSourcePrefix reads at most n bytes from the start of a corpus file. It is
+// the content sniff for an extension that a video container shares with
+// another format (SniffMediaDocType): the type decides how the rest of the
+// file is read, so only the prefix is read first. A file shorter than n gives
+// all of its bytes. An object the backend refuses as over the cap gives no
+// bytes and no error: the read that follows records the size_cap skip.
+func (s *Service) readSourcePrefix(ctx context.Context, relPath string, n int) ([]byte, error) {
+	rc, err := s.corpusFS().Open(ctx, relPath)
+	if err != nil {
+		if errors.Is(err, corpusfs.ErrObjectTooLarge) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+
+	buf, err := io.ReadAll(io.LimitReader(rc, int64(n)))
+	if err != nil {
+		if errors.Is(err, corpusfs.ErrObjectTooLarge) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return buf, nil
+}

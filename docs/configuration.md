@@ -393,6 +393,24 @@ languages (for example `.go`, `.py`, `.ts`, `.mjs`, `.vue`, `.lua`, `.tf`,
 `.proto`, plus `Makefile` and `Dockerfile`) index as code; prose and data
 formats index as text; PDFs, images, audio and video go to the extractors below.
 
+Audio is `.mp3`, `.wav`, `.m4a`, `.flac`, `.aac`, `.ogg` and `.opus`. Video is
+`.mp4`, `.mov`, `.m4v`, `.mkv`, `.webm`, `.avi`, `.flv`, `.wmv`, `.mpg`, `.mpeg`,
+`.mxf`, `.vob`, `.3gp` and `.m2ts` (any letter case). ffmpeg reads each of these
+containers, so each one gets a transcript of its audio track, a duration and
+time-span citations. Three extensions are shared with another format, so the
+content decides:
+
+- `.ts` and `.mts` are video when the file is an MPEG transport stream: the
+  sync byte `0x47` starts each of the first five packets (three in a shorter
+  file), with packets of 188 bytes, 192 bytes from offset 4 (the BDAV/M2TS
+  variant) or 204 bytes (the variant with an error-correction trailer). Any
+  other `.ts` or `.mts` file is TypeScript code.
+- `.mod` is video when the file starts with an MPEG program stream pack header
+  (`00 00 01 BA`), as camcorder files do. Any other `.mod` file is sniffed like an
+  unknown extension. `go.mod` is always data.
+
+dir2mcp reads only the first 1 KiB of such a file to decide.
+
 Any other file (an unknown extension, or a dotfile such as `.gitignore` or
 `.editorconfig`) is sniffed: when its first 8 KiB is valid UTF-8 with no
 NUL byte, it indexes as text. It stays skipped as binary when it looks binary,
@@ -400,10 +418,18 @@ when it is empty, when it holds a private key, and when it is a subtitle file
 (a subtitle is read as the sidecar of its media).
 
 After an upgrade that changes a classification, the next scan re-reads the
-affected files. One case waits: on an S3 corpus, an unchanged object with an
-unknown extension that an older version stored as binary keeps that result
-until its ETag changes. Only its bytes can show that it is text, and the S3
-fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
+affected files. For example, a video in one of the containers above that an
+older version stored as a binary skip, or a `.ts` transport stream that it
+stored as code with an error, is indexed as video on the next incremental scan.
+No reindex is necessary. This also holds for a camcorder `.mod` on an S3
+corpus: a `.mod` object stored as binary is never skipped by the ETag fast
+path, because only its first bytes can show a program stream. The cost is that
+a `.mod` that is not video (a tracker music module, for example) is read again
+on every scan, from the S3 object or the local file. Such files are rare and
+small. One case waits: on an S3 corpus, an unchanged object with an unknown
+extension that an older version stored as binary keeps that result until its
+ETag changes. Only its bytes can show that it is text, and the S3 fast path
+exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
 
 ### Document extraction: modes & fallback
 
@@ -1139,7 +1165,7 @@ model:
 ```
 
 - **Images**, **PDFs**, **audio**, and **video** are supported today. Under `augment` the document is indexed *both* as text (image OCR / docling PDF text / audio transcript, if configured) *and* as direct media embeddings; under `replace` it is embedded directly *instead of* text. A PDF is embedded **per page** (each page is its own vector with a page citation); audio and video are embedded **per time window** (each window is its own vector with a `start_ms`/`end_ms` citation). A text query then retrieves images, PDF pages, and media windows from the shared space.
-- **Audio/video duration probing and window extraction** use the external `ffprobe`/`ffmpeg` binaries. When they are absent, audio/video are skipped for direct embedding and the file keeps its text path (audio transcript) — a graceful fallback, not an error. Direct audio embedding covers MP3/WAV; video covers MP4/MOV (the formats the preview model accepts). Other audio formats keep only their transcript; video has no text path.
+- **Audio/video duration probing and window extraction** use the external `ffprobe`/`ffmpeg` binaries. When they are absent, audio/video are skipped for direct embedding and the file keeps its text path (audio transcript) — a graceful fallback, not an error. Direct audio embedding covers MP3/WAV; video covers MP4/MOV (the formats the preview model accepts). Other audio formats, and video in any other container (`.mkv`, `.ts`, `.mpg`, ...), keep only their transcript.
 - `augment`/`replace` require `provider: gemini` with `text_model` and `code_model` both `gemini-embedding-2` (validated at startup; otherwise `CONFIG_INVALID`), and the mode is reindex-bound (§8.1.4). `off` (default) is fully behavior-preserving. The mode is **YAML-only** (`model.embed.multimodal`); there is no environment-variable override, since it is a deploy-time, reindex-bound choice.
 - **Retrieval & citations.** Media hits surface in `search`/`ask` results with their `modality` and `media_ref`. To avoid double-counting, a coarse page-image candidate is dropped when a text/region candidate survives for the same `(rel_path, page)`. `ask` grounds on available text (an `augment` hit's OCR/transcript); a `replace`-mode media-only hit is cited without quoted context. `open_file` on a media-only chunk returns the non-retryable `MEDIA_NO_TEXT` (never raw bytes), distinct from the retryable `OCR_NOT_READY` when text is merely pending.
 
