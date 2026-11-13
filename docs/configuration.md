@@ -421,10 +421,15 @@ After an upgrade that changes a classification, the next scan re-reads the
 affected files. For example, a video in one of the containers above that an
 older version stored as a binary skip, or a `.ts` transport stream that it
 stored as code with an error, is indexed as video on the next incremental scan.
-No reindex is necessary. One case waits: on an S3 corpus, an unchanged object with an
-unknown extension that an older version stored as binary keeps that result
-until its ETag changes. Only its bytes can show that it is text, and the S3
-fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
+No reindex is necessary. This also holds for a camcorder `.mod` on an S3
+corpus: a `.mod` object stored as binary is never skipped by the ETag fast
+path, because only its first bytes can show a program stream. The cost is that
+a `.mod` that is not video (a tracker music module, for example) is read again
+on every scan, from the S3 object or the local file. Such files are rare and
+small. One case waits: on an S3 corpus, an unchanged object with an unknown
+extension that an older version stored as binary keeps that result until its
+ETag changes. Only its bytes can show that it is text, and the S3 fast path
+exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
 
 ### Document extraction: modes & fallback
 
