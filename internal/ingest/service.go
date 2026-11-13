@@ -2719,6 +2719,14 @@ func (s *Service) settleProcessedDocument(
 	finalContentHash string,
 	nonFatalErrored, indexedPending bool,
 ) error {
+	// Under the two-phase split, the stamp below clears the secret-policy
+	// pending mark before the derivation pass has checked the translations
+	// (SPEC §7.2). Retire them first, before any step reads the document's
+	// representations (the summary below reads them and sends them to a
+	// provider), so no unchecked text is read or stays live.
+	if err := s.retireUncheckedTranslations(ctx, doc.RelPath); err != nil {
+		return err
+	}
 	// Derive the optional document-level `summary` representation over the
 	// committed chunks (SPEC §5.2/§9.7). It runs AFTER the fine chunks are written
 	// (it summarizes them) and is fail-open by construction: it never returns an
@@ -2739,12 +2747,6 @@ func (s *Service) settleProcessedDocument(
 	// per-document and non-fatal, and precedes the done marker so a crash between
 	// the two simply re-runs an idempotent step next time.
 	s.emitSubtitles(ctx, *doc)
-	// Under the two-phase split, the stamp below clears the secret-policy
-	// pending mark before the derivation pass has checked the translations
-	// (SPEC §7.2). Retire them first, so no unchecked text stays live.
-	if err := s.retireUncheckedTranslations(ctx, doc.RelPath); err != nil {
-		return err
-	}
 	// Stamp the withheld #402 done marker now that the
 	// chunks are durably written. finalizeContentHash re-reads the row, so a
 	// document a soft-error path persisted as status="error" is left unmarked and

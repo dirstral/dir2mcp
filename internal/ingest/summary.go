@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -233,6 +234,14 @@ func primarySummarySourceRep(eligible []store.SummarySourceRep) (store.SummarySo
 	return best, found
 }
 
+// errSummarySourceSecret and errSummaryOutputSecret report a summary that was
+// not made because its source, or its output, matched the secret policy. The
+// messages name no text.
+var (
+	errSummarySourceSecret = errors.New("summary source matches a configured secret pattern; nothing was sent to the summarizer")
+	errSummaryOutputSecret = errors.New("summary output matches a configured secret pattern; it was not persisted")
+)
+
 // generateSummaryForRep derives, caches, and persists one `summary`
 // representation over src (SPEC §5.2). multi selects the rep_type: a single
 // summarized representation uses the canonical `summary`, while an explicit
@@ -244,11 +253,21 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 	if err != nil {
 		return fmt.Errorf("read source text: %w", err)
 	}
-	sourceText := truncateSummarySource(strings.Join(texts, "\n\n"))
-	if strings.TrimSpace(sourceText) == "" {
+	fullText := strings.Join(texts, "\n\n")
+	if strings.TrimSpace(fullText) == "" {
 		// Nothing to summarize (e.g. a media-only representation): not an error.
 		return nil
 	}
+	// The source text goes to a provider, so it is checked against the active
+	// secret policy first (SPEC §7.2). The whole representation is checked, not
+	// only the part the prompt takes, because a credential can sit past the cut.
+	// A match sends nothing and persists nothing. The pipeline normally has
+	// withheld such a document before this step; this check keeps a stored
+	// representation that it did not regenerate from reaching the summarizer.
+	if s.derivedTextHasSecret(fullText) {
+		return errSummarySourceSecret
+	}
+	sourceText := truncateSummarySource(fullText)
 
 	summaryText, err := s.readOrComputeSummary(ctx, sourceText)
 	if err != nil {
@@ -257,6 +276,11 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 	summaryText = strings.TrimSpace(summaryText)
 	if summaryText == "" {
 		return fmt.Errorf("generator returned an empty summary")
+	}
+	// A summary is model output: check it like any derived text before it is
+	// persisted.
+	if s.derivedTextHasSecret(summaryText) {
+		return errSummaryOutputSecret
 	}
 
 	metaJSON, err := s.summaryMetaJSON(src)

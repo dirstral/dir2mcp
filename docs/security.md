@@ -105,7 +105,13 @@ need to run `dir2mcp reindex`.
   chunks are retired. OCR, transcription and translation come from their
   on-disk caches, so this does not repeat a provider call that already
   succeeded. But it reads every indexed file once, which takes time on a large
-  media corpus.
+  media corpus. With `media.batch.two_phase`, the transcription pass retires
+  the translations of a marked document before any other step reads them. The
+  derivation pass then makes them again from the cache and checks them.
+- **Document summaries use checked text only.** Before dir2mcp sends a
+  representation to the summary model, it checks the text against the active
+  lists. It does not send text that matches, and it does not keep a summary
+  that matches.
 - **Until the scan has read a marked document again, no tool returns any part
   of it.** `search` and `related` leave out its hits, `ask` leaves out its
   passages before it builds the prompt, and `open_file` returns `FORBIDDEN`.

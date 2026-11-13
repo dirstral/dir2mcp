@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -103,4 +104,78 @@ type codenameTranslator struct {
 func (c *codenameTranslator) Generate(ctx context.Context, prompt string) (string, error) {
 	out, err := c.fakeTranslator.Generate(ctx, prompt)
 	return strings.ReplaceAll(out, "bridge", "BLUEHERON-alpha-2026"), err
+}
+
+// recordingSummarizer keeps every prompt it was sent.
+type recordingSummarizer struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (r *recordingSummarizer) Generate(_ context.Context, prompt string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prompts = append(r.prompts, prompt)
+	return "a short summary of the report", nil
+}
+
+// TestSecretPolicy_SummaryNeverReadsUncheckedTranslations covers the summary
+// step of the two-phase transcription pass (SPEC §7.2, §9.7). After a broader
+// policy change, the existing translation is not checked yet. The summary step
+// must not read it and must not send it to the summarizer: the translation is
+// retired first, and the summary source is checked against the active policy.
+// Without these steps, the third run below sends the translation to the
+// summarizer.
+func TestSecretPolicy_SummaryNeverReadsUncheckedTranslations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	mustWriteFile(t, filepath.Join(root, "media", "clip.mp3"), []byte("fake-audio"))
+	stateDir := testutil.TempDir(t)
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	const rel = "media/clip.mp3"
+
+	run := func(patterns []string) *recordingSummarizer {
+		t.Helper()
+		cfg := config.Default()
+		cfg.RootDir = root
+		cfg.StateDir = stateDir
+		cfg.STTProvider = "off"
+		cfg.MediaBatchTwoPhase = true
+		cfg.SecretPatterns = patterns
+		cfg.RetrievalHierarchicalEnabled = true
+		cfg.RetrievalHierarchicalLevels = []string{config.HierarchicalLevelDocument}
+		cfg.RetrievalHierarchicalSourceReps = []string{"transcript", "transcript-en"}
+		cfg.RetrievalHierarchicalMaxTokens = config.DefaultHierarchicalMaxTokens
+		cfg.RetrievalHierarchicalPromptVersion = config.DefaultHierarchicalPromptVersion
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] the report covers the regional budget and the new bridge"})
+		svc.SetSTTIdentity("whisper", "large-v3")
+		svc.SetTranscriptLanguage("de")
+		svc.SetTranslator(&codenameTranslator{}, "mistral", "model-a", []string{"en"})
+		sum := &recordingSummarizer{}
+		svc.SetSummarizer(sum, "mistral", "mistral-small-latest")
+		if err := svc.Run(ctx); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return sum
+	}
+
+	defaults := config.Default().SecretPatterns
+	run(defaults)
+
+	broader := append(append([]string(nil), defaults...), `BLUEHERON-[a-z]+-[0-9]{4}`)
+	third := run(broader)
+	third.mu.Lock()
+	defer third.mu.Unlock()
+	for _, p := range third.prompts {
+		if strings.Contains(p, "BLUEHERON") {
+			t.Fatalf("the summarizer received the unchecked translation after a broader policy change:\n%s", p)
+		}
+	}
+	requireStatus(t, st, rel, model.DocumentStatusSecretExcluded)
 }
