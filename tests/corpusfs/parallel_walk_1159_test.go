@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 )
 
-// SPEC §7.1 (0.92.0), issue #1159: ingest.discovery_workers lets the LocalFS
+// SPEC §7.1 (0.94.0), issue #1159: ingest.discovery_workers lets the LocalFS
 // walker read directories concurrently. Discovery's result must not depend on
 // the value: the same files in the same order, the same skip reports (order
 // aside), the same ignore and symlink rules and the same scan-cache contents.

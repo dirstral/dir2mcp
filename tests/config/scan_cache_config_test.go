@@ -81,7 +81,7 @@ func TestScanCache_EnvOverride(t *testing.T) {
 }
 
 // TestDiscoveryWorkers_DefaultLoadAndBounds pins ingest.discovery_workers
-// (SPEC §7.1, 0.92.0, #1159): default 1 (sequential), the nested key loads and
+// (SPEC §7.1, 0.94.0, #1159): default 1 (sequential), the nested key loads and
 // round-trips, 0 is the default, and anything outside 0-64 is CONFIG_INVALID.
 func TestDiscoveryWorkers_DefaultLoadAndBounds(t *testing.T) {
 	if got := config.Default().IngestDiscoveryWorkers; got != 1 {
