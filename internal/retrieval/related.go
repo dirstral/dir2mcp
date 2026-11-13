@@ -41,7 +41,10 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 		return model.RelatedResult{}, err
 	}
 	// The same secret screen search applies (spec 0.93.0).
-	hits = s.screenSecretHits(ctx, hits)
+	hits, err = s.screenServedHits(ctx, hits)
+	if err != nil {
+		return model.RelatedResult{}, err
+	}
 	indexingComplete, _ := s.IndexingComplete(ctx)
 	return model.RelatedResult{
 		SourceChunkID:    seed.chunkID,
@@ -192,7 +195,9 @@ func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, se
 	perAxis := make([][]model.SearchHit, 0, 2)
 	searched := make([]string, 0, 2)
 	for _, ax := range activeAxes(seed.axis) {
-		texts := seed.textsByAxis[ax]
+		// Seed text that matches the secret policy is not sent to the
+		// embedder (spec 0.93.0); an axis with no text left is skipped.
+		texts := s.seedTextsNotSecret(seed.textsByAxis[ax])
 		if len(texts) == 0 {
 			continue
 		}
@@ -245,6 +250,21 @@ func (s *Service) indexAndModelForAxis(axis string) (model.Index, string) {
 		return s.codeIndex, s.codeModel
 	}
 	return s.textIndex, s.textModel
+}
+
+// seedTextsNotSecret drops the seed texts that match the secret policy, so
+// text that the policy withholds is not sent to the embedder again.
+func (s *Service) seedTextsNotSecret(texts []string) []string {
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	kept := make([]string, 0, len(texts))
+	for _, text := range texts {
+		if !matcher.MatchString(text) {
+			kept = append(kept, text)
+		}
+	}
+	return kept
 }
 
 // buildSeedVector re-embeds the seed text(s) at the index-time embed role and

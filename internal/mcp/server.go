@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -33,6 +32,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	storepkg "github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/x402"
 )
@@ -200,12 +200,12 @@ type Server struct {
 
 	eventEmitter func(level, event string, data interface{})
 
-	// secretPatterns is the compiled secret_patterns slice used by
-	// refuseIfSecretContent. Compilation is deferred to first use and performed
-	// at most once via secretPatternOnce so annotate/transcribe requests reuse
-	// the same []*regexp.Regexp instead of recompiling every call.
+	// secretPatterns is the compiled secret matcher (secret_patterns plus
+	// secret_allow_patterns) used by refuseIfSecretContent when the retriever
+	// does not expose its own. Compilation is deferred to first use and
+	// performed at most once via secretPatternOnce.
 	secretPatternOnce sync.Once
-	secretPatterns    []*regexp.Regexp
+	secretPatterns    *secretmatch.Matcher
 	secretPatternErr  error
 
 	// extractSegment cuts [startMS, endMS) from a local media file and returns

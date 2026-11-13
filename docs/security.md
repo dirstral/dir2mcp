@@ -29,7 +29,8 @@
 each document against it: the raw bytes, and every text that dir2mcp derives
 (extraction, OCR, transcript, translation). A match withholds the whole
 document. Its status is `secret_excluded`, and `search`, `ask` and
-`open_file` do not return it. A list in your config replaces the defaults.
+`open_file` do not return it. For ingest, a list in your config replaces the
+defaults.
 
 The defaults (SPEC §7.2, spec 0.93.0):
 
@@ -38,70 +39,113 @@ The defaults (SPEC §7.2, spec 0.93.0):
 | AWS access key ID | `AKIA[0-9A-Z]{16}` |
 | AWS secret assignment | `(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?\|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}` |
 | JWT with an auth context | `(?i)(?:authorization\s*[:=]\s*bearer\s+\|(?:access\|id\|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` |
-| Generic token assignment | `(?i)(?:^\|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access\|auth\|api\|app\|bearer\|secret\|private\|password\|reset\|session\|refresh\|personal\|client\|oauth\|service\|account\|admin\|deploy\|webhook\|install\|invite\|vault\|ci\|job\|runner\|registry\|github\|gh\|gitlab\|slack\|npm\|pypi\|hf\|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}` |
+| Generic bearer token | `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}` |
 | `sk_` and `api_` keys | `(?:^\|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}\|api_[A-Za-z0-9]{32})` |
 | `sk-` keys (OpenAI, Mistral) | `(?:^\|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}` |
 | Provider key assignment | `[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}` |
 
-The generic token rule matches `token`, or `token` after a credential word
-(for example `GITHUB_TOKEN=`, `X-Auth-Token:`, `access_token=`,
-`MY_APP_SECRET_TOKEN=`). It does not match a key name that only ends in
-`token`, such as `redir_token=` in a YouTube redirect link, `next_page_token=`
-or `csrf_token=`. For the same reason it does not match a service name that is
-not in its list, such as `DISCORD_TOKEN=`. If your corpus can hold such
-credentials, add a rule for them to your list. The three key rules require the key to start a word, so the
-`sk-` inside a URL slug such as `krasnoyarsk-...` and the `sk_` inside an
-identifier such as `task_...` or `task_sk_...` do not match. For the `sk_` and
-`api_` rule, an underscore before the prefix does not start a word. Before spec 0.93.0 these rules had
-no boundary, and documents that quoted such links were withheld.
+The generic token rule matches any key that ends in `token` with a value of
+20 or more key characters. So it catches the credential keys of every
+provider (`GITHUB_TOKEN=`, `VERCEL_TOKEN=`, `DISCORD_TOKEN=`, `id_token:`).
+A rule that lists credential key names would miss every provider that the
+list does not name, so the rule stays broad. The three key rules require the
+key to start a word, so the `sk-` inside a URL slug such as
+`krasnoyarsk-...` and the `sk_` inside an identifier such as `task_...` or
+`task_sk_...` do not match. For the `sk_` and `api_` rule, an underscore
+before the prefix does not start a word.
 
-When the effective list changes (a new version with new defaults, or an edit
-to your config), the next scan applies the new list in both directions. You do
-not need to run `dir2mcp reindex`.
+### Allowed matches (`security.secret_allow_patterns`)
+
+The generic token rule also matches values that carry no credential, such as
+a redirect link (`redir_token=` in a YouTube link) or a pagination cursor
+(`pageToken=`). `security.secret_allow_patterns` releases such text. The
+default list holds one pattern:
+
+`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;<>"]*`
+
+dir2mcp finds every match of every secret pattern. An allow match cancels a
+match of the generic token rule when it covers it: the allow match starts at
+or before the start of the secret match and ends at or after its end. An
+allow match never cancels a match of any other rule (an AWS key, an `sk-`
+key, your own rule), also when it covers it. A text is withheld when at least
+one secret match is left. So:
+
+- A redirect link alone does not withhold a document.
+- A redirect link and a real credential in one document withhold it.
+- `page_token=abc;GITHUB_TOKEN=...` withholds it: the allow value stops at
+  `;`, so it does not cover the credential.
+- `page_token=AKIA...` withholds it: an allow match never cancels an AWS key.
+
+The allow list applies wherever the secret patterns apply: source bytes,
+derived text, and the text a tool returns. An empty list cancels nothing. An
+allow pattern that is not a valid regular expression is a `CONFIG_INVALID`
+error.
+
+### When a pattern list changes
+
+When the effective lists change (a new version with new defaults, or an edit
+to your config), the next scan applies them in both directions. You do not
+need to run `dir2mcp reindex`.
 
 - **Withheld documents are evaluated again.** At the start of the scan, dir2mcp
   clears the content hash of each `secret_excluded` document, and of each
   archive that holds one. The normal pipeline then reads them again. A document
-  that the new list does not match is indexed. A document that it still
-  matches stays withheld.
-- **Indexed documents are evaluated again when the new list is broader.** If
-  the new list has a pattern that the old list did not have, dir2mcp also
-  clears the content hash of each indexed document and each archive. The scan
-  then reads each of them again: the source bytes and the text that dir2mcp
-  derives (extraction, OCR, transcript, translation). A document that the new
-  list matches is withheld, and its representations and chunks are retired.
-  OCR, transcription and translation come from their on-disk caches, so this
-  does not repeat a provider call that already succeeded. But it reads every
-  indexed file once, which takes time on a large media corpus.
-- **A narrower list skips that read.** The new list is narrower when each of
-  its patterns was in the old list, or replaces an old pattern with a stricter
-  form. The spec 0.93.0 defaults are narrower than the earlier defaults, so an
-  upgrade with the default list reads only the withheld documents again.
+  that the new lists do not match is indexed. A document that they still
+  match stays withheld.
+- **Indexed documents are evaluated again when the change can match more.**
+  A change can match more when it adds or edits a secret pattern, or removes
+  or edits an allow pattern. Then dir2mcp also clears the content hash of each
+  indexed document and each archive, and marks each one as waiting for
+  re-evaluation. The scan then reads each of them again: the source bytes and
+  the text that dir2mcp derives (extraction, OCR, transcript, translation). A
+  document that the new lists match is withheld, and its representations and
+  chunks are retired. OCR, transcription and translation come from their
+  on-disk caches, so this does not repeat a provider call that already
+  succeeded. But it reads every indexed file once, which takes time on a large
+  media corpus.
+- **Until the scan has read a marked document again, no tool returns any part
+  of it.** `search` and `related` leave out its hits, `ask` leaves out its
+  passages before it builds the prompt, and `open_file` returns `FORBIDDEN`.
+  A check of each excerpt is not enough here, because a credential can cross
+  a chunk boundary and then no single excerpt matches.
+- **A change that can only match less skips that read and hides nothing.**
+  Only three changes count: a removed secret pattern, an added allow pattern,
+  and the shipped narrowings of the `sk-`, `sk_` and `api_` rules. Any other
+  edit counts as a change that can match more, also one that is stricter in
+  fact. The spec 0.93.0 defaults can only match less than the earlier
+  defaults, so an upgrade with the default lists reads only the withheld
+  documents again.
 
 The check does not use the stored chunks. A chunk can lose bytes that the raw
 scan sees (for example a trimmed trailing newline), and chunks can overlap, so
 only a new read gives the same verdict that ingest gives.
 
-Until the scan reaches a document, its chunks stay in the index. So each tool
-that returns indexed text also tests that text against the list in effect when
-it answers:
+Each tool that returns indexed text also tests that text against the lists in
+effect when it answers:
 
 - `search` and `related` leave out a hit whose snippet or chunk text matches.
+  `related` also does not send matching seed text to the embedder.
 - `ask` does not place a matching chunk in the prompt, and does not cite it.
 - `open_file` returns `FORBIDDEN` for matching text.
 - `annotate` and `transcribe` return `FORBIDDEN` for matching text.
 
-These tools also apply the built-in default patterns when your list leaves
-one out. So a tool can refuse text that ingest indexed under your list.
+These tools also apply every shipped default secret pattern when your list
+leaves one out. So a tool can refuse text that ingest indexed under your
+list.
 
-The store records the list and its fingerprint (`secret_policy_patterns` and
-`secret_policy_identity` in the settings table), in the same transaction that
-clears the content hashes. A document keeps its empty content hash until the
-scan processes it, so a document that fails, or that a stopped scan did not
-reach, is processed again on the next scan. If the clear itself fails, the
-scan fails and records nothing. A corpus that has no recorded list was indexed
-by an earlier version, so dir2mcp compares the new list with the defaults
-before spec 0.93.0.
+The store records both lists and their fingerprint (`secret_policy_patterns`,
+`secret_policy_allow_patterns` and `secret_policy_identity` in the settings
+table), in the same transaction that clears the content hashes. A document
+keeps its empty content hash, and its mark, until the scan has decided it
+again, so a document that fails, or that a stopped scan did not reach, is
+processed again on the next scan and stays hidden until then. If the clear
+itself fails, the scan fails and records nothing.
+
+A corpus with no recorded lists was indexed by a version before spec 0.93.0.
+If your config uses the default lists, dir2mcp takes the corpus to have used
+the earlier defaults, and reads only the withheld documents again. If your
+config sets its own lists, the earlier lists cannot be known, so dir2mcp
+reads every indexed document again.
 
 ### What a support bundle discloses
 

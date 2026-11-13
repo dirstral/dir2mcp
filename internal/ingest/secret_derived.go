@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // Derived-text secret screening (dir2mcp #681).
@@ -67,7 +67,7 @@ var ErrSecretExcluded = errors.New("content withheld: it matched a configured se
 // derived-match flag. Called at every document entry point so a document can
 // never inherit the previous document's verdict, and so the derived scan can
 // never run against a different pattern set than the source scan.
-func (s *Service) beginDocumentSecretScope(patterns []*regexp.Regexp) {
+func (s *Service) beginDocumentSecretScope(patterns *secretmatch.Matcher) {
 	s.docSecretPatterns = patterns
 	s.secretExcludedThisDoc = false
 	s.secretWithholdFailedThisDoc = false
@@ -99,7 +99,7 @@ func (s *Service) screenDerivedSecrets(ctx context.Context, doc model.Document, 
 // document; use screenDerivedSecrets everywhere the derived text belongs to the
 // document's own pipeline.
 func (s *Service) derivedTextHasSecret(text string) bool {
-	if text == "" || len(s.docSecretPatterns) == 0 {
+	if text == "" || !s.docSecretPatterns.Enabled() {
 		return false
 	}
 	return hasSecretMatch([]byte(text), s.docSecretPatterns)

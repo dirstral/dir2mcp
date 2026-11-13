@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // This file holds the bounded read path for open_file (issue #690).
@@ -119,7 +119,7 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 // only refuse content that a whole-string match would have served. It never
 // serves content that a whole-string match would have refused.
 type secretScanner struct {
-	patterns []*regexp.Regexp
+	matcher *secretmatch.Matcher
 	// tail holds the last bytes of the previous chunk, and window joins that
 	// tail to the current chunk. Both buffers are reused across chunks, so a
 	// scan of a large source allocates nothing per chunk.
@@ -127,24 +127,27 @@ type secretScanner struct {
 	window []byte
 }
 
-func newSecretScanner(patterns []*regexp.Regexp) *secretScanner {
-	active := make([]*regexp.Regexp, 0, len(patterns))
-	for _, re := range patterns {
-		if re != nil {
-			active = append(active, re)
-		}
-	}
-	return &secretScanner{patterns: active}
+func newSecretScanner(matcher *secretmatch.Matcher) *secretScanner {
+	return &secretScanner{matcher: matcher}
 }
 
 // enabled reports whether any pattern is configured. With no pattern the read
 // stops as soon as the answer is complete, so an object store never sends the
 // bytes past the requested window.
 func (sc *secretScanner) enabled() bool {
-	return sc != nil && len(sc.patterns) > 0
+	return sc != nil && sc.matcher.Enabled()
 }
 
 // scan checks one chunk together with the tail of the previous chunk.
+//
+// The allow list (SPEC §7.2) is applied on the same window as the secret
+// patterns, so an allow match cancels only a secret match that it covers in
+// that window. A secret match that crosses the chunk boundary is inside the
+// next window whole (the overlap is far longer than a credential), and is
+// judged there. When the overlap cuts an allow match short at the start of a
+// window, a secret match inside it can look uncancelled. That drift refuses
+// content and never serves it, so it is fail-closed like the anchor drift
+// above.
 func (sc *secretScanner) scan(p []byte) error {
 	if !sc.enabled() || len(p) == 0 {
 		return nil
@@ -155,10 +158,8 @@ func (sc *secretScanner) scan(p []byte) error {
 		sc.window = append(sc.window, p...)
 		window = sc.window
 	}
-	for _, re := range sc.patterns {
-		if re.Match(window) {
-			return errSecretMatch
-		}
+	if sc.matcher.Match(window) {
+		return errSecretMatch
 	}
 	sc.keepTail(window)
 	return nil

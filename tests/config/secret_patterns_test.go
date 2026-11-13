@@ -5,22 +5,18 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
-	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
-// anyMatch reports whether any of the compiled default secret patterns matches s.
+// anyMatch reports whether the secret patterns, with the default allow list,
+// match s: the verdict the product reaches (SPEC §7.2).
 func anyMatch(t *testing.T, patterns []string, s string) bool {
 	t.Helper()
-	res, err := ingest.CompileSecretPatterns(patterns)
+	m, err := secretmatch.Compile(patterns, config.DefaultSecretAllowPatterns())
 	if err != nil {
-		t.Fatalf("CompileSecretPatterns: %v", err)
+		t.Fatalf("secretmatch.Compile: %v", err)
 	}
-	for _, re := range res {
-		if re.MatchString(s) {
-			return true
-		}
-	}
-	return false
+	return m.MatchString(s)
 }
 
 // TestDefaultSecretPatterns_MatchProviderKeys is a regression guard for #443:
@@ -83,11 +79,13 @@ func repeatAlphabet(alphabet string, n int) string {
 }
 
 // TestDefaultSecretPatterns_Boundaries_0_93_0 pins the spec 0.93.0 defaults
-// through the real default set and the real matcher. The must-not-match rows
-// are the false positives an archive hit: 13 Word documents withheld through a
-// pasted YouTube redirect link (`redir_token=`) and 4 through transliterated
-// URL slugs (the `sk-` inside `krasnoyarsk-`). The must-match rows are the
-// credential shapes the tightened rules must keep catching.
+// through the real default set, the default allow list and the real matcher.
+// The must-not-match rows are the false positives an archive hit: 13 Word
+// documents withheld through a pasted YouTube redirect link (`redir_token=`)
+// and 4 through transliterated URL slugs (the `sk-` inside `krasnoyarsk-`).
+// The must-match rows are the credential shapes the rules must keep catching.
+// The generic token rule stays broad, so a key that only ends in `token`
+// matches outside a URL query string.
 func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 	patterns := config.Default().SecretPatterns
 	tok := "to" + "ken"
@@ -101,19 +99,20 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 	}{
 		// Must NOT match.
 		{"youtube redirect link", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbWRkRThBZV" + synthRun(40) + "&q=https%3A%2F%2Fexample.org%2Fpage", false},
-		{"pagination cursor", "next_page_" + tok + "=" + synthRun(30), false},
-		{"csrf form field", "csrf_" + tok + "=" + synthRun(30), false},
+		{"pagination cursor in a query string", "https://example.org/list?next_page_" + tok + "=" + synthRun(30), false},
 		{"krasnoyarsk slug", "https://www.newstube.ru/media/b-elcin-i-konstantinova-v-krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
 		{"baikonur slug", "https://example.org/news/bajkonur-pu" + skDash + "soyuz-28-tm-77-kosmonavty-na-orbite", false},
 		{"task id with sk_ mid-word", "ta" + skUnder + synthLowerRun(32), false},
 		{"task id in prose", "see job ta" + skUnder + synthLowerRun(32) + " for details", false},
 		{"sk_ after an underscore", "task_" + skUnder + synthLowerRun(32), false},
-		{"key that only ends in token", "my" + tok + "=" + synthRun(30), false},
 		// The two must-not-hit samples SPEC §7.2 (spec 0.93.0) lists verbatim.
 		{"spec redirect sample", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org", false},
 		{"spec slug sample", "https://example.org/news/krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
 
 		// MUST match.
+		{"pagination key outside a query string", "next_page_" + tok + "=" + synthRun(30), true},
+		{"csrf form field", "csrf_" + tok + "=" + synthRun(30), true},
+		{"key that only ends in token", "my" + tok + "=" + synthRun(30), true},
 		{"bare token colon", tok + ": " + synthRun(24), true},
 		{"bare token equals at line start", tok + "=" + synthRun(24), true},
 		{"bare token equals on a later line", "# config\n" + tok + "=" + synthRun(24), true},

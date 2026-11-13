@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/relpath"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // maxOpenFilePage caps the open_file page argument so a caller cannot request
@@ -3427,7 +3428,7 @@ func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool
 // When the retriever exposes its secret pattern set (retrieval.Service does),
 // the gate uses that set, so annotate/transcribe refuse exactly what open_file,
 // search, ask and related refuse (spec 0.93.0). Otherwise it compiles
-// security.secret_patterns itself.
+// security.secret_patterns and security.secret_allow_patterns itself.
 func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 	if screener, ok := s.retriever.(secretMatcher); ok {
 		if screener.MatchesSecret(text) {
@@ -3436,12 +3437,12 @@ func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 		return nil
 	}
 	s.secretPatternOnce.Do(func() {
-		s.secretPatterns, s.secretPatternErr = ingest.CompileSecretPatterns(s.cfg.SecretPatterns)
+		s.secretPatterns, s.secretPatternErr = secretmatch.Compile(s.cfg.SecretPatterns, s.cfg.SecretAllowPatterns)
 	})
 	if s.secretPatternErr != nil {
 		return &toolExecutionError{Code: "CONFIG_INVALID", Message: fmt.Sprintf("compile secret patterns: %v", s.secretPatternErr), Retryable: false}
 	}
-	if ingest.HasSecretMatch([]byte(text), s.secretPatterns) {
+	if s.secretPatterns.MatchString(text) {
 		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	}
 	return nil

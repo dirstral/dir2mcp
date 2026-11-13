@@ -4,7 +4,6 @@ not_a_token_field: value
 version=1.2.3
 Authorization: Bearer abc.def.ghi
 plain text without credentials
-# spec 0.93.0: a token-named key that is not a credential word must not match
+# spec 0.93.0: the default allow list releases redirect and pagination parameters in a URL
 https://www.youtube.com/redirect?event=video_description&redir_token=QUFFLUhqbWRkRThBZVXy7Zq9WvXy7Zq9Wv&q=https%3A%2F%2Fexample.org
-next_page_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
-csrf_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
+https://example.org/list?next_page_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9

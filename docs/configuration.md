@@ -405,11 +405,15 @@ unknown extension that an older version stored as binary keeps that result
 until its ETag changes. Only its bytes can show that it is text, and the S3
 fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
 
-### Secret patterns (`security.secret_patterns`)
+### Secret patterns (`security.secret_patterns`, `security.secret_allow_patterns`)
 
-A document whose content matches one of these regular expressions is withheld
-as `secret_excluded`. A list in your config replaces the defaults, so copy the
-defaults into it when you only want to add a rule:
+A document whose content matches one of the `secret_patterns` regular
+expressions is withheld as `secret_excluded`. For ingest, a list in your
+config replaces the defaults, so copy the defaults into it when you only want
+to add a rule. The tools that return text (`search`, `ask`, `related`,
+`open_file`, `annotate`, `transcribe`) always apply the shipped defaults too,
+also when your list leaves one out. So a tool can refuse text that ingest
+indexed under your list.
 
 ```yaml
 security:
@@ -417,31 +421,46 @@ security:
     - 'AKIA[0-9A-Z]{16}'
     - '(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}'
     - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
-    - '(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
+    - '(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
     - '(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})'
     - '(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}'
     - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
     - 'MYCORP-[A-Z0-9]{24}'   # your own rule
+  secret_allow_patterns:
+    - '(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;<>"]*'
 ```
 
-These are the spec 0.93.0 defaults. The generic token rule and the `sk-`,
-`sk_` and `api_` rules have a leading boundary, so a redirect link
-(`redir_token=...`), a pagination cursor, a CSRF field or a URL slug such as
-`krasnoyarsk-...` no longer withholds a document. See
-[Security defaults](security.md#secret-patterns-documents-withheld-for-their-content)
-for what each rule matches.
+These are the spec 0.93.0 defaults. The generic token rule is broad on
+purpose: it matches any key that ends in `token`, so it catches the
+credential keys of every provider (`GITHUB_TOKEN`, `VERCEL_TOKEN`,
+`DISCORD_TOKEN`, `id_token`). The `sk-`, `sk_` and `api_` rules require the key
+to start a word, so a URL slug such as `krasnoyarsk-...` is not a key.
 
-The generic token rule names its credential words. A token under another
-name, such as `DISCORD_TOKEN=`, needs its own rule in your list.
+`secret_allow_patterns` lists text that looks like a credential but is not
+one. An allow match cancels a match of the generic token rule that it covers
+(starts at or before it and ends at or after it). It never cancels a match of
+any other rule, also when it covers it. A text is withheld when at least one
+match is left. The default allow pattern releases redirect and pagination
+parameters in a URL (`redir_token=`, `page_token=`, `next_page_token=`,
+`pageToken=`, `nextPageToken=`). Its value stops at `&`, `#`, `;`, a space, a
+quote or an angle bracket, so a credential in the next parameter is still
+found. An empty list cancels nothing. An allow pattern that is not a valid
+regular expression is a `CONFIG_INVALID` error, as a secret pattern is.
 
-After a change to the effective list, the next scan applies it in both
-directions; no reindex is necessary. A withheld document that the new list
-does not match is indexed again. When the new list adds a pattern, the scan
-also reads every indexed document again (OCR, transcription and translation
-come from their caches), and withholds each one that the new list matches.
-A list that only removes patterns, or makes one stricter, reads only the
-withheld documents again. The scan logs
-`secret policy: security.secret_patterns changed since the last scan; ...`.
+After a change to either list, the next scan applies it in both directions;
+no reindex is necessary. A withheld document that the new lists do not match
+is indexed again. When the change can match more (a new or edited secret
+pattern, or a removed or edited allow pattern), the scan also reads every
+indexed document again (OCR, transcription and translation come from their
+caches), and withholds each one that the new lists match. Until the scan has
+read a document again, no tool returns any part of it. A change that can only
+match less reads only the withheld documents again and hides nothing. Only
+three changes count as "can only match less": a removed secret pattern, an
+added allow pattern, and the shipped narrowings of the `sk-`, `sk_` and `api_`
+rules. Any other edit counts as a change that can match more, also one that
+is stricter in fact (for example `MYCORP-[0-9]+` edited to `MYCORP-[0-9]{4}`).
+The scan logs
+`secret policy: security.secret_patterns or security.secret_allow_patterns changed since the last scan; ...`.
 
 ### Document extraction: modes & fallback
 

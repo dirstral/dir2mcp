@@ -1608,11 +1608,8 @@ type servingModelClients struct {
 func (a *App) newServingRetriever(cfg config.Config, st model.Store, textIx, codeIx model.Index, clients servingModelClients) (*retrieval.Service, error) {
 	embedder, generator, etm, ecm := clients.embedder, clients.generator, clients.textModel, clients.codeModel
 	ret := retrieval.NewService(st, textIx, embedder, generator)
-	// open_file and the serve-time screen of search/ask/related test returned
-	// text against the operator's security.secret_patterns, not only the
-	// built-in baseline (spec 0.93.0).
-	if err := ret.SetSecretPatterns(cfg.SecretPatterns); err != nil {
-		return nil, fmt.Errorf("compile secret patterns: %w", err)
+	if err := configureSecretPolicy(ret, cfg); err != nil {
+		return nil, err
 	}
 	ret.SetQueryEmbeddingModel(etm)
 	ret.SetCodeEmbeddingModel(ecm)

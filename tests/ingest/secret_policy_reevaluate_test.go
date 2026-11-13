@@ -34,8 +34,9 @@ var preSpec0930SecretPatterns = []string{
 	`[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}`,
 }
 
-// redirectNote is a document that quotes a YouTube redirect link. The old
-// generic token rule matched its `redir_token=` value; the new rule does not.
+// redirectNote is a document that quotes a YouTube redirect link. The generic
+// token rule matches its `redir_token=` value. The old binary had no allow list,
+// so it withheld the document; the default allow list now cancels that match.
 func redirectNote() string {
 	return "Source video description link:\n" +
 		"https://www.youtube.com/redirect?event=video_description&redir_" + "to" + "ken=" +
@@ -56,6 +57,14 @@ func policyConfig(root, stateDir string, patterns []string) config.Config {
 	cfg.StateDir = stateDir
 	cfg.STTProvider = "off"
 	cfg.SecretPatterns = append([]string(nil), patterns...)
+	return cfg
+}
+
+// oldBinaryConfig is the policy of a binary before spec 0.93.0: its default
+// secret patterns and no allow list.
+func oldBinaryConfig(root, stateDir string) config.Config {
+	cfg := policyConfig(root, stateDir, preSpec0930SecretPatterns)
+	cfg.SecretAllowPatterns = []string{}
 	return cfg
 }
 
@@ -84,13 +93,13 @@ func forgetSecretPolicyIdentity(t *testing.T, st *store.SQLiteStore, dbPath stri
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	res, err := db.ExecContext(context.Background(), `DELETE FROM settings WHERE key IN (?, ?)`,
-		store.SecretPolicyIdentitySetting, store.SecretPolicyPatternsSetting)
+	res, err := db.ExecContext(context.Background(), `DELETE FROM settings WHERE key IN (?, ?, ?)`,
+		store.SecretPolicyIdentitySetting, store.SecretPolicyPatternsSetting, store.SecretPolicyAllowPatternsSetting)
 	if err != nil {
 		t.Fatalf("delete secret policy identity: %v", err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n != 2 {
-		t.Fatalf("delete secret policy identity: rows=%d err=%v, want the 2 recorded rows", n, err)
+	if n, err := res.RowsAffected(); err != nil || n != 3 {
+		t.Fatalf("delete secret policy identity: rows=%d err=%v, want the 3 recorded rows", n, err)
 	}
 	recorded, err := st.SecretPolicyIdentity(context.Background())
 	if err != nil {
@@ -152,7 +161,7 @@ func TestSecretPolicy_UpgradeReevaluatesWithheldDocuments(t *testing.T) {
 	st, dbPath := newPolicyStore(t)
 
 	// Old binary.
-	runPolicyScan(t, policyConfig(root, stateDir, preSpec0930SecretPatterns), st)
+	runPolicyScan(t, oldBinaryConfig(root, stateDir), st)
 	requireStatus(t, st, "redirect.md", model.DocumentStatusSecretExcluded)
 	requireStatus(t, st, "slug.md", model.DocumentStatusSecretExcluded)
 	requireStatus(t, st, "real.md", model.DocumentStatusSecretExcluded)
@@ -203,7 +212,7 @@ func TestSecretPolicy_UpgradeReevaluatesWithheldArchiveMember(t *testing.T) {
 	}
 	st, dbPath := newPolicyStore(t)
 
-	runPolicyScan(t, policyConfig(root, stateDir, preSpec0930SecretPatterns), st)
+	runPolicyScan(t, oldBinaryConfig(root, stateDir), st)
 	requireStatus(t, st, "bundle.zip/links.txt", model.DocumentStatusSecretExcluded)
 	forgetSecretPolicyIdentity(t, st, dbPath)
 

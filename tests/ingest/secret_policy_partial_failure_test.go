@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -142,7 +143,7 @@ func TestSecretPolicy_ResetFailureFailsTheScan(t *testing.T) {
 	writeFile(t, filepath.Join(root, "redirect.md"), redirectNote())
 	st, dbPath := newPolicyStore(t)
 
-	runPolicyScan(t, policyConfig(root, stateDir, preSpec0930SecretPatterns), st)
+	runPolicyScan(t, oldBinaryConfig(root, stateDir), st)
 	requireStatus(t, st, "redirect.md", model.DocumentStatusSecretExcluded)
 
 	execStateDB(t, dbPath, `CREATE TRIGGER block_policy BEFORE UPDATE ON settings
@@ -156,4 +157,69 @@ func TestSecretPolicy_ResetFailureFailsTheScan(t *testing.T) {
 
 	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "redirect.md")
+}
+
+// TestSecretPolicy_TwoPhaseDerivationRetireFailureIsRetried makes the
+// retirement fail in the two-phase derivation pass. The translated transcript
+// matches a secret pattern, so that pass withholds the document, but it cannot
+// retire the source transcript, which the transcription pass already indexed.
+// The done marker stays stamped (blanking it would republish the clean
+// transcript), so the fast path does not re-read the file. The next scan's
+// derivation pass must retire the representations all the same.
+func TestSecretPolicy_TwoPhaseDerivationRetireFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	mustWriteFile(t, filepath.Join(root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	dbPath := filepath.Join(stateDir, "meta.sqlite")
+	st := store.NewSQLiteStore(dbPath)
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := config.Config{
+		RootDir:            root,
+		StateDir:           stateDir,
+		STTProvider:        "off",
+		MediaBatchTwoPhase: true,
+		// markerTranslator puts a marker into every translated line, so only
+		// the translated transcript matches.
+		SecretPatterns: []string{`BLUEHERON-[0-9]{4}`},
+	}
+	scan := func() {
+		t.Helper()
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro line\n[00:02] second line"})
+		svc.SetSTTIdentity("whisper", "whisper-large-v3")
+		svc.SetTranscriptLanguage("de")
+		svc.SetTranslator(markerTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
+		_ = svc.Run(context.Background())
+	}
+
+	execStateDB(t, dbPath, blockRetireTrigger)
+	scan()
+	execStateDB(t, dbPath, unblockRetireTrigger)
+	doc := requireStatus(t, st, "audio/one.mp3", model.DocumentStatusSecretExcluded)
+	if doc.ContentHash == "" {
+		t.Fatal("the derivation pass blanked the done marker; the test needs the stamped-marker case")
+	}
+	reps, err := st.ActiveRepresentations(context.Background(), "audio/one.mp3")
+	if err != nil {
+		t.Fatalf("ActiveRepresentations: %v", err)
+	}
+	if len(reps) == 0 {
+		t.Fatal("the blocked retirement left no live representation; the test cannot show the retry")
+	}
+
+	scan()
+	requireWithheldAndRetired(t, st, "audio/one.mp3")
+}
+
+// markerTranslator answers the windowed translation contract and puts a
+// BLUEHERON marker into every translated line.
+type markerTranslator struct{}
+
+func (markerTranslator) Generate(_ context.Context, prompt string) (string, error) {
+	return strings.ReplaceAll(numberedEcho(fencedPayload(prompt)), ": translated:", ": BLUEHERON-2026 "), nil
 }

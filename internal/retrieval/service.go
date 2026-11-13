@@ -26,6 +26,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/promptrules"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -76,21 +77,19 @@ var defaultPathExcludes = []string{
 	"**/id_rsa",
 }
 
-// defaultSecretPatternLiterals is the retrieval baseline: the SPEC §7.2
-// default patterns that open_file always applies, even when the caller sets its
-// own list. Each entry MUST be a verbatim copy of the matching entry in
-// config.Default().SecretPatterns; a unit test pins that. A drift here lets
-// open_file refuse a document that ingest indexed (or the reverse), which is
-// how the boundary-less generic-token and sk_/api_ rules withheld redirect
-// links and URL slugs on both surfaces (spec 0.93.0).
-var defaultSecretPatternLiterals = []string{
-	`AKIA[0-9A-Z]{16}`,
-	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
+// defaultSecretPatternLiterals is the retrieval baseline: every shipped
+// default of security.secret_patterns (SPEC §7.2). open_file and the
+// serve-time screen always apply it, also when the operator sets a list of
+// their own. It is read from config.Default(), so it can never drift from the
+// defaults that ingest applies.
+var defaultSecretPatternLiterals = config.Default().SecretPatterns
 
-	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
-	`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-	`(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`,
-}
+// defaultSecretAllowPatternLiterals is the shipped default of
+// security.secret_allow_patterns. NewService starts with it, so a service that
+// is never configured screens the way a default deployment does.
+// SetSecretPolicy and SetSecretAllowPatterns replace it with the operator's
+// list.
+var defaultSecretAllowPatternLiterals = config.DefaultSecretAllowPatterns()
 
 const (
 	defaultOverfetchMultiplier = 5
@@ -340,7 +339,13 @@ type Service struct {
 	pathExcludes    []string
 	// cached compiled regexps for exclude patterns; keys are normalized patterns
 	excludeRegexps map[string]*regexp.Regexp
-	secretPatterns []*regexp.Regexp
+	// secretMatcher screens returned text (SPEC §7.2): the baseline plus the
+	// operator's secret patterns, and the allow list. secretPatternList and
+	// secretAllowList hold the sources it was built from, so each setter can
+	// rebuild it with the other list unchanged.
+	secretMatcher     *secretmatch.Matcher
+	secretPatternList []string
+	secretAllowList   []string
 	// hybridEnabled toggles BM25+vector RRF fusion in Search. Defaults to
 	// true; the engine can disable it via SetHybridEnabled when the operator
 	// sets retrieval.hybrid.enabled=false.
@@ -510,13 +515,9 @@ type Service struct {
 var _ model.Retriever = (*Service)(nil)
 
 func NewService(store model.Store, index model.Index, embedder model.Embedder, gen model.Generator) *Service {
-	compiledPatterns := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals))
-	for _, pattern := range defaultSecretPatternLiterals {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			panic(fmt.Errorf("invalid default secret pattern %q: %w", pattern, err))
-		}
-		compiledPatterns = append(compiledPatterns, re)
+	secretMatcher, err := secretmatch.Compile(defaultSecretPatternLiterals, defaultSecretAllowPatternLiterals)
+	if err != nil {
+		panic(fmt.Errorf("invalid default secret pattern: %w", err))
 	}
 	// overfetchMultiplier defaults to 5; callers may override it with
 	// SetOverfetchMultiplier to tune for their workload.  Values less than
@@ -543,7 +544,9 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		protocolVersion:     "2025-11-25",
 		excludeRegexps:      make(map[string]*regexp.Regexp),
 		pathExcludes:        append([]string(nil), defaultPathExcludes...),
-		secretPatterns:      compiledPatterns,
+		secretMatcher:       secretMatcher,
+		secretPatternList:   append([]string(nil), defaultSecretPatternLiterals...),
+		secretAllowList:     append([]string(nil), defaultSecretAllowPatternLiterals...),
 		hybridEnabled:       true,
 		rerankCandidatePool: defaultRerankCandidatePool,
 		hydeMode:            hydeModeFuse,
@@ -1226,27 +1229,56 @@ func (s *Service) SetPathExcludes(patterns []string) {
 }
 
 func (s *Service) SetSecretPatterns(patterns []string) error {
-	// start with compiled defaults so that baseline secret-detection
-	// patterns (AWS keys, JWT tokens, etc.) are never dropped when callers
-	// add custom patterns.
-	compiled := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals)+len(patterns))
-	for _, pattern := range defaultSecretPatternLiterals {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return fmt.Errorf("failed to compile default secret pattern %q: %w", pattern, err)
-		}
-		compiled = append(compiled, re)
+	// Start with the baseline so that the default secret-detection patterns
+	// (AWS keys, JWT tokens, etc.) are never dropped when callers add custom
+	// patterns.
+	merged := make([]string, 0, len(defaultSecretPatternLiterals)+len(patterns))
+	merged = append(merged, defaultSecretPatternLiterals...)
+	merged = append(merged, patterns...)
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	matcher, err := secretmatch.Compile(merged, s.secretAllowList)
+	if err != nil {
+		return err
 	}
-	for _, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return err
-		}
-		compiled = append(compiled, re)
+	s.secretMatcher = matcher
+	s.secretPatternList = merged
+	return nil
+}
+
+// SetSecretPolicy installs security.secret_patterns (merged with the
+// baseline, as SetSecretPatterns does) and security.secret_allow_patterns in
+// one step. Nothing changes when either list does not compile.
+func (s *Service) SetSecretPolicy(patterns, allowPatterns []string) error {
+	merged := make([]string, 0, len(defaultSecretPatternLiterals)+len(patterns))
+	merged = append(merged, defaultSecretPatternLiterals...)
+	merged = append(merged, patterns...)
+	allow := append([]string{}, allowPatterns...)
+	matcher, err := secretmatch.Compile(merged, allow)
+	if err != nil {
+		return err
 	}
 	s.metaMu.Lock()
-	s.secretPatterns = compiled
+	s.secretMatcher = matcher
+	s.secretPatternList = merged
+	s.secretAllowList = allow
 	s.metaMu.Unlock()
+	return nil
+}
+
+// SetSecretAllowPatterns installs security.secret_allow_patterns (SPEC §7.2).
+// A secret match that an allow match covers is cancelled. The list replaces
+// the default allow list; an empty list cancels nothing.
+func (s *Service) SetSecretAllowPatterns(patterns []string) error {
+	allow := append([]string{}, patterns...)
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	matcher, err := secretmatch.Compile(s.secretPatternList, allow)
+	if err != nil {
+		return err
+	}
+	s.secretMatcher = matcher
+	s.secretAllowList = allow
 	return nil
 }
 
@@ -1688,10 +1720,14 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// result set, so at most k store lookups run per query and deleted content is
 	// never returned (nor cited) even before the next restart.
 	hits = s.pruneTombstonedHits(ctx, hits)
-	// Leave out any hit whose text matches the secret pattern set, so a
-	// credential that a changed pattern set finds is not served (and not placed
-	// in an ask prompt) before the re-evaluation pass retires it (spec 0.93.0).
-	hits = s.screenSecretHits(ctx, hits)
+	// Leave out every hit of a document that waits for re-evaluation against
+	// a broader secret policy, and any hit whose text matches the secret
+	// pattern set, so a credential that a changed set finds is not served (and
+	// not placed in an ask prompt) before the scan retires it (spec 0.93.0).
+	hits, err = s.screenServedHits(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
 	// Name each hit's absolute evidence verdict (SPEC §9.4.3, spec 0.55.0) as
 	// the last step, so the verdict describes the hit the caller actually
 	// receives, after every re-scoring stage above. The thresholds are the ones
@@ -2518,7 +2554,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	stateDir := s.stateDir
 	corpusFS := s.corpusFS
 	pathExcludes := append([]string(nil), s.pathExcludes...)
-	secretPatterns := append([]*regexp.Regexp(nil), s.secretPatterns...)
+	secretPatterns := s.secretMatcher
 	s.metaMu.RUnlock()
 	if strings.TrimSpace(rootDir) == "" {
 		rootDir = "."
@@ -2527,6 +2563,13 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	normalizedRel, realRoot, targetAbs, err := s.resolveFilePath(relPath, rootDir, pathExcludes)
 	if err != nil {
 		return "", false, err
+	}
+	// A document that waits for re-evaluation against a broader secret policy
+	// is withheld whole until the scan reads it again (SPEC §7.2, spec 0.93.0).
+	if pending, err := s.secretReevalPending(ctx, normalizedRel); err != nil {
+		return "", false, err
+	} else if pending {
+		return "", false, model.ErrForbidden
 	}
 
 	// A replace-mode media-only document (SPEC 8.1.7) has direct media chunks
@@ -2583,7 +2626,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 // A page or time span that the metadata did not serve has no text to return,
 // so it maps to DOC_TYPE_UNSUPPORTED (SPEC §15.4: "If page provided -> return
 // OCR page text (if available; else error DOC_TYPE_UNSUPPORTED)").
-func (s *Service) openBinaryDocText(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, maxChars int) (string, bool, error) {
+func (s *Service) openBinaryDocText(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, maxChars int) (string, bool, error) {
 	if kind != "" && kind != "lines" {
 		return "", false, model.ErrDocTypeUnsupported
 	}
@@ -2804,7 +2847,7 @@ func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 // bytes-only hash; see ocrCacheKeyForOpen. When no cache file exists (e.g. ingest
 // is still running), the function returns model.ErrOCRNotReady so callers can
 // surface an actionable error rather than fall back to raw bytes.
-func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
+func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, maxChars int) (string, bool, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		stateDir = filepath.Join(".", ".dir2mcp")
@@ -2825,7 +2868,7 @@ func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.Co
 			return "", false, readErr
 		}
 		text := string(data)
-		if hasSecretMatch(secretPatterns, text) {
+		if secretPatterns.MatchString(text) {
 			return "", false, model.ErrForbidden
 		}
 		out, truncated := truncateRunesWithFlag(text, maxChars)
@@ -2969,7 +3012,7 @@ func foldDerivationCacheKey(contentHash, identity string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
+func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string, span model.Span, maxChars int, secretPatterns *secretmatch.Matcher, kind string) (content string, truncated bool, handled bool, err error) {
 	if !isMetaSpanKind(kind) || (kind == "time" && span.EndMS <= 0) {
 		return "", false, false, nil
 	}
@@ -2979,7 +3022,7 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 	if !ok {
 		return "", false, false, nil
 	}
-	if hasSecretMatch(secretPatterns, fromMeta) {
+	if secretPatterns.MatchString(fromMeta) {
 		return "", false, true, model.ErrForbidden
 	}
 	out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
@@ -3018,7 +3061,7 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 // require the whole-source read this fix removed, so it is a deliberate trade.
 // The derived-text path (openFileFromOCRCache) has no such gap: it reads its
 // whole cache file and scans all of it.
-func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
+func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, span model.Span, maxChars int) (string, bool, error) {
 	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
 		return "", false, err
@@ -3062,9 +3105,91 @@ func mapSourceReadError(err error) error {
 // through another tool. The MCP annotate/transcribe gate uses it too.
 func (s *Service) MatchesSecret(text string) bool {
 	s.metaMu.RLock()
-	patterns := s.secretPatterns
+	matcher := s.secretMatcher
 	s.metaMu.RUnlock()
-	return hasSecretMatch(patterns, text)
+	return matcher.MatchString(text)
+}
+
+// secretReevalPendingStore is the optional store capability that names the
+// documents waiting for a secret-policy re-evaluation against a broader set.
+type secretReevalPendingStore interface {
+	SecretReevalPendingPaths(ctx context.Context, relPaths []string) (map[string]struct{}, error)
+}
+
+// screenServedHits applies both serve-time secret rules to a result set
+// (SPEC §7.2, spec 0.93.0):
+//
+//   - A document that waits for re-evaluation against a broader pattern set
+//     is withheld whole: none of its hits is returned. A credential can cross
+//     a chunk boundary, and then no single excerpt matches, so screening the
+//     excerpts alone is not enough until the scan has read the document again.
+//   - Every other hit is screened by screenSecretHits.
+//
+// A store error is returned, not ignored: the result cannot be proven safe.
+func (s *Service) screenServedHits(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
+	hits, err := s.dropSecretReevalPending(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	return s.screenSecretHits(ctx, hits), nil
+}
+
+// dropSecretReevalPending leaves out every hit of a document that waits for a
+// secret-policy re-evaluation. One store query covers the whole hit set.
+func (s *Service) dropSecretReevalPending(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
+	if len(hits) == 0 {
+		return hits, nil
+	}
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	pendingStore, ok := store.(secretReevalPendingStore)
+	if !ok {
+		return hits, nil
+	}
+	paths := make([]string, 0, len(hits))
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		if _, dup := seen[hit.RelPath]; dup || hit.RelPath == "" {
+			continue
+		}
+		seen[hit.RelPath] = struct{}{}
+		paths = append(paths, hit.RelPath)
+	}
+	pending, err := pendingStore.SecretReevalPendingPaths(ctx, paths)
+	if err != nil {
+		return nil, fmt.Errorf("secret policy: read the documents that wait for re-evaluation: %w", err)
+	}
+	if len(pending) == 0 {
+		return hits, nil
+	}
+	kept := hits[:0]
+	for _, hit := range hits {
+		if _, wait := pending[hit.RelPath]; wait {
+			continue
+		}
+		kept = append(kept, hit)
+	}
+	s.logf("security: left out the hits of %d document(s) that wait for secret-policy re-evaluation", len(pending))
+	return kept, nil
+}
+
+// secretReevalPending reports whether one document waits for a secret-policy
+// re-evaluation against a broader set. open_file refuses such a document.
+func (s *Service) secretReevalPending(ctx context.Context, relPath string) (bool, error) {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	pendingStore, ok := store.(secretReevalPendingStore)
+	if !ok {
+		return false, nil
+	}
+	pending, err := pendingStore.SecretReevalPendingPaths(ctx, []string{relPath})
+	if err != nil {
+		return false, fmt.Errorf("secret policy: read the documents that wait for re-evaluation: %w", err)
+	}
+	_, wait := pending[relPath]
+	return wait, nil
 }
 
 // screenSecretHits leaves out every hit whose text matches the secret pattern
@@ -3083,22 +3208,22 @@ func (s *Service) screenSecretHits(ctx context.Context, hits []model.SearchHit) 
 		return hits
 	}
 	s.metaMu.RLock()
-	patterns := s.secretPatterns
+	matcher := s.secretMatcher
 	store := s.store
 	s.metaMu.RUnlock()
-	if len(patterns) == 0 {
+	if !matcher.Enabled() {
 		return hits
 	}
 	fetcher, _ := store.(chunkByIDer)
 	kept := hits[:0]
 	dropped := 0
 	for _, hit := range hits {
-		if hasSecretMatch(patterns, hit.Snippet) {
+		if matcher.MatchString(hit.Snippet) {
 			dropped++
 			continue
 		}
 		if fetcher != nil && hit.ChunkID != 0 {
-			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil && hasSecretMatch(patterns, task.Text) {
+			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil && matcher.MatchString(task.Text) {
 				dropped++
 				continue
 			}
@@ -3109,16 +3234,6 @@ func (s *Service) screenSecretHits(ctx context.Context, hits []model.SearchHit) 
 		s.logf("security: left out %d retrieved chunk(s) that match a secret pattern", dropped)
 	}
 	return kept
-}
-
-// hasSecretMatch reports whether any of the compiled secret patterns matches s.
-func hasSecretMatch(patterns []*regexp.Regexp, s string) bool {
-	for _, re := range patterns {
-		if re != nil && re.MatchString(s) {
-			return true
-		}
-	}
-	return false
 }
 
 // resolveFilePath validates and resolves relPath relative to rootDir.
@@ -4306,7 +4421,7 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 	// construction, so an unguarded read races with that assignment.
 	s.metaMu.RLock()
 	store := s.store
-	patterns := s.secretPatterns
+	matcher := s.secretMatcher
 	s.metaMu.RUnlock()
 	fetcher, _ := store.(chunkByIDer)
 	if fetcher == nil {
@@ -4325,7 +4440,7 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 			// again here, so test it again at the prompt boundary: a chunk
 			// rewritten between the two reads never reaches the generator
 			// (spec 0.93.0).
-			if hasSecretMatch(patterns, task.Text) {
+			if matcher.MatchString(task.Text) {
 				continue
 			}
 			texts[member] = strings.TrimSpace(task.Text)

@@ -2,22 +2,20 @@ package ingest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"regexp"
-	"sort"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // Secret-policy re-evaluation (SPEC §7.2, spec 0.93.0).
 //
 // A `secret_excluded` verdict, and equally an `ok` verdict, is reached under one
-// set of security.secret_patterns. The effective set changes when a release
-// changes a default (0.93.0 narrowed three) or when an operator edits the list.
-// The incremental scan does not ask again on its own for an unchanged document:
+// secret policy: security.secret_patterns and security.secret_allow_patterns.
+// The policy changes when a release changes a default (0.93.0 narrowed two
+// rules and added the allow list) or when an operator edits a list. The
+// incremental scan does not ask again on its own for an unchanged document:
 //
 //   - the cheap-signal fast path (ETag, or size and mtime for media) skips the
 //     document before any read;
@@ -40,95 +38,26 @@ import (
 //
 //  1. Withheld documents are always evaluated again: every `secret_excluded`
 //     document, and every archive that holds one.
-//  2. Indexed documents are evaluated again only when the new set can match
-//     something the old set did not. The new set is NARROWER when each of its
-//     patterns is in the old set, or is a declared narrowing of an old pattern
-//     (narrowedSecretPatterns). Then no `ok` document can start to match, and
-//     the cost of direction 2 (a read of every indexed document) is avoided.
-//     Otherwise every `ok` document and every archive is cleared.
+//  2. Indexed documents are evaluated again only when the new policy can match
+//     something the old one did not (secretmatch.IsNarrower decides: an added
+//     allow pattern or a declared narrowing of a secret pattern is narrower;
+//     anything else is not). Then every `ok` document and every archive is
+//     cleared, and marked as waiting for re-evaluation. Retrieval returns no
+//     part of a marked document until the scan has decided it again, because a
+//     credential can cross a chunk boundary where no excerpt matches.
 //
 // The reset and the new identity commit in one store transaction. The retry
 // state is the empty hash on each row: a document that fails, or that a stopped
 // scan did not reach, keeps it and is processed again on a later scan. A failure
 // of the reset itself fails the scan, so it is retried in full.
 
-// preSpec0930SecretPatterns is the default list every release before spec
-// 0.93.0 shipped (since #443). A corpus without a recorded policy was indexed
-// by such a release, so this list stands in for its unrecorded policy.
-var preSpec0930SecretPatterns = []string{
-	`AKIA[0-9A-Z]{16}`,
-	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
-	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
-	`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
-	`sk-[A-Za-z0-9-]{20,}`,
-	`[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}`,
-}
-
-// narrowedSecretPatterns maps a pattern to the older pattern it narrows: every
-// string the new pattern matches, the old one matches too. Each new pattern
-// keeps the old pattern's core as a literal suffix and only adds a left
-// boundary or a key-name prefix, so this holds by construction (spec 0.93.0).
-var narrowedSecretPatterns = map[string]string{
-	`(?i)(?:^|[^a-z0-9_-])(?:(?:[a-z0-9]+[_-])*(?:access|auth|api|app|bearer|secret|private|password|reset|session|refresh|personal|client|oauth|service|account|admin|deploy|webhook|install|invite|vault|ci|job|runner|registry|github|gh|gitlab|slack|npm|pypi|hf|bot)[_-]?)?token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`: `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-	`(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`: `sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
-	`(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}`:                   `sk-[A-Za-z0-9-]{20,}`,
-}
-
-// secretPolicySources returns the sorted pattern strings of a compiled set.
-func secretPolicySources(patterns []*regexp.Regexp) []string {
-	sources := make([]string, 0, len(patterns))
-	for _, rx := range patterns {
-		if rx == nil {
-			continue
-		}
-		sources = append(sources, rx.String())
-	}
-	sort.Strings(sources)
-	return sources
-}
-
-// secretPolicyIdentity is the fingerprint of the effective pattern set. The
-// order of the patterns does not change a verdict (any match withholds), so the
-// pattern strings are sorted before hashing; an operator who reorders the list
-// does not trigger a pass. The sorted list is JSON-encoded before hashing, so
-// the encoding is unambiguous: a pattern that contains a newline can never hash
-// the same as two patterns.
-func secretPolicyIdentity(patterns []*regexp.Regexp) string {
-	// Marshalling a []string cannot fail.
-	encoded, _ := json.Marshal(secretPolicySources(patterns))
-	sum := sha256.Sum256(encoded)
-	return "v1:" + hex.EncodeToString(sum[:])
-}
-
-// secretPolicyIsNarrower reports whether every pattern of active is in
-// previous or is a declared narrowing of a pattern in previous. Then a document
-// that previous did not match cannot match active.
-func secretPolicyIsNarrower(previous, active []string) bool {
-	known := make(map[string]struct{}, len(previous))
-	for _, p := range previous {
-		known[p] = struct{}{}
-	}
-	for _, p := range active {
-		if _, ok := known[p]; ok {
-			continue
-		}
-		if old, ok := narrowedSecretPatterns[p]; ok {
-			if _, had := known[old]; had {
-				continue
-			}
-		}
-		return false
-	}
-	return true
-}
-
 // secretPolicyStore is the optional store capability behind the re-evaluation.
 // A store without it keeps the previous behaviour.
 type secretPolicyStore interface {
 	SecretPolicyIdentity(ctx context.Context) (string, error)
 	SecretPolicyPatterns(ctx context.Context) ([]string, bool, error)
-	ResetForSecretPolicy(ctx context.Context, identity string, patterns []string, reevaluateIndexed bool) (int64, error)
+	SecretPolicyAllowPatterns(ctx context.Context) ([]string, bool, error)
+	ResetForSecretPolicy(ctx context.Context, identity string, patterns, allowPatterns []string, reevaluateIndexed bool) (int64, error)
 }
 
 // beginSecretPolicyReevaluation compares the recorded secret policy with the
@@ -137,40 +66,77 @@ type secretPolicyStore interface {
 // visited. A store failure is returned and fails the scan: a scan that could
 // not apply a changed policy must not report success, and the next scan tries
 // again because nothing was recorded.
-func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, patterns []*regexp.Regexp) error {
+func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *secretmatch.Matcher) error {
 	policyStore, ok := s.store.(secretPolicyStore)
 	if !ok {
 		return nil
 	}
-	active := secretPolicyIdentity(patterns)
+	activePolicy := matcher.Policy()
+	active := activePolicy.Identity()
 	recorded, err := policyStore.SecretPolicyIdentity(ctx)
 	if err != nil {
-		return fmt.Errorf("secret policy: read the recorded security.secret_patterns identity: %w", err)
+		return fmt.Errorf("secret policy: read the recorded secret policy identity: %w", err)
 	}
 	if recorded == active {
 		return nil
 	}
-	sources := secretPolicySources(patterns)
-	previous, known := preSpec0930SecretPatterns, true
-	if recorded != "" {
-		previous, known, err = policyStore.SecretPolicyPatterns(ctx)
-		if err != nil {
-			return fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
-		}
-	}
-	reevaluateIndexed := !known || !secretPolicyIsNarrower(previous, sources)
-	cleared, err := policyStore.ResetForSecretPolicy(ctx, active, sources, reevaluateIndexed)
+	previous, known, err := recordedSecretPolicy(ctx, policyStore, recorded, activePolicy)
 	if err != nil {
-		return fmt.Errorf("secret policy: reset documents for the changed security.secret_patterns: %w", err)
+		return err
+	}
+	reevaluateIndexed := !known || !secretmatch.IsNarrower(previous, activePolicy)
+	cleared, err := policyStore.ResetForSecretPolicy(ctx, active, activePolicy.Secret, activePolicy.Allow, reevaluateIndexed)
+	if err != nil {
+		return fmt.Errorf("secret policy: reset documents for the changed secret policy: %w", err)
 	}
 	scope := "withheld documents"
 	if reevaluateIndexed {
 		scope = "withheld and indexed documents"
 	}
 	s.getLogger().Printf(
-		"secret policy: security.secret_patterns changed since the last scan; %d %s (and the archives that hold them) will be read and evaluated again",
+		"secret policy: security.secret_patterns or security.secret_allow_patterns changed since the last scan; %d %s (and the archives that hold them) will be read and evaluated again",
 		cleared, scope)
 	return nil
+}
+
+// recordedSecretPolicy returns the policy the corpus was last evaluated
+// against. known is false when that policy cannot be proven, and then every
+// indexed document is read again.
+//
+// A corpus with no recorded identity was indexed by a release before spec
+// 0.93.0. Such a release recorded nothing, so the list it used is lost. When
+// the active policy is the shipped default, the corpus is taken to have used
+// the pre-0.93.0 defaults: the move from those defaults is a declared
+// narrowing, so only the withheld documents are read again. When the active
+// policy is a custom one, the old list may have lacked a rule that the active
+// list holds, so the previous policy is unknown.
+func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded string, active secretmatch.Policy) (secretmatch.Policy, bool, error) {
+	if recorded == "" {
+		if isShippedDefaultPolicy(active) {
+			return secretmatch.PreSpec0930DefaultPolicy(), true, nil
+		}
+		return secretmatch.Policy{}, false, nil
+	}
+	secret, secretKnown, err := policyStore.SecretPolicyPatterns(ctx)
+	if err != nil {
+		return secretmatch.Policy{}, false, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
+	}
+	allow, allowKnown, err := policyStore.SecretPolicyAllowPatterns(ctx)
+	if err != nil {
+		return secretmatch.Policy{}, false, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
+	}
+	return secretmatch.Policy{Secret: secret, Allow: allow}, secretKnown && allowKnown, nil
+}
+
+// isShippedDefaultPolicy reports whether the active policy is the shipped
+// default of both lists.
+func isShippedDefaultPolicy(active secretmatch.Policy) bool {
+	defaults := config.Default()
+	matcher, err := secretmatch.Compile(defaults.SecretPatterns, defaults.SecretAllowPatterns)
+	if err != nil {
+		return false
+	}
+	return matcher.Policy().Identity() == active.Identity()
 }
 
 // retireNewlyWithheld retires the representations of a document that its raw
