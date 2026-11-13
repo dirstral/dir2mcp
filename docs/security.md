@@ -134,10 +134,11 @@ effect when it answers:
   `related` also does not send matching seed text to the embedder, and a
   hosted reranker does not receive matching candidate text.
 - `ask` does not place a matching chunk in the prompt, and does not cite it.
-- `open_file` returns `FORBIDDEN` for matching text. It reads a source in
-  pieces, but it reaches the same decision as a check of the whole text: a
-  read boundary never releases text. When one decision needs more than
-  256 KiB of text past a boundary, `open_file` returns `FORBIDDEN`.
+- `open_file` checks the whole source before it returns any part of it, and
+  returns `FORBIDDEN` when the source matches. This is the same check ingest
+  makes on the same bytes. The read is bounded by `ingest.max_file_mb`. A
+  source over that cap returns `FILE_TOO_LARGE`: ingest never checked or
+  indexed it.
 - `annotate` and `transcribe` return `FORBIDDEN` for matching text.
 
 These tools also apply every shipped default secret pattern when your list

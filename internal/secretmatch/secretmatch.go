@@ -143,7 +143,7 @@ func (m *Matcher) Match(text []byte) bool {
 			continue
 		}
 		if cover == nil {
-			cover = newCoverIndex(m.allowSpans(text), -1)
+			cover = newCoverIndex(m.allowSpans(text))
 		}
 		for _, loc := range matches {
 			if !cover.covers(loc[0], loc[1]) {
@@ -179,64 +179,33 @@ func (m *Matcher) allowSpans(text []byte) [][]int {
 // the match end. A running maximum therefore never joins two spans into a
 // cover: the value it reports is the end of one span, and every span it looks
 // at starts at or before the match.
-//
-// A span that ends at uncertainEnd (when uncertainEnd >= 0) is kept out of
-// maxEnd and recorded in minUncertainStart instead: a streaming caller cannot
-// trust it until it has seen the bytes after it (see Stream).
 type coverIndex struct {
 	starts []int
 	maxEnd []int
-	// minUncertainStart[i] is the smallest start among the spans 0..i that end
-	// at uncertainEnd, or -1.
-	minUncertainStart []int
 }
 
-func newCoverIndex(spans [][]int, uncertainEnd int) *coverIndex {
+func newCoverIndex(spans [][]int) *coverIndex {
 	sorted := append([][]int(nil), spans...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i][0] < sorted[j][0] })
 	ci := &coverIndex{
-		starts:            make([]int, len(sorted)),
-		maxEnd:            make([]int, len(sorted)),
-		minUncertainStart: make([]int, len(sorted)),
+		starts: make([]int, len(sorted)),
+		maxEnd: make([]int, len(sorted)),
 	}
-	runEnd, runUncertain := -1, -1
+	runEnd := -1
 	for i, span := range sorted {
 		ci.starts[i] = span[0]
-		if uncertainEnd >= 0 && span[1] == uncertainEnd {
-			if runUncertain < 0 {
-				runUncertain = span[0]
-			}
-		} else if span[1] > runEnd {
+		if span[1] > runEnd {
 			runEnd = span[1]
 		}
 		ci.maxEnd[i] = runEnd
-		ci.minUncertainStart[i] = runUncertain
 	}
 	return ci
 }
 
-// last returns the index of the last span that starts at or before start, or
-// -1 when there is none.
-func (ci *coverIndex) last(start int) int {
-	return sort.Search(len(ci.starts), func(i int) bool { return ci.starts[i] > start }) - 1
-}
-
-// covers reports whether one certain span covers [start, end).
+// covers reports whether one allow span covers [start, end).
 func (ci *coverIndex) covers(start, end int) bool {
-	i := ci.last(start)
+	i := sort.Search(len(ci.starts), func(i int) bool { return ci.starts[i] > start }) - 1
 	return i >= 0 && ci.maxEnd[i] >= end
-}
-
-// uncertainCover returns the smallest start of an uncertain span that starts at
-// or before start, or -1. An uncertain span ends at the window end, and a
-// secret match always ends at or before the window end, so any such span
-// covers the match.
-func (ci *coverIndex) uncertainCover(start int) int {
-	i := ci.last(start)
-	if i < 0 {
-		return -1
-	}
-	return ci.minUncertainStart[i]
 }
 
 // Redact replaces every secret match in msg with "[REDACTED]". It ignores the

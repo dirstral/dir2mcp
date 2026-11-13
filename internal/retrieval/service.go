@@ -1,6 +1,7 @@
 package retrieval
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -3029,38 +3030,21 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 	return out, truncated, true, nil
 }
 
-// openFileFromResolvedPath serves the raw source of a text-native document. It
-// streams the source and retains at most one read budget of bytes, so memory
-// stays bounded by max_chars and not by the size of the file or object (issue
-// #690). The published tool contract is unchanged: a caller that asks for a
-// legitimate window still gets that window.
+// openFileFromResolvedPath serves the raw source of a text-native document.
 //
-// The secret policy applies to every byte the request reads, which is the
-// answer window, everything before it, and a fixed margin past it. Three
-// properties follow, and together they satisfy SPEC 15.4:
+// It reads the WHOLE source, bounded by the ingest.max_file_mb cap, and runs the
+// secret matcher (SPEC §7.2) over all of it before it selects or returns any
+// byte (SPEC §15.4: "before reading or returning any data"). The decision is
+// therefore exactly the decision secretmatch.Matcher.Match makes on the whole
+// text, which is the decision ingest makes on the same bytes: ingest also
+// checks a text source in full (#681) and also refuses a file above the cap at
+// discovery. There is no window boundary that could split a match, an allow
+// match or an anchor.
 //
-//  1. Every returned byte was scanned.
-//  2. The read always starts at the first byte of the source, so no answer can
-//     begin after an unscanned region. A caller cannot step over a secret to
-//     reach the text behind it.
-//  3. The scan always covers at least the head bytes that ingest samples
-//     (internal/ingest.secretScanSampleBytes).
-//
-// The buffered path scanned the whole source, so it also refused the head of a
-// document whose only secret sat far past the answer. Reproducing that would
-// mean reading the whole source on every request, which is the cost this fix
-// removes.
-//
-// #681 narrowed what property 3 buys. Ingest now scans a text source in FULL, so
-// a credential past the head sample withholds the whole document from the index;
-// it is no longer true that "a document ingest withholds can never be served
-// here". What still holds is the property SPEC 15.4 actually asks for: the tool
-// never returns the secret. Every byte it returns was scanned and found clean, so
-// the most a caller can obtain from a withheld document is a clean early window,
-// never the credential and never the text behind it. Closing that last gap would
-// require the whole-source read this fix removed, so it is a deliberate trade.
-// The derived-text path (openFileFromOCRCache) has no such gap: it reads its
-// whole cache file and scans all of it.
+// A source above the cap was never content-checked or indexed by ingest, so it
+// is refused here with FILE_TOO_LARGE (corpusfs.ErrObjectTooLarge, §14.4). The
+// read stops at cap+1 bytes, so memory and bandwidth stay bounded by the cap
+// (#690, #830); the span selection then retains at most one read budget.
 func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, span model.Span, maxChars int) (string, bool, error) {
 	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
@@ -3068,34 +3052,26 @@ func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusf
 	}
 	defer func() { _ = rc.Close() }()
 
-	scanner := newSecretScanner(secretPatterns)
-	source := &scanningReader{r: &ctxReader{ctx: ctx, r: rc}, scanner: scanner}
-
-	selection, selErr := selectSpan(source, kind, span, openFileReadBudgetBytes(maxChars))
-	// The buffered path refused a secret-bearing document before it looked at
-	// the span, so a secret outranks an unsatisfiable span. Keep that order:
-	// finish the scan before reporting that the span does not exist.
-	if selErr == nil || errors.Is(selErr, model.ErrDocTypeUnsupported) {
-		if marginErr := scanner.scanMargin(source); marginErr != nil {
-			return "", false, mapSourceReadError(marginErr)
-		}
+	capBytes := s.sourceReadCapBytes()
+	data, err := io.ReadAll(io.LimitReader(&ctxReader{ctx: ctx, r: rc}, capBytes+1))
+	if err != nil {
+		return "", false, err
 	}
+	if int64(len(data)) > capBytes {
+		return "", false, fmt.Errorf("%w: %s (cap %d bytes)", corpusfs.ErrObjectTooLarge, relPath, capBytes)
+	}
+	// A secret outranks an unsatisfiable span, as the buffered path did: the
+	// check runs before the span is selected.
+	if secretPatterns.Match(data) {
+		return "", false, model.ErrForbidden
+	}
+
+	selection, selErr := selectSpan(bytes.NewReader(data), kind, span, openFileReadBudgetBytes(maxChars))
 	if selErr != nil {
-		return "", false, mapSourceReadError(selErr)
+		return "", false, selErr
 	}
-
 	out, outTruncated := truncateRunesWithFlag(selection.text, maxChars)
 	return out, selection.truncated || outTruncated, nil
-}
-
-// mapSourceReadError converts a streaming read failure into the open_file error
-// contract. A secret match becomes the published ErrForbidden; every other
-// error passes through unchanged.
-func mapSourceReadError(err error) error {
-	if errors.Is(err, errSecretMatch) {
-		return model.ErrForbidden
-	}
-	return err
 }
 
 // MatchesSecret reports whether text matches the secret pattern set that

@@ -46,12 +46,12 @@ ingest:
 `ingest.max_file_mb` is the per-file size policy, and it is enforced as a bound on the
 reads themselves, not only as a check at discovery. Discovery refuses a file over it, and
 so does every read that follows: the document read, the subtitle sidecar, the
-object-store download, the multimodal media read, and the on-demand `annotate` /
-`transcribe` reads. A check only measures a file at one instant; a file that grows
-afterwards, or an object that serves more bytes than it listed, is caught by the read.
-(`open_file` answers a window rather than a whole file, so its raw-text read carries its
-own budget derived from `max_chars`; the cap still bounds the source read it needs to
-locate cached extracted text.)
+object-store download, the multimodal media read, the on-demand `annotate` /
+`transcribe` reads, and the `open_file` raw-text read. A check only measures a file at
+one instant; a file that grows afterwards, or an object that serves more bytes than it
+listed, is caught by the read. `open_file` reads the whole source, up to the cap, and
+checks all of it against the secret patterns before it returns a window. A source over
+the cap returns `FILE_TOO_LARGE`, because ingest never checked or indexed it either.
 
 During indexing a file over the cap is a **skip, not an error**: it keeps a visible
 `skipped` row with reason `size_cap`, it is counted in the skip breakdown `dir2mcp status`

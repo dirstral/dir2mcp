@@ -215,11 +215,11 @@ func TestSecretAllow_ServeTimeScreen(t *testing.T) {
 	}
 }
 
-// TestSecretAllow_OpenFileStreamingWindows pins the windowed open_file scan:
-// the allow list is applied on the same window as the secret patterns, a
-// credential that crosses the 64 KiB read boundary is still refused, and a
-// redirect link at the same place is still served.
-func TestSecretAllow_OpenFileStreamingWindows(t *testing.T) {
+// TestSecretAllow_OpenFileReadBoundaries pins the open_file check around the
+// 64 KiB read size: the allow list applies to the whole source, a credential
+// that crosses a read boundary is still refused, and a redirect link at the
+// same place is still served.
+func TestSecretAllow_OpenFileReadBoundaries(t *testing.T) {
 	tok := "to" + "ken"
 	const boundary = 64 << 10
 	build := func(payload string, offset int) []byte {

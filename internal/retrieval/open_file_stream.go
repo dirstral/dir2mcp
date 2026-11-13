@@ -9,55 +9,24 @@ import (
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/model"
-	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
-// This file holds the bounded read path for open_file (issue #690).
+// This file holds the span selectors for open_file (issue #690).
 //
 // open_file publishes a bounded answer: max_chars is clamped to 50000 runes.
-// The raw-source path used to read the COMPLETE local file or S3 object into
-// memory, convert the full byte slice to a string, scan that string, slice it,
-// and only then truncate. A source that grew after indexing, or a large remote
-// text file, therefore cost unbounded memory for a strictly bounded answer.
-//
-// The selectors below stream the source instead. Each one retains at most one
-// read budget of bytes, and it discards every other byte after it has looked at
-// it. Peak memory is therefore a function of max_chars, not of source size.
-// The shape follows internal/protocol.ReadLimitedResponseBody (PR #803): read
-// through io.LimitReader, keep one unit past the cap so an overflow is visible,
-// and give the caller a clear result instead of a confusing failure.
+// The caller reads the source once, bounded by ingest.max_file_mb, and checks
+// all of it against the secret policy (see openFileFromResolvedPath). The
+// selectors below then stream over those bytes and retain at most one read
+// budget, so the answer itself never costs more than one budget, and no line,
+// page or transcript selection builds a second copy of the source.
 
 const (
 	// openFileReadChunkBytes is the fixed working buffer that moves source
-	// bytes through the selectors and the secret scanner. It bounds the
+	// bytes through the selectors. It bounds the
 	// per-read allocation, and it is large enough that one syscall serves many
 	// lines of ordinary text.
 	openFileReadChunkBytes = 64 << 10
-
-	// secretScanMarginBytes is how far past the answer the scanner keeps
-	// reading. The margin covers a secret that starts inside the answer window
-	// and continues past its end, and it holds the scan to a fixed cost instead
-	// of the size of the source.
-	//
-	// The value matches the ingest-time head sample (64 KiB, see
-	// internal/ingest.secretScanSampleBytes). open_file always reads from the
-	// first byte of the source, so every request scans at least the same head
-	// bytes that ingest scans.
-	//
-	// Since #681 that head sample is ingest's FLOOR, not its whole policy: a text
-	// source is scanned in full at ingest time. So a document ingest withholds can
-	// still have a clean early window served here. What SPEC 15.4 requires is
-	// preserved either way, because every byte this tool returns was scanned and
-	// found clean: the credential itself is never served, and neither is anything
-	// behind it. See the note on openFileFromResolvedPath.
-	secretScanMarginBytes = 64 << 10
 )
-
-// errSecretMatch reports that a secret pattern matched the source. It travels
-// out of the reader, so a match stops the read at once instead of after the
-// whole source has moved. The caller maps it to model.ErrForbidden, which is
-// the error the tool contract publishes.
-var errSecretMatch = errors.New("retrieval: source matches a secret pattern")
 
 // openFileReadBudgetBytes returns the number of source bytes that a selector
 // may retain to build a maxChars-rune answer.
@@ -100,130 +69,6 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return c.r.Read(p)
-}
-
-// secretScanner applies the configured secret patterns to a stream instead of
-// to one buffered string. It feeds every byte to a secretmatch.Stream, which
-// keeps a small overlap window, so every byte that open_file reads is covered
-// while memory stays flat.
-//
-// The Stream reaches the decision the whole-text matcher reaches (SPEC §7.2):
-// it defers an allow cancellation that depends on bytes past the window (an
-// allow match or a generic token match that ends at the window end) and never
-// cuts its kept text inside a match. A read boundary therefore cannot release
-// bytes that the whole-text matcher refuses. See secretmatch.Stream for the
-// one fail-closed drift that remains (a secret pattern anchored with ^ or $).
-type secretScanner struct {
-	matcher *secretmatch.Matcher
-	stream  *secretmatch.Stream
-	// closed reports that the source ended and the stream made its final
-	// decision.
-	closed bool
-}
-
-func newSecretScanner(matcher *secretmatch.Matcher) *secretScanner {
-	sc := &secretScanner{matcher: matcher}
-	if matcher.Enabled() {
-		sc.stream = matcher.NewStream()
-	}
-	return sc
-}
-
-// enabled reports whether any pattern is configured. With no pattern the read
-// stops as soon as the answer is complete, so an object store never sends the
-// bytes past the requested window.
-func (sc *secretScanner) enabled() bool {
-	return sc != nil && sc.stream != nil
-}
-
-// scan feeds one chunk to the stream.
-func (sc *secretScanner) scan(p []byte) error {
-	if !sc.enabled() || len(p) == 0 {
-		return nil
-	}
-	if sc.stream.Write(p) {
-		return errSecretMatch
-	}
-	return nil
-}
-
-// finish makes the final decision at the end of the source. Every deferred
-// decision is made here, with the end of the window as the end of the text.
-func (sc *secretScanner) finish() error {
-	if !sc.enabled() || sc.closed {
-		return nil
-	}
-	sc.closed = true
-	if sc.stream.Close() {
-		return errSecretMatch
-	}
-	return nil
-}
-
-// scanMargin reads secretScanMarginBytes past the answer and keeps none of
-// them, so a secret that begins inside the answer window and runs past its end
-// is still matched. With no pattern configured the function returns at once and
-// those bytes stay unread.
-//
-// When the margin ends while the stream still defers a decision (an allow
-// match runs on past the margin), the scan reads on until the stream decides.
-// The stream bounds the bytes it keeps (secretmatch.StreamMaxRetainBytes) and
-// reports a match when a decision needs more, so this read is bounded too.
-func (sc *secretScanner) scanMargin(r io.Reader) error {
-	if !sc.enabled() {
-		return nil
-	}
-	// io.Discard reads through a pooled buffer, so the margin keeps no bytes
-	// and allocates nothing per chunk.
-	if _, err := io.Copy(io.Discard, io.LimitReader(r, secretScanMarginBytes)); err != nil {
-		return err
-	}
-	buf := make([]byte, openFileReadChunkBytes)
-	idle := 0
-	for !sc.closed && sc.stream.Pending() {
-		n, err := r.Read(buf)
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			idle = 0
-			continue
-		}
-		// A reader that returns no bytes and no error again and again never
-		// lets the stream decide.
-		if idle++; idle >= 100 {
-			return io.ErrNoProgress
-		}
-	}
-	return nil
-}
-
-// scanningReader feeds every byte that a selector reads to the secret scanner
-// before the selector sees it. The scanner therefore covers the stream in
-// order, across both the selection phase and the margin phase. At the end of
-// the source it makes the scanner's final decision, so a deferred match turns
-// the end of the source into errSecretMatch.
-type scanningReader struct {
-	r       io.Reader
-	scanner *secretScanner
-}
-
-func (s *scanningReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 {
-		if scanErr := s.scanner.scan(p[:n]); scanErr != nil {
-			return n, scanErr
-		}
-	}
-	if errors.Is(err, io.EOF) {
-		if scanErr := s.scanner.finish(); scanErr != nil {
-			return n, scanErr
-		}
-	}
-	return n, err
 }
 
 // boundedBuilder collects selected text up to a hard byte limit. It reports
