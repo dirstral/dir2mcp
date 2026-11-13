@@ -34,13 +34,6 @@ const (
 	// lines of ordinary text.
 	openFileReadChunkBytes = 64 << 10
 
-	// secretScanOverlapBytes is the number of trailing bytes that carry from
-	// one scanned chunk into the next. A secret that lands on a chunk boundary
-	// is still matched, because the scanner always sees the boundary inside one
-	// window. 4 KiB is far longer than the shortest match of any credential
-	// pattern the product ships or an operator writes.
-	secretScanOverlapBytes = 4 << 10
-
 	// secretScanMarginBytes is how far past the answer the scanner keeps
 	// reading. The margin covers a secret that starts inside the answer window
 	// and continues past its end, and it holds the scan to a fixed cost instead
@@ -110,74 +103,72 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 }
 
 // secretScanner applies the configured secret patterns to a stream instead of
-// to one buffered string. It keeps only a small overlap window, so every byte
-// that open_file reads is covered while memory stays flat.
+// to one buffered string. It feeds every byte to a secretmatch.Stream, which
+// keeps a small overlap window, so every byte that open_file reads is covered
+// while memory stays flat.
 //
-// One property differs from a whole-string match: a pattern that is anchored to
-// the start or the end of the text (^ or $ without the multi-line flag) sees a
-// chunk boundary as a text boundary. The drift is fail-closed, because it can
-// only refuse content that a whole-string match would have served. It never
-// serves content that a whole-string match would have refused.
+// The Stream reaches the decision the whole-text matcher reaches (SPEC §7.2):
+// it defers an allow cancellation that depends on bytes past the window (an
+// allow match or a generic token match that ends at the window end) and never
+// cuts its kept text inside a match. A read boundary therefore cannot release
+// bytes that the whole-text matcher refuses. See secretmatch.Stream for the
+// one fail-closed drift that remains (a secret pattern anchored with ^ or $).
 type secretScanner struct {
 	matcher *secretmatch.Matcher
-	// tail holds the last bytes of the previous chunk, and window joins that
-	// tail to the current chunk. Both buffers are reused across chunks, so a
-	// scan of a large source allocates nothing per chunk.
-	tail   []byte
-	window []byte
+	stream  *secretmatch.Stream
+	// closed reports that the source ended and the stream made its final
+	// decision.
+	closed bool
 }
 
 func newSecretScanner(matcher *secretmatch.Matcher) *secretScanner {
-	return &secretScanner{matcher: matcher}
+	sc := &secretScanner{matcher: matcher}
+	if matcher.Enabled() {
+		sc.stream = matcher.NewStream()
+	}
+	return sc
 }
 
 // enabled reports whether any pattern is configured. With no pattern the read
 // stops as soon as the answer is complete, so an object store never sends the
 // bytes past the requested window.
 func (sc *secretScanner) enabled() bool {
-	return sc != nil && sc.matcher.Enabled()
+	return sc != nil && sc.stream != nil
 }
 
-// scan checks one chunk together with the tail of the previous chunk.
-//
-// The allow list (SPEC §7.2) is applied on the same window as the secret
-// patterns, so an allow match cancels only a secret match that it covers in
-// that window. A secret match that crosses the chunk boundary is inside the
-// next window whole (the overlap is far longer than a credential), and is
-// judged there. When the overlap cuts an allow match short at the start of a
-// window, a secret match inside it can look uncancelled. That drift refuses
-// content and never serves it, so it is fail-closed like the anchor drift
-// above.
+// scan feeds one chunk to the stream.
 func (sc *secretScanner) scan(p []byte) error {
 	if !sc.enabled() || len(p) == 0 {
 		return nil
 	}
-	window := p
-	if len(sc.tail) > 0 {
-		sc.window = append(sc.window[:0], sc.tail...)
-		sc.window = append(sc.window, p...)
-		window = sc.window
-	}
-	if sc.matcher.Match(window) {
+	if sc.stream.Write(p) {
 		return errSecretMatch
 	}
-	sc.keepTail(window)
 	return nil
 }
 
-// keepTail stores the last secretScanOverlapBytes bytes of the scanned window.
-func (sc *secretScanner) keepTail(window []byte) {
-	keep := window
-	if len(keep) > secretScanOverlapBytes {
-		keep = keep[len(keep)-secretScanOverlapBytes:]
+// finish makes the final decision at the end of the source. Every deferred
+// decision is made here, with the end of the window as the end of the text.
+func (sc *secretScanner) finish() error {
+	if !sc.enabled() || sc.closed {
+		return nil
 	}
-	sc.tail = append(sc.tail[:0], keep...)
+	sc.closed = true
+	if sc.stream.Close() {
+		return errSecretMatch
+	}
+	return nil
 }
 
 // scanMargin reads secretScanMarginBytes past the answer and keeps none of
 // them, so a secret that begins inside the answer window and runs past its end
 // is still matched. With no pattern configured the function returns at once and
 // those bytes stay unread.
+//
+// When the margin ends while the stream still defers a decision (an allow
+// match runs on past the margin), the scan reads on until the stream decides.
+// The stream bounds the bytes it keeps (secretmatch.StreamMaxRetainBytes) and
+// reports a match when a decision needs more, so this read is bounded too.
 func (sc *secretScanner) scanMargin(r io.Reader) error {
 	if !sc.enabled() {
 		return nil
@@ -187,12 +178,34 @@ func (sc *secretScanner) scanMargin(r io.Reader) error {
 	if _, err := io.Copy(io.Discard, io.LimitReader(r, secretScanMarginBytes)); err != nil {
 		return err
 	}
+	buf := make([]byte, openFileReadChunkBytes)
+	idle := 0
+	for !sc.closed && sc.stream.Pending() {
+		n, err := r.Read(buf)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			idle = 0
+			continue
+		}
+		// A reader that returns no bytes and no error again and again never
+		// lets the stream decide.
+		if idle++; idle >= 100 {
+			return io.ErrNoProgress
+		}
+	}
 	return nil
 }
 
 // scanningReader feeds every byte that a selector reads to the secret scanner
 // before the selector sees it. The scanner therefore covers the stream in
-// order, across both the selection phase and the margin phase.
+// order, across both the selection phase and the margin phase. At the end of
+// the source it makes the scanner's final decision, so a deferred match turns
+// the end of the source into errSecretMatch.
 type scanningReader struct {
 	r       io.Reader
 	scanner *secretScanner
@@ -202,6 +215,11 @@ func (s *scanningReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if n > 0 {
 		if scanErr := s.scanner.scan(p[:n]); scanErr != nil {
+			return n, scanErr
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		if scanErr := s.scanner.finish(); scanErr != nil {
 			return n, scanErr
 		}
 	}

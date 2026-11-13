@@ -20,6 +20,7 @@ package secretmatch
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -128,10 +129,9 @@ func (m *Matcher) Match(text []byte) bool {
 	if !m.Enabled() || len(text) == 0 {
 		return false
 	}
-	var allowSpans [][]int
-	allowDone := false
+	var cover *coverIndex
 	for _, rx := range m.secret {
-		if len(m.allow) == 0 || rx.String() != GenericTokenPattern {
+		if !m.cancellable(rx) {
 			// No allow match can cancel this pattern: one match is enough.
 			if rx.Match(text) {
 				return true
@@ -142,17 +142,23 @@ func (m *Matcher) Match(text []byte) bool {
 		if len(matches) == 0 {
 			continue
 		}
-		if !allowDone {
-			allowSpans = m.allowSpans(text)
-			allowDone = true
+		if cover == nil {
+			cover = newCoverIndex(m.allowSpans(text), -1)
 		}
 		for _, loc := range matches {
-			if !covered(allowSpans, loc[0], loc[1]) {
+			if !cover.covers(loc[0], loc[1]) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// cancellable reports whether an allow match can cancel a match of rx: only
+// the generic bearer-token default qualifies, and only when an allow list is
+// set.
+func (m *Matcher) cancellable(rx *regexp.Regexp) bool {
+	return len(m.allow) > 0 && rx.String() == GenericTokenPattern
 }
 
 // allowSpans returns every match of every allow pattern in text.
@@ -164,14 +170,73 @@ func (m *Matcher) allowSpans(text []byte) [][]int {
 	return spans
 }
 
-// covered reports whether one allow span covers [start, end).
-func covered(spans [][]int, start, end int) bool {
-	for _, span := range spans {
-		if span[0] <= start && end <= span[1] {
-			return true
-		}
+// coverIndex answers "does ONE allow span cover [start, end)?" in O(log n).
+//
+// The spans are sorted by start once. maxEnd[i] is the largest end among the
+// spans 0..i, so for a secret match at start, maxEnd at the last span with
+// span.start <= start is the end of one single span that starts at or before
+// the match. That span covers the match exactly when its end is at or after
+// the match end. A running maximum therefore never joins two spans into a
+// cover: the value it reports is the end of one span, and every span it looks
+// at starts at or before the match.
+//
+// A span that ends at uncertainEnd (when uncertainEnd >= 0) is kept out of
+// maxEnd and recorded in minUncertainStart instead: a streaming caller cannot
+// trust it until it has seen the bytes after it (see Stream).
+type coverIndex struct {
+	starts []int
+	maxEnd []int
+	// minUncertainStart[i] is the smallest start among the spans 0..i that end
+	// at uncertainEnd, or -1.
+	minUncertainStart []int
+}
+
+func newCoverIndex(spans [][]int, uncertainEnd int) *coverIndex {
+	sorted := append([][]int(nil), spans...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i][0] < sorted[j][0] })
+	ci := &coverIndex{
+		starts:            make([]int, len(sorted)),
+		maxEnd:            make([]int, len(sorted)),
+		minUncertainStart: make([]int, len(sorted)),
 	}
-	return false
+	runEnd, runUncertain := -1, -1
+	for i, span := range sorted {
+		ci.starts[i] = span[0]
+		if uncertainEnd >= 0 && span[1] == uncertainEnd {
+			if runUncertain < 0 {
+				runUncertain = span[0]
+			}
+		} else if span[1] > runEnd {
+			runEnd = span[1]
+		}
+		ci.maxEnd[i] = runEnd
+		ci.minUncertainStart[i] = runUncertain
+	}
+	return ci
+}
+
+// last returns the index of the last span that starts at or before start, or
+// -1 when there is none.
+func (ci *coverIndex) last(start int) int {
+	return sort.Search(len(ci.starts), func(i int) bool { return ci.starts[i] > start }) - 1
+}
+
+// covers reports whether one certain span covers [start, end).
+func (ci *coverIndex) covers(start, end int) bool {
+	i := ci.last(start)
+	return i >= 0 && ci.maxEnd[i] >= end
+}
+
+// uncertainCover returns the smallest start of an uncertain span that starts at
+// or before start, or -1. An uncertain span ends at the window end, and a
+// secret match always ends at or before the window end, so any such span
+// covers the match.
+func (ci *coverIndex) uncertainCover(start int) int {
+	i := ci.last(start)
+	if i < 0 {
+		return -1
+	}
+	return ci.minUncertainStart[i]
 }
 
 // Redact replaces every secret match in msg with "[REDACTED]". It ignores the
