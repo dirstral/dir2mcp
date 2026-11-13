@@ -129,93 +129,115 @@ func (s *Stream) Close() bool {
 	return s.matched
 }
 
-func (s *Stream) judge(final bool) {
-	text := s.buf
-	n := len(text)
-	atStart := s.base == 0
-	var intervals [][]int
-	var allowSpans [][]int
-	allowDone := false
-	pendStart := -1
+// windowState is what one window judgement found.
+type windowState struct {
+	text      []byte
+	atStart   bool
+	final     bool
+	allow     [][]int
+	allowDone bool
+	// intervals holds the generic token matches; the cut must not cross them.
+	intervals [][]int
+	// pendStart is the earliest position a deferred decision needs, or -1.
+	pendStart int
+}
 
+func (s *Stream) judge(final bool) {
+	w := &windowState{text: s.buf, atStart: s.base == 0, final: final, pendStart: -1}
 	for _, rx := range s.m.secret {
 		if !s.m.cancellable(rx) {
-			if s.uncancellableMatch(rx, text, atStart) {
+			if s.uncancellableMatch(rx, w.text, w.atStart) {
 				s.matched = true
 				return
 			}
 			continue
 		}
-		matches := rx.FindAllIndex(text, -1)
-		if len(matches) == 0 {
-			continue
+		if s.judgeGeneric(rx, w) {
+			s.matched = true
+			return
 		}
-		if !allowDone {
-			allowSpans = s.trustedAllowSpans(text, atStart)
-			allowDone = true
-		}
-		uncertainEnd := n
-		if final {
-			uncertainEnd = -1
-		}
-		cover := newCoverIndex(allowSpans, uncertainEnd)
-		for _, loc := range matches {
-			if cover.covers(loc[0], loc[1]) {
-				continue
-			}
-			if final {
-				s.matched = true
-				return
-			}
-			// Not covered yet. Bytes after the window can still complete an
-			// allow match that covers it, or end an allow match that covers it
-			// now at the window end. Defer, and keep enough text before the
-			// match for an allow match that starts before it.
-			start := loc[0] - StreamOverlapBytes
-			if start < 0 {
-				start = 0
-			}
-			if u := cover.uncertainCover(loc[0]); u >= 0 && u < start {
-				start = u
-			}
-			if pendStart < 0 || start < pendStart {
-				pendStart = start
-			}
-		}
-		intervals = append(intervals, matches...)
 	}
-	s.pending = pendStart >= 0
+	s.pending = w.pendStart >= 0
 	if final {
 		return
 	}
-	if !allowDone && len(s.m.allow) > 0 {
+	s.keepTail(w)
+}
+
+// judgeGeneric judges the matches of the generic token pattern rx in the
+// window. It returns true on a match that no allow match can cancel, and
+// otherwise records the matches and any deferred decision in w.
+func (s *Stream) judgeGeneric(rx *regexp.Regexp, w *windowState) bool {
+	matches := rx.FindAllIndex(w.text, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	if !w.allowDone {
+		w.allow = s.trustedAllowSpans(w.text, w.atStart)
+		w.allowDone = true
+	}
+	uncertainEnd := len(w.text)
+	if w.final {
+		uncertainEnd = -1
+	}
+	cover := newCoverIndex(w.allow, uncertainEnd)
+	for _, loc := range matches {
+		if cover.covers(loc[0], loc[1]) {
+			continue
+		}
+		if w.final {
+			return true
+		}
+		// Not covered yet. Bytes after the window can still complete an allow
+		// match that covers it, or end an allow match that covers it now at the
+		// window end. Defer, and keep enough text before the match for an allow
+		// match that starts before it.
+		start := loc[0] - StreamOverlapBytes
+		if start < 0 {
+			start = 0
+		}
+		if u := cover.uncertainCover(loc[0]); u >= 0 && u < start {
+			start = u
+		}
+		if w.pendStart < 0 || start < w.pendStart {
+			w.pendStart = start
+		}
+	}
+	w.intervals = append(w.intervals, matches...)
+	return false
+}
+
+// keepTail keeps the text the next window needs: the last
+// StreamOverlapBytes, moved back so that no match is cut and every deferred
+// decision keeps its text. When that is more than maxRetain, it reports a
+// match.
+func (s *Stream) keepTail(w *windowState) {
+	n := len(w.text)
+	if !w.allowDone && len(s.m.allow) > 0 {
 		// The kept text must not cut an allow match either, so the next window
 		// sees it from its real start.
-		allowSpans = s.trustedAllowSpans(text, atStart)
+		w.allow = s.trustedAllowSpans(w.text, w.atStart)
 	}
-	intervals = append(intervals, allowSpans...)
-
 	cut := n - StreamOverlapBytes
 	if cut < 0 {
 		cut = 0
 	}
-	if pendStart >= 0 && pendStart < cut {
-		cut = pendStart
+	if w.pendStart >= 0 && w.pendStart < cut {
+		cut = w.pendStart
 	}
-	cut = safeCut(intervals, cut)
+	cut = safeCut(append(w.intervals, w.allow...), cut)
 	if n-cut > s.maxRetain {
 		s.matched = true
 		return
 	}
 	s.allowAtZero = false
-	for _, span := range allowSpans {
-		if span[0] == cut {
-			s.allowAtZero = true
-			break
+	if cut > 0 || !w.atStart {
+		for _, span := range w.allow {
+			if span[0] == cut {
+				s.allowAtZero = true
+				break
+			}
 		}
-	}
-	if cut == 0 && atStart {
-		s.allowAtZero = false
 	}
 	kept := copy(s.buf, s.buf[cut:])
 	s.buf = s.buf[:kept]

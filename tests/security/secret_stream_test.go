@@ -142,28 +142,7 @@ func TestSecretStream_RandomBoundariesEqualWholeText(t *testing.T) {
 	matchers := []*secretmatch.Matcher{defaults, anchored, suffix}
 	var hits, misses int
 	for trial := 0; trial < 120; trial++ {
-		var b strings.Builder
-		if rng.Intn(5) == 0 {
-			// A text that is one allow match for the anchored pattern, or one
-			// that runs on past it.
-			b.WriteString(tok + "=" + strings.Repeat("A", 1+rng.Intn(150000)))
-			if rng.Intn(2) == 0 {
-				b.WriteString("!")
-			}
-		} else {
-			count := 1 + rng.Intn(12)
-			for i := 0; i < count; i++ {
-				idx := benign[rng.Intn(len(benign))]
-				if rng.Intn(4) == 0 {
-					idx = rng.Intn(len(pieces))
-				}
-				b.WriteString(pieces[idx])
-				if rng.Intn(3) == 0 {
-					b.WriteString(strings.Repeat("filler text ", rng.Intn(800)))
-				}
-			}
-		}
-		text := []byte(b.String())
+		text := randomSecretText(rng, tok, pieces, benign)
 		for i, m := range matchers {
 			want := m.Match(text)
 			if want {
@@ -249,4 +228,30 @@ func BenchmarkSecretMatch_ManyAllowedLinks(b *testing.B) {
 			b.Fatal("matched")
 		}
 	}
+}
+
+// randomSecretText builds one random text: either a run that is one allow
+// match for the anchored pattern (or runs on past it), or a mix of pieces with
+// filler between them.
+func randomSecretText(rng *rand.Rand, tok string, pieces []string, benign []int) []byte {
+	var b strings.Builder
+	if rng.Intn(5) == 0 {
+		b.WriteString(tok + "=" + strings.Repeat("A", 1+rng.Intn(150000)))
+		if rng.Intn(2) == 0 {
+			b.WriteString("!")
+		}
+		return []byte(b.String())
+	}
+	count := 1 + rng.Intn(12)
+	for i := 0; i < count; i++ {
+		idx := benign[rng.Intn(len(benign))]
+		if rng.Intn(4) == 0 {
+			idx = rng.Intn(len(pieces))
+		}
+		b.WriteString(pieces[idx])
+		if rng.Intn(3) == 0 {
+			b.WriteString(strings.Repeat("filler text ", rng.Intn(800)))
+		}
+	}
+	return []byte(b.String())
 }

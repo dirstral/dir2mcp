@@ -3762,17 +3762,22 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if !ok {
 		return s.diversifyAndTruncate(fused, k)
 	}
+	return s.diversifyAndTruncate(appendUnscoredTail(out, cand, scored, fused, poolLen), k)
+}
+
+// appendUnscoredTail sorts the reranked hits (relevance desc, then chunk_id
+// asc) and appends every candidate the provider did not score, in fused order,
+// so rerank only reorders and never returns fewer than k when more were
+// available (SPEC §9.1.1 "no result loss"). Two sources feed this tail: pool
+// members the provider left out of its response (it may cap the response at
+// top_n), then fused candidates beyond the pool of poolLen.
+func appendUnscoredTail(out, cand []model.SearchHit, scored []bool, fused []model.SearchHit, poolLen int) []model.SearchHit {
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
 			return out[i].Score > out[j].Score
 		}
 		return out[i].ChunkID < out[j].ChunkID
 	})
-	// Preserve every candidate the provider did not score, in fused order, so
-	// rerank only reorders and never returns fewer than k when more were
-	// available (SPEC §9.1.1 "no result loss"). Two sources feed this tail:
-	// pool members the provider left out of its response (it may cap the
-	// response at top_n), then fused candidates beyond the pool.
 	for i, h := range cand {
 		if !scored[i] {
 			out = append(out, h)
@@ -3781,7 +3786,7 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if len(fused) > poolLen {
 		out = append(out, fused[poolLen:]...)
 	}
-	return s.diversifyAndTruncate(out, k)
+	return out
 }
 
 // rerankedHits maps a provider response onto the candidate pool that was sent
