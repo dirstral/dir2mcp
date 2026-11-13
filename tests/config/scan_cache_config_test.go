@@ -79,3 +79,34 @@ func TestScanCache_EnvOverride(t *testing.T) {
 		t.Fatal("DIR2MCP_INGEST_SCAN_CACHE=true did not enable IngestScanCache")
 	}
 }
+
+// TestDiscoveryWorkers_DefaultLoadAndBounds pins ingest.discovery_workers
+// (SPEC §7.1, 0.94.0, #1159): default 1 (sequential), the nested key loads and
+// round-trips, 0 is the default, and anything outside 0-64 is CONFIG_INVALID.
+func TestDiscoveryWorkers_DefaultLoadAndBounds(t *testing.T) {
+	if got := config.Default().IngestDiscoveryWorkers; got != 1 {
+		t.Fatalf("default ingest.discovery_workers = %d, want 1", got)
+	}
+	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	if err := os.WriteFile(path, []byte("ingest:\n  discovery_workers: 16\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile(path)
+	if err != nil || cfg.IngestDiscoveryWorkers != 16 {
+		t.Fatalf("nested key: workers=%d err=%v, want 16", cfg.IngestDiscoveryWorkers, err)
+	}
+	saved := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	if err := config.SaveFile(saved, cfg); err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+	if again, err := config.LoadFile(saved); err != nil || again.IngestDiscoveryWorkers != 16 {
+		t.Fatalf("round trip: workers=%d err=%v, want 16", again.IngestDiscoveryWorkers, err)
+	}
+	for n, ok := range map[int]bool{0: true, 1: true, 64: true, -1: false, 65: false} {
+		c := config.Default()
+		c.IngestDiscoveryWorkers = n
+		if err := c.Validate(); (err == nil) != ok {
+			t.Fatalf("discovery_workers=%d: Validate err=%v, want ok=%v", n, err, ok)
+		}
+	}
+}

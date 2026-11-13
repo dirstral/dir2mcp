@@ -1350,6 +1350,7 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options := DefaultDiscoverOptions()
 	options.UseGitIgnore = cfg.IngestGitignore
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
+	options.Workers = cfg.IngestDiscoveryWorkers
 	// One resolved list for the scan, the watcher, and the S3 lister (#773).
 	options.ExcludeDirs = append([]string(nil), cfg.IngestExcludeDirs...)
 	// One resolver for the cap as well (#682), so discovery, the source reads, the

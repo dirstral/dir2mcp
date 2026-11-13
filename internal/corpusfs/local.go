@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -79,6 +80,8 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 	rootResolved := ResolveRoot(absRoot)
 
 	files := make([]DiscoveredFile, 0, 256)
+	walkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	walker := discoverWalker{
 		rootAbs:      absRoot,
 		rootResolved: rootResolved,
@@ -86,8 +89,15 @@ func (l *LocalFS) Walk(ctx context.Context, _ string, opts Options) ([]Discovere
 		excluded:     ResolveExcludedDirs(opts.ExcludeDirs),
 		files:        &files,
 		visitedDirs:  map[string]struct{}{rootResolved: {}},
+		cancel:       cancel,
 	}
-	if err := walker.walkDir(ctx, absRoot, "", nil); err != nil {
+	if opts.Workers > 1 && !opts.FollowSymlinks {
+		walker.walkParallel(walkCtx, absRoot, opts.Workers)
+		err = nil
+	} else {
+		err = walker.walkDir(walkCtx, absRoot, "", nil)
+	}
+	if err := walker.walkErr(err); err != nil {
 		return nil, err
 	}
 
@@ -215,6 +225,137 @@ type discoverWalker struct {
 	excluded     ExcludedDirSet
 	files        *[]DiscoveredFile
 	visitedDirs  map[string]struct{}
+
+	// Parallel walk (Options.Workers > 1). Workers take directories from a
+	// shared queue; a directory's subdirectories go back on the queue instead
+	// of being walked recursively, so every worker stays busy until the tree is
+	// done, whatever its shape. parallel is false for the sequential walk. mu
+	// guards files, visitedDirs, the caller's hooks and the scan cache, so a
+	// hook never runs concurrently with itself. The first error of any worker
+	// cancels the rest.
+	parallel bool
+	qmu      sync.Mutex
+	qcond    *sync.Cond
+	queue    []dirTask
+	pending  int // queued plus in-progress tasks
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	errOnce  sync.Once
+	firstErr error
+}
+
+// dirTask is one directory waiting for a parallel worker.
+type dirTask struct {
+	absDir, relDir string
+	rules          []gitIgnoreRule
+}
+
+// addFile records a discovered file. Safe for concurrent readers.
+func (w *discoverWalker) addFile(f DiscoveredFile) {
+	w.mu.Lock()
+	*w.files = append(*w.files, f)
+	w.mu.Unlock()
+}
+
+// claimDir marks dir visited and reports whether this call claimed it (false:
+// another path already walks it). Safe for concurrent readers.
+func (w *discoverWalker) claimDir(dir string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.visitedDirs[dir]; ok {
+		return false
+	}
+	w.visitedDirs[dir] = struct{}{}
+	return true
+}
+
+// fail records the first error of a parallel reader and cancels the walk.
+func (w *discoverWalker) fail(err error) {
+	w.errOnce.Do(func() {
+		w.firstErr = err
+		w.cancel()
+	})
+}
+
+// walkErr is the walk's outcome once every reader is done: a reader's error
+// wins over the cancellation it caused in the others.
+func (w *discoverWalker) walkErr(inline error) error {
+	if w.firstErr != nil {
+		return w.firstErr
+	}
+	return inline
+}
+
+// descend walks a claimed subdirectory: recursively in the sequential walk,
+// or as a queued task for the parallel workers.
+func (w *discoverWalker) descend(ctx context.Context, absDir, relDir string, rules []gitIgnoreRule) error {
+	if w.parallel {
+		w.enqueue(dirTask{absDir: absDir, relDir: relDir, rules: rules})
+		return nil
+	}
+	return w.walkDir(ctx, absDir, relDir, rules)
+}
+
+// walkParallel runs workers that each list one directory at a time until no
+// directory is queued or being listed. Errors go through fail.
+func (w *discoverWalker) walkParallel(ctx context.Context, absRoot string, workers int) {
+	w.parallel = true
+	w.qcond = sync.NewCond(&w.qmu)
+	w.enqueue(dirTask{absDir: absRoot})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				task, ok := w.dequeue()
+				if !ok {
+					return
+				}
+				if err := w.walkDir(ctx, task.absDir, task.relDir, task.rules); err != nil {
+					w.fail(err)
+				}
+				w.taskDone()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func (w *discoverWalker) enqueue(task dirTask) {
+	w.qmu.Lock()
+	w.queue = append(w.queue, task)
+	w.pending++
+	w.qmu.Unlock()
+	w.qcond.Signal()
+}
+
+// dequeue takes the most recently queued directory (depth first, so the queue
+// stays small) and reports false once nothing is queued or in progress.
+func (w *discoverWalker) dequeue() (dirTask, bool) {
+	w.qmu.Lock()
+	defer w.qmu.Unlock()
+	for len(w.queue) == 0 {
+		if w.pending == 0 {
+			return dirTask{}, false
+		}
+		w.qcond.Wait()
+	}
+	last := len(w.queue) - 1
+	task := w.queue[last]
+	w.queue[last] = dirTask{}
+	w.queue = w.queue[:last]
+	return task, true
+}
+
+func (w *discoverWalker) taskDone() {
+	w.qmu.Lock()
+	w.pending--
+	done := w.pending == 0
+	w.qmu.Unlock()
+	if done {
+		w.qcond.Broadcast()
+	}
 }
 
 type gitIgnoreRule struct {
@@ -263,6 +404,8 @@ func (w *discoverWalker) shouldAddFile(lstat os.FileInfo, relPath string, rules 
 // the default discovery behavior is byte-for-byte unchanged.
 func (w *discoverWalker) reportOversize(relPath string, size int64) {
 	if w.options.OnOversize != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
 		w.options.OnOversize(relPath, size)
 	}
 }
@@ -273,6 +416,8 @@ func (w *discoverWalker) reportOversize(relPath string, size int64) {
 // returns is unchanged: only the caller's ability to see the drop changes.
 func (w *discoverWalker) reportSkippedSymlink(relPath string) {
 	if w.options.OnSkippedSymlink != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
 		w.options.OnSkippedSymlink(relPath)
 	}
 }
@@ -291,11 +436,10 @@ func (w *discoverWalker) visitDir(ctx context.Context, fullPath, relPath, name s
 			nextDir = filepath.Clean(resolved)
 		}
 	}
-	if _, ok := w.visitedDirs[nextDir]; ok {
+	if !w.claimDir(nextDir) {
 		return nil
 	}
-	w.visitedDirs[nextDir] = struct{}{}
-	return w.walkDir(ctx, nextDir, relPath, rules)
+	return w.descend(ctx, nextDir, relPath, rules)
 }
 
 func (w *discoverWalker) walkDir(ctx context.Context, absDir, relDir string, parentRules []gitIgnoreRule) error {
@@ -448,7 +592,7 @@ func (w *discoverWalker) processFullEntry(ctx context.Context, absDir, relDir, n
 		Mode:          uint32(lstat.Mode()),
 	}
 	if w.shouldAddFile(lstat, relPath, rules) {
-		*w.files = append(*w.files, DiscoveredFile{
+		w.addFile(DiscoveredFile{
 			AbsPath:   fullPath,
 			RelPath:   relPath,
 			SizeBytes: lstat.Size(),
@@ -489,7 +633,9 @@ func (w *discoverWalker) walkDirFromCache(ctx context.Context, absDir, relDir st
 	if err != nil {
 		return false, nil //nolint:nilerr // unreadable dir is a miss; full path reports the error
 	}
+	w.mu.Lock()
 	sig, ok, err := w.options.ScanCache.LookupDir(relDir)
+	w.mu.Unlock()
 	// Nanoseconds, not seconds (#667): a second-resolution comparison accepted a
 	// directory whose child list had changed within the recorded Unix second.
 	// A signature written by an older build carries a seconds value here, which
@@ -572,7 +718,7 @@ func (w *discoverWalker) emitCachedChildren(ctx context.Context, confirmed []cac
 		if !w.shouldAddFile(p.lstat, p.relPath, rules) {
 			continue
 		}
-		*w.files = append(*w.files, DiscoveredFile{
+		w.addFile(DiscoveredFile{
 			AbsPath:   p.fullPath,
 			RelPath:   p.relPath,
 			SizeBytes: p.lstat.Size(),
@@ -605,10 +751,12 @@ func (w *discoverWalker) storeDirSignature(absDir, relDir string, stamp dirReadS
 	if !dirSignatureIsSettled(stamp.mtime, stamp.readAt) {
 		return
 	}
+	w.mu.Lock()
 	_ = w.options.ScanCache.StoreDir(relDir, CachedDirSignature{
 		DirMTimeUnixNano: stamp.mtime.UnixNano(),
 		Entries:          entries,
 	})
+	w.mu.Unlock()
 }
 
 // mtimeSettleWindow is how far in the past a directory's mtime must sit, relative
@@ -680,10 +828,9 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		if w.options.UseGitIgnore && matchesGitIgnoreRules(rules, relPath, true) {
 			return nil
 		}
-		if _, ok := w.visitedDirs[resolvedPath]; ok {
+		if !w.claimDir(resolvedPath) {
 			return nil
 		}
-		w.visitedDirs[resolvedPath] = struct{}{}
 		return w.walkDir(ctx, resolvedPath, relPath, rules)
 	}
 
@@ -698,7 +845,7 @@ func (w *discoverWalker) handleSymlink(ctx context.Context, symlinkPath, relPath
 		return nil
 	}
 
-	*w.files = append(*w.files, DiscoveredFile{
+	w.addFile(DiscoveredFile{
 		AbsPath:   resolvedPath,
 		RelPath:   relPath,
 		SizeBytes: stat.Size(),
