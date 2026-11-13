@@ -494,6 +494,18 @@ type Service struct {
 	// re-scoped per archive member in generateRepresentations.
 	recognizeIncompleteThisDoc bool
 
+	// pendingNoSpeechSkip records that the transcript path of the document
+	// currently being processed found no speech in the whole recording (SPEC
+	// 0.93.0) and that the document has no media chunks. The no_speech skip is
+	// settled only after recognition ran, because a recognition representation
+	// keeps the document searchable and then it stays status=ok (§8.6.13).
+	// Same per-document lifecycle as recognizeIncompleteThisDoc.
+	pendingNoSpeechSkip bool
+	// noSpeechSkippedThisDoc records that this run recorded the document as a
+	// no_speech skip. The #402 done marker is then stamped on the skip row, so
+	// an unchanged file is not read or decoded again on the next scan (§8.6.13).
+	noSpeechSkippedThisDoc bool
+
 	// docSecretPatterns holds the compiled security.secret_patterns set for the
 	// document currently being processed. It is the SAME slice the caller passes
 	// down the raw-byte path, captured at the document entry points
@@ -989,6 +1001,12 @@ func (s *Service) recordPartialTranscriptSkip(ctx context.Context, doc model.Doc
 		return false, false
 	}
 	if mediaProduced {
+		return false, true
+	}
+	if skipReason == model.SkipReasonNoSpeech {
+		// SPEC 0.93.0: settled after recognition (settlePendingNoSpeech), which
+		// can still give the document a searchable representation.
+		s.pendingNoSpeechSkip = true
 		return false, true
 	}
 	s.addSkipped(1)
@@ -2421,6 +2439,11 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	if existing.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) {
 		return false, nil
 	}
+	// SPEC 0.93.0: a no-speech outcome is stale when the STT derivation identity
+	// changed, so the recording is decoded again by the new model.
+	if s.noSpeechIdentityStale(ctx, existing) {
+		return false, nil
+	}
 	s.skipUnchangedDocument(ctx, f, existing, seen)
 	return true, nil
 }
@@ -2525,7 +2548,7 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if doc.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
 		return true
 	}
-	return false
+	return s.noSpeechIdentityStale(ctx, existingDoc)
 }
 
 // refreshDocID re-reads the persisted document after an upsert to obtain the
@@ -2565,6 +2588,8 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// Same authoritative per-document reset for the #894 incomplete-recognition
 	// flag, which withholds the done marker for one document only.
 	s.recognizeIncompleteThisDoc = false
+	s.pendingNoSpeechSkip = false
+	s.noSpeechSkippedThisDoc = false
 	// Open the per-document secret scope (#681) at the same authoritative point,
 	// and before any branch below can produce a derived text. It captures the
 	// pattern set this call was given, so the derived-text scan always uses the
@@ -2792,6 +2817,12 @@ func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, 
 		// the #402 done marker unstamped — the same mechanism the #413 guard uses for
 		// an out-of-band soft error, applied without the error status.
 		return nil
+	}
+	if s.noSpeechSkippedThisDoc {
+		// SPEC §8.6.13: a no_speech skip is a settled outcome, not a failure.
+		// Its done marker is stamped on the skip row, so the next scan takes the
+		// unchanged-file path and does not decode the recording again.
+		return s.finalizeContentHashForStatus(ctx, doc, contentHash, string(model.DocumentStatusSkipped))
 	}
 	return s.finalizeContentHash(ctx, doc, contentHash)
 }
@@ -4464,6 +4495,8 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// members processed after it.
 	s.quarantinedThisDoc = false
 	s.recognizeIncompleteThisDoc = false
+	s.pendingNoSpeechSkip = false
+	s.noSpeechSkippedThisDoc = false
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -4609,6 +4642,9 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	// branded an unsearchable-video error.
 	if s.secretExcludedThisDoc {
 		return false, nil
+	}
+	if suppress, settled := s.settlePendingNoSpeech(ctx, doc, recognized); settled {
+		return suppress, nil
 	}
 	if noVideoRep && !recognized {
 		// Only now is the verdict final: no sidecar, no derived transcript, no
@@ -4820,6 +4856,9 @@ func (s *Service) resolveSidecarTranscript(ctx context.Context, doc model.Docume
 // caller finalizes only after recognition has had its chance, since recognition
 // is an independent representation source (#622).
 func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, bool, error) {
+	// SPEC §8.6.13: the no-speech record describes one derivation. This one
+	// starts from none; a decode that finds no speech writes it again.
+	s.clearNoSpeechIdentity(ctx, doc.RelPath)
 	done, err := s.resolveSidecarTranscript(ctx, doc, forceReindex)
 	if err != nil || done {
 		return false, false, err
@@ -5872,6 +5911,7 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 // `transcript@t<N>` with its container-declared track/language/label in meta_json.
 func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, string, error) {
 	transcriptText, words, coverage, route, err := s.readTrackTranscriptOrRetire(ctx, doc, content, tc)
+	noSpeech, err := splitNoSpeech(err)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -5886,7 +5926,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return s.settleEmptyTranscript(ctx, doc, tc, coverage)
+		return s.settleEmptyTranscript(ctx, doc, tc, coverage, noSpeech)
 	}
 
 	// #681: a credential spoken on a call, or read out in a screen share, is audio
@@ -5916,7 +5956,8 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	decision := s.screenOutputQualityWith(s.transcriptDocGate(coverage), ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
-		Duration:         duration,
+		// §8.6.6: the low-density check does not count no-speech windows.
+		Duration: speechDuration(duration, coverage),
 	})
 	// §8.6.12: under the deferred (multi-track) gate, a rejected track's transcript
 	// is DROPPED entirely (recorded as honest coverage) rather than persisted with
@@ -6140,7 +6181,13 @@ func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, 
 // four-value return, so the caller carries one line rather than a nested error
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
-func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, string, error) {
+//
+// A decode that found no speech (SPEC 0.93.0) is its own outcome, a no_speech
+// skip, and never reaches the silence judgement below.
+func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage, noSpeech bool) (bool, bool, string, error) {
+	if noSpeech {
+		return s.settleNoSpeech(ctx, doc, tc)
+	}
 	skipReason, gateRejected, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
 	if err != nil {
 		return false, false, "", err
@@ -7046,6 +7093,12 @@ func TranscriptLangSuffix(language string) string {
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
 	text, _, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
+	if errors.Is(err, errNoSpeech) {
+		// SPEC 0.93.0: no speech is a successful decode with nothing said, so a
+		// caller that reads only the text (the MCP transcribe tools) gets the
+		// empty transcript, as it does for any other empty decode.
+		return "", nil
+	}
 	return text, err
 }
 
@@ -7105,6 +7158,12 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 				words:    readCachedWords(paths.words),
 				coverage: s.restoreCachedCoverage(paths.coverage, paths.screened),
 				route:    readCachedItemRoute(paths.route),
+				noSpeech: cachedNoSpeech(string(cached), paths.noSpeech),
+			}
+			if hit.noSpeech {
+				// SPEC 0.93.0: a decode that found no speech is cached as such, so
+				// the same bytes are not sent to the provider again.
+				return hit.unpack()
 			}
 			hit = s.reconcileStoredRedecode(ctx, doc, content, paths, hit)
 			return s.serveCachedTranscript(ctx, doc, content, paths, hit, retryFallback)
@@ -7112,11 +7171,12 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 	}
 
 	transcript, words, coverage, route, err := s.transcribe(ctx, doc, content)
-	if err != nil {
+	noSpeech := errors.Is(err, errNoSpeech)
+	if err != nil && !noSpeech {
 		return "", nil, nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 	s.stampFreshRouteFallback(coverage, route)
-	out := cachedTranscript{text: normalizeTranscriptNewlines(transcript), words: words, coverage: coverage, route: route}
+	out := cachedTranscript{text: normalizeTranscriptNewlines(transcript), words: words, coverage: coverage, route: route, noSpeech: noSpeech}
 	if err := s.publishTranscriptCache(paths, out); err != nil {
 		return "", nil, nil, nil, err
 	}
@@ -7126,7 +7186,7 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 // transcriptCachePaths names the files of one transcript cache entry: the text
 // and its word-timing, coverage, screening and route sidecars.
 type transcriptCachePaths struct {
-	dir, text, words, coverage, screened, route string
+	dir, text, words, coverage, screened, route, noSpeech string
 }
 
 // transcriptCachePathsFor returns the cache entry paths for the media bytes
@@ -7152,6 +7212,7 @@ func (s *Service) transcriptCachePathsFor(content []byte, language string) (tran
 		coverage: base + ".coverage.json",
 		screened: base + ".screened",
 		route:    base + ".route.json",
+		noSpeech: base + noSpeechMarkerSuffix,
 	}, nil
 }
 
@@ -7162,9 +7223,15 @@ type cachedTranscript struct {
 	words    []model.TimedWord
 	coverage *TranscriptCoverage
 	route    *itemRoute
+	// noSpeech is true for a decode that succeeded and found no speech (SPEC
+	// 0.93.0). Its text is empty, and unpack reports errNoSpeech.
+	noSpeech bool
 }
 
 func (c cachedTranscript) unpack() (string, []model.TimedWord, *TranscriptCoverage, *itemRoute, error) {
+	if c.noSpeech {
+		return "", nil, c.coverage, c.route, errNoSpeech
+	}
 	return c.text, c.words, c.coverage, c.route, nil
 }
 
@@ -7198,6 +7265,9 @@ func (s *Service) publishTranscriptCache(paths transcriptCachePaths, entry cache
 		return nil
 	}
 	if !s.publishCachedItemRoute(paths.route, entry.route) {
+		return nil
+	}
+	if !s.publishNoSpeechMarker(paths.noSpeech, entry.noSpeech) {
 		return nil
 	}
 	s.publishScreenedMarker(paths.screened, entry.coverage)
@@ -7358,13 +7428,34 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 	if err != nil || !ok {
 		return "", nil, nil, nil, err
 	}
+	var (
+		text     string
+		words    []model.TimedWord
+		coverage *TranscriptCoverage
+		route    *itemRoute
+	)
 	// SPEC §8.2.4: under item scope with an identifier bound, the item's
 	// language is resolved before transcription and selects the route.
 	if s.itemIdentifierActive() {
-		return s.transcribeItemRouted(ctx, relPath, content)
+		text, words, coverage, route, err = s.transcribeItemRouted(ctx, relPath, content)
+	} else {
+		text, words, coverage, err = s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber, true)
 	}
-	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber, true)
-	return text, words, coverage, nil, err
+	// SPEC 0.93.0: the decode succeeded and the whole recording holds no
+	// speech. Reported as errNoSpeech, never as a provider failure. The no
+	// audio track case returned above with no error and keeps its meaning.
+	if err == nil && decodedNoSpeech(text, coverage) {
+		if ferr := fallbackNoSpeech(relPath, coverage, route); ferr != nil {
+			return "", nil, nil, nil, ferr
+		}
+		return "", nil, coverage, route, errNoSpeech
+	}
+	if err == nil {
+		// A failed window next to windows with no speech is a failure, not a
+		// no-speech recording: the failed window can hold speech (§8.6.13).
+		err = failedBesideNoSpeech(relPath, text, coverage)
+	}
+	return text, words, coverage, route, err
 }
 
 // transcriptInput returns the audio STT decodes for a document and the
@@ -7460,6 +7551,7 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	coverage.RouteFallbackDropped, coverage.RouteFallbackSkipReason = entry.RouteFallbackDropped, entry.RouteFallbackSkipReason
 	coverage.WindowMS = entry.WindowMS
 	coverage.RedecodedWindows, coverage.RedecodeRule = entry.RedecodedWindows, entry.RedecodeRule
+	coverage.NoSpeechMS = entry.NoSpeechMS
 	return coverage
 }
 
@@ -7481,6 +7573,10 @@ type coverageCacheEntry struct {
 	// re-decode record (spec 0.88.0), restored with the text on a cache hit.
 	RedecodedWindows []model.RedecodedWindow `json:"redecoded_windows,omitempty"`
 	RedecodeRule     string                  `json:"redecode_rule,omitempty"`
+	// NoSpeechMS is how much of the recording the no-speech windows span (SPEC
+	// 0.93.0), restored with the text so the §8.6.6 low-density check on a
+	// cache hit leaves it out of the duration, as the fresh decode did.
+	NoSpeechMS int `json:"no_speech_ms,omitempty"`
 }
 
 // restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
@@ -7551,6 +7647,7 @@ func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverag
 		WindowMS:                coverage.WindowMS,
 		RedecodedWindows:        coverage.RedecodedWindows,
 		RedecodeRule:            coverage.RedecodeRule,
+		NoSpeechMS:              coverage.NoSpeechMS,
 	}
 	// Windows whose fallback text the cache keeps are not dropped there.
 	entry.RouteFallbackDropped = missingDropped(coverage)
@@ -7604,7 +7701,7 @@ func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	// refused) translated text must not be left persisted after a purge.
 	translateBase := key + "-translate" + TranscriptLangSuffix("en")
 	for _, p := range []string{
-		base + ".txt", base + ".words.json", base + ".coverage.json", base + ".screened",
+		base + ".txt", base + ".words.json", base + ".coverage.json", base + ".screened", base + noSpeechMarkerSuffix,
 		translateBase + ".txt", translateBase + ".words.json", translateBase + ".coverage.json",
 	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {

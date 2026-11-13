@@ -100,6 +100,13 @@ const (
 	// declared not-indexed coverage rather than a transcript that silently answers
 	// "no" for the audio no window decoded.
 	SkipReasonTranscriptPartial = "transcript_partial"
+	// SkipReasonNoSpeech (SPEC 0.93.0, §15.2): media whose STT decode found no
+	// speech in the whole recording (§8.2, §8.6.13): every decode returned a
+	// well-formed response with empty text and no segment that holds text, for
+	// example a recording that holds only music or ambient sound, and the
+	// document has no other searchable representation. It is not an error, and
+	// the recording is not decoded again while the file is unchanged.
+	SkipReasonNoSpeech = "no_speech"
 )
 
 type Representation struct {

@@ -171,6 +171,9 @@ type windowDecode struct {
 	// report is the decoder's language report for the window under item
 	// scope (§8.6.13 low-confidence rule). Zero under window scope.
 	report windowReport
+	// noSpeech is the window's core when its decode was a no-speech result
+	// (SPEC 0.93.0), nil otherwise.
+	noSpeech *CoverageRange
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.
@@ -204,6 +207,11 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if len(results) == 0 {
 		return out
 	}
+	if decodedWithoutSpeech(results, err) {
+		// SPEC 0.93.0: nothing said in this window, so there is no language to
+		// identify, no route to move to and no text to screen.
+		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
+	}
 	idTag, idConf, idOK := s.identifyWindow(ctx, relPath, pieces, core, st)
 	lang, source, conf := st.resolveWith(results, idTag, idConf, idOK)
 	if fallbackFrom == "" {
@@ -219,6 +227,12 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			fallbackFrom = fb
 			v = s.judgeWindow(results, cur, lang, core)
 		}
+	}
+	if decodedWithoutSpeech(results, ferr) {
+		// SPEC 0.93.0: a later candidate or the default profile found no speech
+		// in the window. It is a decoded window with no language, never a
+		// refusal for the language the first decode resolved.
+		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
 	}
 	if ferr != nil {
 		// A candidate that fails to decode is a failed window (§8.6.13), not a
@@ -421,7 +435,9 @@ func (s *Service) rerouteWindow(ctx context.Context, relPath string, pieces []wi
 		return results, cur
 	}
 	rerouted, derr := s.decodePieces(ctx, relPath, want.stt, pieces, plan)
-	if len(rerouted) == 0 {
+	// SPEC 0.93.0: a route that hears no speech where the first decode heard
+	// some has produced nothing either, so the first decode stands.
+	if len(rerouted) == 0 || !resultsHaveContent(rerouted) {
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s resolved to %q but route %q returned nothing (%v); keeping the %q decode",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, want.route, derr, cur.route)
 		return results, cur

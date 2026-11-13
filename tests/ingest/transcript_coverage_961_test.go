@@ -573,9 +573,15 @@ func (w *silentWindowTranscriber) TranscribeStructured(_ context.Context, _ stri
 // empty, and recording that as ordinary silent media asserts the recording had
 // nothing to say, over audio no window ever decoded.
 //
-// Mutant killed: returning "no transcript produced" for an empty transcript before
-// the §8.6.13 floor is consulted, which leaves the document status="ok" with no
-// transcript and no trace of the failed windows.
+// Spec 0.93.0 (§8.6.13) makes the outcome sharper than the floor: the quiet
+// window is a no-speech result, and when at least one window failed and every
+// other window holds no speech, the recording is a transcription error that is
+// retried, because a failed window can hold speech. It is neither silence nor
+// a coverage skip.
+//
+// Mutant killed: returning "no transcript produced" for an empty transcript
+// before the failed windows are counted, which leaves the document status="ok"
+// with no transcript and no trace of the failed windows.
 func TestPartialTranscriptFloor_EmptyTranscriptFromAPartialDecodeIsNotSilence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -592,9 +598,9 @@ func TestPartialTranscriptFloor_EmptyTranscriptFromAPartialDecodeIsNotSilence(t 
 	}
 
 	doc := mustGetDoc(t, st, "quiet.mp3")
-	if doc.SkipReason != model.SkipReasonTranscriptPartial {
-		t.Fatalf("quiet.mp3: status = %q, skip_reason = %q, want a %q skip: an empty transcript from a 1-of-4 decode is not silence",
-			doc.Status, doc.SkipReason, model.SkipReasonTranscriptPartial)
+	if doc.Status != "error" || doc.SkipReason != "" {
+		t.Fatalf("quiet.mp3: status = %q, skip_reason = %q, want status error: an empty transcript from a 1-of-4 decode is not silence, and the failed windows are retried (spec 0.93.0)",
+			doc.Status, doc.SkipReason)
 	}
 }
 

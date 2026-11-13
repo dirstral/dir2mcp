@@ -68,6 +68,12 @@ type TranscriptCoverage struct {
 	// marker only when that marker holds the active window gate's fingerprint,
 	// so text cached while gates were off still gets every check.
 	ScreenedPerWindow bool `json:"-"`
+	// NoSpeechMS is the summed length of the windows whose decode was a
+	// no-speech result (SPEC 0.93.0), coalesced. Those windows are decoded and
+	// sit inside Ranges; this says how much of that decoded audio held no
+	// speech, so the §8.6.6 low-density check can leave it out of the duration.
+	// Not part of the persisted coverage object; the transcript cache keeps it.
+	NoSpeechMS int `json:"-"`
 	// RouteFallbackAt and RouteFallbackBy carry the §8.2.4 route-fallback
 	// stamp of a window-scoped transcript (spec 0.82.0) between the decode,
 	// the transcript cache and the meta_json. They are not part of the

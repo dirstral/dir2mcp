@@ -563,11 +563,31 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	}
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
-		return model.TranscriptResult{}, &model.ProviderError{
-			Code:      "WHISPER_FAILED",
-			Message:   "transcription response had no text content",
-			Retryable: false,
+		// SPEC 0.93.0: a well-formed response with empty text and no segment
+		// text is a successful decode that found NO SPEECH (music, ambient
+		// sound, silence), not a provider failure. A body that names neither a
+		// text nor a segments field, or has one of the wrong type, is malformed.
+		if !providerhttp.WellFormedEmptySTT(raw, []string{"text"}, "segments") {
+			return model.TranscriptResult{}, &model.ProviderError{
+				Code:      "WHISPER_FAILED",
+				Message:   "malformed transcription response: no text or segments field, or a field of the wrong type",
+				Retryable: false,
+			}
 		}
+		// Timed words with no text is a contradiction, not silence: the server
+		// heard something it did not write out. It stays an error, so the audio
+		// is decoded again rather than recorded as no speech.
+		if len(parsed.timedWords()) > 0 {
+			return model.TranscriptResult{}, &model.ProviderError{
+				Code:      "WHISPER_FAILED",
+				Message:   "contradictory transcription response: timed words but no text",
+				Retryable: false,
+			}
+		}
+		// The language report is kept: an identifier response with empty text
+		// that reports a language is still a signal (§8.2.3). The pipeline does
+		// not read the report of a no-speech decode window (§8.6.13).
+		return model.TranscriptResult{Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence()}, nil
 	}
 	// Flat-text fallback (no segments): words have no segment frame to anchor
 	// against, so emit text only.
