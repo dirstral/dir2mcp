@@ -1688,6 +1688,10 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// result set, so at most k store lookups run per query and deleted content is
 	// never returned (nor cited) even before the next restart.
 	hits = s.pruneTombstonedHits(ctx, hits)
+	// Leave out any hit whose text matches the secret pattern set, so a
+	// credential that a changed pattern set finds is not served (and not placed
+	// in an ask prompt) before the re-evaluation pass retires it (spec 0.93.0).
+	hits = s.screenSecretHits(ctx, hits)
 	// Name each hit's absolute evidence verdict (SPEC §9.4.3, spec 0.55.0) as
 	// the last step, so the verdict describes the hit the caller actually
 	// receives, after every re-scoring stage above. The thresholds are the ones
@@ -3051,6 +3055,62 @@ func mapSourceReadError(err error) error {
 	return err
 }
 
+// MatchesSecret reports whether text matches the secret pattern set that
+// open_file enforces: the built-in baseline plus the operator's
+// security.secret_patterns. Every tool that returns indexed text applies this
+// one set (spec 0.93.0), so a credential that open_file refuses is not served
+// through another tool. The MCP annotate/transcribe gate uses it too.
+func (s *Service) MatchesSecret(text string) bool {
+	s.metaMu.RLock()
+	patterns := s.secretPatterns
+	s.metaMu.RUnlock()
+	return hasSecretMatch(patterns, text)
+}
+
+// screenSecretHits leaves out every hit whose text matches the secret pattern
+// set (SPEC §7.2, spec 0.93.0). After the effective set changes, a background
+// pass retires the chunks that the new set matches. Until the pass reaches a
+// document, its chunks stay in the index, so the screen runs on every result
+// that search, ask and related return.
+//
+// The hit's snippet is checked, and so is the full chunk text, because the ask
+// prompt reads the full text from the store (contextTexts), not the snippet.
+// When the store cannot give the full text, the hit is kept on its snippet:
+// contextTexts then also gets no text for it, so the full text never leaves
+// the server. The matched text is never logged.
+func (s *Service) screenSecretHits(ctx context.Context, hits []model.SearchHit) []model.SearchHit {
+	if len(hits) == 0 {
+		return hits
+	}
+	s.metaMu.RLock()
+	patterns := s.secretPatterns
+	store := s.store
+	s.metaMu.RUnlock()
+	if len(patterns) == 0 {
+		return hits
+	}
+	fetcher, _ := store.(chunkByIDer)
+	kept := hits[:0]
+	dropped := 0
+	for _, hit := range hits {
+		if hasSecretMatch(patterns, hit.Snippet) {
+			dropped++
+			continue
+		}
+		if fetcher != nil && hit.ChunkID != 0 {
+			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil && hasSecretMatch(patterns, task.Text) {
+				dropped++
+				continue
+			}
+		}
+		kept = append(kept, hit)
+	}
+	if dropped > 0 {
+		s.logf("security: left out %d retrieved chunk(s) that match a secret pattern", dropped)
+	}
+	return kept
+}
+
 // hasSecretMatch reports whether any of the compiled secret patterns matches s.
 func hasSecretMatch(patterns []*regexp.Regexp, s string) bool {
 	for _, re := range patterns {
@@ -4246,6 +4306,7 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 	// construction, so an unguarded read races with that assignment.
 	s.metaMu.RLock()
 	store := s.store
+	patterns := s.secretPatterns
 	s.metaMu.RUnlock()
 	fetcher, _ := store.(chunkByIDer)
 	if fetcher == nil {
@@ -4258,6 +4319,13 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 			}
 			task, _, err := fetcher.ChunkTaskByID(ctx, hits[member].ChunkID)
 			if err != nil {
+				continue
+			}
+			// The hits passed screenSecretHits in search. The text is read
+			// again here, so test it again at the prompt boundary: a chunk
+			// rewritten between the two reads never reaches the generator
+			// (spec 0.93.0).
+			if hasSecretMatch(patterns, task.Text) {
 				continue
 			}
 			texts[member] = strings.TrimSpace(task.Text)

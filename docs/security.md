@@ -82,6 +82,18 @@ The check does not use the stored chunks. A chunk can lose bytes that the raw
 scan sees (for example a trimmed trailing newline), and chunks can overlap, so
 only a new read gives the same verdict that ingest gives.
 
+Until the scan reaches a document, its chunks stay in the index. So each tool
+that returns indexed text also tests that text against the list in effect when
+it answers:
+
+- `search` and `related` leave out a hit whose snippet or chunk text matches.
+- `ask` does not place a matching chunk in the prompt, and does not cite it.
+- `open_file` returns `FORBIDDEN` for matching text.
+- `annotate` and `transcribe` return `FORBIDDEN` for matching text.
+
+These tools also apply the built-in default patterns when your list leaves
+one out. So a tool can refuse text that ingest indexed under your list.
+
 The store records the list and its fingerprint (`secret_policy_patterns` and
 `secret_policy_identity` in the settings table), in the same transaction that
 clears the content hashes. A document keeps its empty content hash until the

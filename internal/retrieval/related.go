@@ -40,6 +40,8 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
+	// The same secret screen search applies (spec 0.93.0).
+	hits = s.screenSecretHits(ctx, hits)
 	indexingComplete, _ := s.IndexingComplete(ctx)
 	return model.RelatedResult{
 		SourceChunkID:    seed.chunkID,

@@ -933,6 +933,13 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 
 	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
+	// The ask path screens returned text against the operator's
+	// security.secret_patterns as the server does (spec 0.93.0).
+	if err := ret.SetSecretPatterns(cfg.SecretPatterns); err != nil {
+		_ = textIx.Close()
+		_ = codeIx.Close()
+		return nil, nil, fmt.Errorf("compile secret patterns: %w", err)
+	}
 	ret.SetQueryEmbeddingModel(etm)
 	ret.SetCodeEmbeddingModel(ecm)
 	ret.SetCodeIndex(codeIx)

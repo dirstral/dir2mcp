@@ -95,41 +95,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() { indexFence.closeIndexesAfterPersistence(logSink, codeIx, textIx) }()
 
 	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
-	ret := retrieval.NewService(st, textIx, embedder, generator)
-	ret.SetQueryEmbeddingModel(etm)
-	ret.SetCodeEmbeddingModel(ecm)
-	ret.SetCodeIndex(codeIx)
-	ret.SetRootDir(cfg.RootDir)
-	ret.SetStateDir(cfg.StateDir)
-	// Bound the retrieval-time source reads with the SAME resolved cap ingest
-	// enforces (#830), from the one resolver.
-	ret.SetMaxFileBytes(ingest.ResolvedMaxFileBytes(cfg))
-	ret.SetProtocolVersion(cfg.ProtocolVersion)
-	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
-	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
-	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
-	// One effective rag.k_default for the whole deployment (SPEC §9.1): the tool
-	// layer resolves an omitted k to the same number this service falls back to.
-	ret.SetDefaultK(cfg.EffectiveKDefault())
-	a.configureReranker(ret, cfg)
-	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
-	ret.SetMinScore(cfg.RetrievalMinScore)
-	ret.SetRecencyHalfLife(cfg.RetrievalRecencyHalfLife)
-	ret.SetContextCompression(cfg.ContextCompressionEnabled, cfg.ContextCompressionTargetRatio)
-	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
-	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
-	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
-	// Superlative-only HyDE (#897): additive opt-in, off by default.
-	ret.SetHyDESuperlative(cfg.RetrievalHyDESuperlative)
-	// Post-generation grounding check (#336): opt-in, one extra call when on.
-	ret.SetVerifyFaithfulness(cfg.RAGVerifyFaithfulness)
-	// Calibrated evidence threshold (#1081, SPEC §9.4.3): auto derives the
-	// cosine threshold from the null baseline; a number pins it.
-	ret.SetEvidenceThreshold(cfg.EvidenceThreshold())
-	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
-	// step; summary hits are never citable regardless of this flag.
-	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)
-	a.configureCrossLingual(ret, cfg, st, generator)
+	ret, err := a.newServingRetriever(cfg, st, textIx, codeIx, servingModelClients{embedder: embedder, generator: generator, textModel: etm, codeModel: ecm})
+	if err != nil {
+		writeCLIError(a.stderr, opts.jsonOutput, exitConfigInvalid, err.Error())
+		return exitConfigInvalid
+	}
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
@@ -190,9 +160,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// the corpus filesystem for object-store backends so open_file works on an S3
 	// corpus (#432). Local/NFS corpora keep the historical local read path (their
 	// resolved-path + symlink-containment behavior) untouched.
-	if sourceIsRemote(cfg) {
-		ret.SetCorpusFS(corpusFS)
-	}
+	setRetrievalCorpusFS(ret, cfg, corpusFS)
 
 	emitter.Emit("info", "index_loaded", map[string]interface{}{
 		"state_dir": cfg.StateDir,
@@ -1623,6 +1591,72 @@ func (a *App) startManagedRecognizeBackend(runCtx context.Context, ing model.Ing
 		return exitIngestionFatal
 	}
 	return exitSuccess
+}
+
+// servingModelClients are the resolved embed/chat clients and embed model ids
+// that runUp shares between the retrieval service and the embed workers.
+type servingModelClients struct {
+	embedder  model.Embedder
+	generator model.Generator
+	textModel string
+	codeModel string
+}
+
+// newServingRetriever builds and configures the retrieval service the `up`
+// server answers from. Split out of runUp to keep that function under the
+// cyclomatic-complexity budget.
+func (a *App) newServingRetriever(cfg config.Config, st model.Store, textIx, codeIx model.Index, clients servingModelClients) (*retrieval.Service, error) {
+	embedder, generator, etm, ecm := clients.embedder, clients.generator, clients.textModel, clients.codeModel
+	ret := retrieval.NewService(st, textIx, embedder, generator)
+	// open_file and the serve-time screen of search/ask/related test returned
+	// text against the operator's security.secret_patterns, not only the
+	// built-in baseline (spec 0.93.0).
+	if err := ret.SetSecretPatterns(cfg.SecretPatterns); err != nil {
+		return nil, fmt.Errorf("compile secret patterns: %w", err)
+	}
+	ret.SetQueryEmbeddingModel(etm)
+	ret.SetCodeEmbeddingModel(ecm)
+	ret.SetCodeIndex(codeIx)
+	ret.SetRootDir(cfg.RootDir)
+	ret.SetStateDir(cfg.StateDir)
+	// Bound the retrieval-time source reads with the SAME resolved cap ingest
+	// enforces (#830), from the one resolver.
+	ret.SetMaxFileBytes(ingest.ResolvedMaxFileBytes(cfg))
+	ret.SetProtocolVersion(cfg.ProtocolVersion)
+	ret.SetRAGSystemPrompt(cfg.RAGSystemPrompt)
+	ret.SetMaxContextChars(cfg.RAGMaxContextChars)
+	ret.SetOversampleFactor(cfg.RAGOversampleFactor)
+	// One effective rag.k_default for the whole deployment (SPEC §9.1): the tool
+	// layer resolves an omitted k to the same number this service falls back to.
+	ret.SetDefaultK(cfg.EffectiveKDefault())
+	a.configureReranker(ret, cfg)
+	ret.SetCrossFileDedupEnabled(cfg.DedupRetrieval)
+	ret.SetMinScore(cfg.RetrievalMinScore)
+	ret.SetRecencyHalfLife(cfg.RetrievalRecencyHalfLife)
+	ret.SetContextCompression(cfg.ContextCompressionEnabled, cfg.ContextCompressionTargetRatio)
+	ret.SetAdaptiveRetrieval(cfg.RetrievalAdaptiveEnabled, cfg.RetrievalAdaptiveKMin, cfg.RetrievalAdaptiveKMax)
+	ret.SetMMR(cfg.RetrievalMMREnabled, cfg.RetrievalMMRLambda)
+	ret.SetHyDE(cfg.RetrievalHyDEEnabled, cfg.RetrievalHyDEMode)
+	// Superlative-only HyDE (#897): additive opt-in, off by default.
+	ret.SetHyDESuperlative(cfg.RetrievalHyDESuperlative)
+	// Post-generation grounding check (#336): opt-in, one extra call when on.
+	ret.SetVerifyFaithfulness(cfg.RAGVerifyFaithfulness)
+	// Calibrated evidence threshold (#1081, SPEC §9.4.3): auto derives the
+	// cosine threshold from the null baseline; a number pins it.
+	ret.SetEvidenceThreshold(cfg.EvidenceThreshold())
+	// Hierarchical (coarse-to-fine) retrieval (SPEC §9.7): gates only the expand
+	// step; summary hits are never citable regardless of this flag.
+	ret.SetHierarchical(cfg.RetrievalHierarchicalEnabled)
+	a.configureCrossLingual(ret, cfg, st, generator)
+	return ret, nil
+}
+
+// setRetrievalCorpusFS routes retrieval-time reads through the corpus
+// filesystem for an object-store corpus only (#432); see runUp.
+func setRetrievalCorpusFS(ret *retrieval.Service, cfg config.Config, corpusFS corpusfs.CorpusFS) {
+	if sourceIsRemote(cfg) {
+		ret.SetCorpusFS(corpusFS)
+	}
 }
 
 // setCorpusFSIfSupported hands the resolved corpus filesystem to the ingestor

@@ -109,6 +109,12 @@ type toolExecutionError struct {
 	Retryable bool
 }
 
+// secretMatcher is the optional retriever capability that reports whether text
+// matches the retriever's secret pattern set (the set open_file enforces).
+type secretMatcher interface {
+	MatchesSecret(text string) bool
+}
+
 type retrieverOpenFileWithMeta interface {
 	OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error)
 }
@@ -3417,7 +3423,18 @@ func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool
 // derived text (transcript segments, OCR/annotation previews) that open_file
 // would refuse for a document matching secret_patterns, so mirror the gate here
 // to close the exfiltration path. The offending text is never logged.
+//
+// When the retriever exposes its secret pattern set (retrieval.Service does),
+// the gate uses that set, so annotate/transcribe refuse exactly what open_file,
+// search, ask and related refuse (spec 0.93.0). Otherwise it compiles
+// security.secret_patterns itself.
 func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
+	if screener, ok := s.retriever.(secretMatcher); ok {
+		if screener.MatchesSecret(text) {
+			return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
+		}
+		return nil
+	}
 	s.secretPatternOnce.Do(func() {
 		s.secretPatterns, s.secretPatternErr = ingest.CompileSecretPatterns(s.cfg.SecretPatterns)
 	})
