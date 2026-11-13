@@ -61,6 +61,8 @@ func TestSecretDefaults_SpecFixtures(t *testing.T) {
 		"redirect plus credential": redirect + fakeRun(24) + " GITHUB_" + tok + "=" + fakeRun(40),
 		"credential after ; in an allowed parameter": "https://example.org/list?page_" + strings.ToLower(tok) + "=abc;GITHUB_" + tok + "=" + fakeRun(40),
 		"AWS key inside an allowed parameter":        "https://example.org/list?page_" + strings.ToLower(tok) + "=AK" + "IA" + fakeUpperRun(16),
+		"credential after ? in an allowed parameter": "https://example.org/list?page_" + strings.ToLower(tok) + "=abc?GITHUB_" + tok + "=" + fakeRun(40),
+		"credential after : in an allowed parameter": "https://example.org/list?page_" + strings.ToLower(tok) + "=abc,GITHUB_" + tok + ":" + fakeRun(40),
 	}
 	for name, sample := range mustHit {
 		if !m.MatchString(sample) {
@@ -69,9 +71,12 @@ func TestSecretDefaults_SpecFixtures(t *testing.T) {
 	}
 
 	mustNotHit := map[string]string{
-		"redirect link":     redirect + "QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org",
-		"URL slug":          "https://example.org/news/krasnoyar" + "s" + "k-podpisanie-dogovorov-o-sotrudnichestve",
-		"pagination cursor": "https://www.googleapis.com/youtube/v3/search?part=snippet&page" + "Token=" + fakeRun(24),
+		"redirect link": redirect + "QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org",
+		// A base64 value with '=' padding: the allow value stops at '=', and so
+		// does the generic token match, so the allow match still covers it.
+		"redirect link with base64 padding": redirect + "QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4MTIz==&q=https%3A%2F%2Fexample.org",
+		"URL slug":                          "https://example.org/news/krasnoyar" + "s" + "k-podpisanie-dogovorov-o-sotrudnichestve",
+		"pagination cursor":                 "https://www.googleapis.com/youtube/v3/search?part=snippet&page" + "Token=" + fakeRun(24),
 	}
 	for name, sample := range mustNotHit {
 		if m.MatchString(sample) {

@@ -13,7 +13,7 @@ import (
 // list that replaces it, and an invalid entry that fails the load.
 
 func TestSecretAllowPatterns_Default(t *testing.T) {
-	want := []string{`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;<>"]*`}
+	want := []string{`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;?=:<>"]*`}
 	if got := config.Default().SecretAllowPatterns; !reflect.DeepEqual(got, want) {
 		t.Fatalf("default secret_allow_patterns = %q, want %q", got, want)
 	}

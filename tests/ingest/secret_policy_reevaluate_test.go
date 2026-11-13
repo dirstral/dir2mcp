@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -298,4 +299,70 @@ func TestSecretPolicy_BroaderListWithholdsIndexedDocuments(t *testing.T) {
 	runPolicyScan(t, policyConfig(root, stateDir, custom), st)
 	requireWithheldAndRetired(t, st, "memo.md")
 	requireWithheldAndRetired(t, st, "bundle.zip/inner.txt")
+}
+
+// requireNotSearchable fails when the document has a live representation.
+// Its row may be absent, skipped or deleted; only retrieval exposure counts.
+func requireNotSearchable(t *testing.T, st *store.SQLiteStore, relPath string) {
+	t.Helper()
+	doc, err := st.GetDocumentByPath(context.Background(), relPath)
+	if err == nil && doc.Status == string(model.DocumentStatusOK) && !doc.Deleted {
+		t.Errorf("%s status = ok after the policy change; a gate other than the secret screen should keep it out", relPath)
+	}
+	reps, err := st.ActiveRepresentations(context.Background(), relPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("ActiveRepresentations(%s): %v", relPath, err)
+	}
+	if len(reps) != 0 {
+		t.Errorf("%s has %d live representation(s); a released document skipped the other ingest gates", relPath, len(reps))
+	}
+}
+
+// TestSecretPolicy_ReleasedDocumentKeepsTheOtherGates pins SPEC §7.2 (spec
+// 0.93.0): a document that a policy change releases is treated as a new
+// document, so every other §7.1 gate still applies. Three documents are
+// withheld under a custom pattern. Then the operator drops the pattern and, in
+// the same edit, adds a .gitignore rule, a path exclude and a size limit that
+// each cover one of them. None of the three may become searchable. A fourth
+// document that no other gate covers is the control.
+func TestSecretPolicy_ReleasedDocumentKeepsTheOtherGates(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	memo := "Project codename: BLUEHERON-internal-2026\n"
+	writeFile(t, filepath.Join(root, "ignored.md"), memo)
+	writeFile(t, filepath.Join(root, "excluded.md"), memo)
+	writeFile(t, filepath.Join(root, "control.md"), memo)
+	big := make([]byte, 0, 2<<20)
+	big = append(big, memo...)
+	for len(big) < (3<<20)/2 {
+		big = append(big, "The interview covers the regional budget and the new bridge.\n"...)
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.md"), big, 0o600); err != nil {
+		t.Fatalf("write big.md: %v", err)
+	}
+	st := newRealStore(t)
+
+	custom := append(append([]string(nil), config.Default().SecretPatterns...), `BLUEHERON-[a-z]+-[0-9]{4}`)
+	first := policyConfig(root, stateDir, custom)
+	first.IngestGitignore = true
+	runPolicyScan(t, first, st)
+	for _, rel := range []string{"ignored.md", "excluded.md", "big.md", "control.md"} {
+		requireStatus(t, st, rel, model.DocumentStatusSecretExcluded)
+	}
+
+	writeFile(t, filepath.Join(root, ".gitignore"), "ignored.md\n")
+	second := policyConfig(root, stateDir, config.Default().SecretPatterns)
+	second.IngestGitignore = true
+	second.PathExcludes = append(append([]string(nil), second.PathExcludes...), "excluded.md")
+	second.IngestMaxFileMB = 1
+	runPolicyScan(t, second, st)
+
+	requireSearchable(t, st, "control.md")
+	for _, rel := range []string{"ignored.md", "excluded.md", "big.md"} {
+		requireNotSearchable(t, st, rel)
+	}
 }

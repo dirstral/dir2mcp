@@ -61,7 +61,7 @@ a redirect link (`redir_token=` in a YouTube link) or a pagination cursor
 (`pageToken=`). `security.secret_allow_patterns` releases such text. The
 default list holds one pattern:
 
-`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;<>"]*`
+`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;?=:<>"]*`
 
 dir2mcp finds every match of every secret pattern. An allow match cancels a
 match of the generic token rule when it covers it: the allow match starts at
@@ -74,6 +74,9 @@ one secret match is left. So:
 - A redirect link and a real credential in one document withhold it.
 - `page_token=abc;GITHUB_TOKEN=...` withholds it: the allow value stops at
   `;`, so it does not cover the credential.
+- `page_token=abc?GITHUB_TOKEN=...` and `page_token=abc,GITHUB_TOKEN:...`
+  withhold it: the allow value also stops at `?`, `=` and `:`, so it never
+  covers a second assignment.
 - `page_token=AKIA...` withholds it: an allow match never cancels an AWS key.
 
 The allow list applies wherever the secret patterns apply: source bytes,

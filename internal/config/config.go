@@ -5649,7 +5649,7 @@ func (c Config) EffectiveKDefault() int {
 // credential (a video-host redirect link, a pagination cursor). The default
 // generic token rule matches them, and this pattern cancels those matches.
 func DefaultSecretAllowPatterns() []string {
-	return []string{`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;<>"]*`}
+	return []string{`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;?=:<>"]*`}
 }
 
 // validateSecretPatterns rejects a security.secret_patterns or

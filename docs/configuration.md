@@ -427,7 +427,7 @@ security:
     - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
     - 'MYCORP-[A-Z0-9]{24}'   # your own rule
   secret_allow_patterns:
-    - '(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;<>"]*'
+    - '(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;?=:<>"]*'
 ```
 
 These are the spec 0.93.0 defaults. The generic token rule is broad on
@@ -442,9 +442,9 @@ one. An allow match cancels a match of the generic token rule that it covers
 any other rule, also when it covers it. A text is withheld when at least one
 match is left. The default allow pattern releases redirect and pagination
 parameters in a URL (`redir_token=`, `page_token=`, `next_page_token=`,
-`pageToken=`, `nextPageToken=`). Its value stops at `&`, `#`, `;`, a space, a
-quote or an angle bracket, so a credential in the next parameter is still
-found. An empty list cancels nothing. An allow pattern that is not a valid
+`pageToken=`, `nextPageToken=`). Its value stops at `&`, `#`, `;`, `?`, `=`, `:`, a
+space, a quote or an angle bracket, so a credential in the next parameter or in
+a second assignment is still found. An empty list cancels nothing. An allow pattern that is not a valid
 regular expression is a `CONFIG_INVALID` error, as a secret pattern is.
 
 After a change to either list, the next scan applies it in both directions;
