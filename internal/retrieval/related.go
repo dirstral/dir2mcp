@@ -42,7 +42,10 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 	if err := s.rejectPendingSeed(ctx, seed); err != nil {
 		return model.RelatedResult{}, err
 	}
-	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, k)
+	// Retrieve more than k, so the secret screen below can leave hits out and
+	// the next neighbours take their places (spec 0.93.0). The cut to k runs
+	// after the screen.
+	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, 2*k+relatedExcludeMargin)
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
@@ -51,6 +54,7 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
+	hits = truncateSearchHits(hits, k)
 	indexingComplete, _ := s.IndexingComplete(ctx)
 	return model.RelatedResult{
 		SourceChunkID:    seed.chunkID,

@@ -133,6 +133,24 @@ func TestSecretScreen_RelatedLeavesOutAMatchingHit(t *testing.T) {
 	}
 }
 
+// TestSecretScreen_RelatedRefillsAfterTheScreen pins that related screens
+// before its cut to k: with k=1 and a matching first neighbour, the caller
+// gets the next one.
+func TestSecretScreen_RelatedRefillsAfterTheScreen(t *testing.T) {
+	svc := newRelatedService(t)
+	if err := svc.SetSecretPatterns([]string{`^beta$`}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	res, err := svc.Related(context.Background(), model.RelatedQuery{SourceChunkID: 1, K: 1, ExcludeSameDocument: true})
+	if err != nil {
+		t.Fatalf("Related: %v", err)
+	}
+	// Without the screen the first neighbour is 3, which the screen leaves out.
+	if got := fmt.Sprint(hitIDs(res.Hits)); got != "[4]" {
+		t.Fatalf("related hits with k=1 = %s, want [4]", got)
+	}
+}
+
 func TestSecretScreen_OpenFileRefusesTheSameText(t *testing.T) {
 	root := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("The key is "+screenCredential+"\n"), 0o644); err != nil {
