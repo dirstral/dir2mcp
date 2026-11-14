@@ -57,27 +57,38 @@ before the prefix does not start a word.
 ### Allowed matches (`security.secret_allow_patterns`)
 
 The generic token rule also matches values that carry no credential, such as
-a redirect link (`redir_token=` in a YouTube link) or a pagination cursor
-(`pageToken=`). `security.secret_allow_patterns` releases such text. The
+the `redir_token=` parameter of a YouTube redirect link that a video
+description pastes. `security.secret_allow_patterns` releases such text. The
 default list holds one pattern:
 
-`(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;?=:<>"]*`
+`(?i)https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?redir_token=[^\s&#;?=:<>"]*`
 
-dir2mcp finds every match of every secret pattern. An allow match cancels a
-match of the generic token rule when it covers it: the allow match starts at
-or before the start of the secret match and ends at or after its end. An
-allow match never cancels a match of any other rule (an AWS key, an `sk-`
-key, your own rule), also when it covers it. A text is withheld when at least
-one secret match is left. So:
+It names the host and the path, not only the parameter. A parameter name
+alone does not show that its value is not a credential, so the default trusts
+no name outside that one link. To release another benign parameter (for
+example a pagination cursor of an API you use), add your own pattern, anchored
+to its host.
+
+dir2mcp finds every match of every secret pattern. It looks at every start
+position, so a match that starts inside a cancelled match is still found and
+judged on its own. An allow match cancels a match of the generic token rule
+when it covers it: the allow match starts at or before the start of the secret
+match and ends at or after its end. An allow match never cancels a match of
+any other rule (an AWS key, an `sk-` key, your own rule), also when it covers
+it. A text is withheld when at least one secret match is left. So, for a
+YouTube redirect link:
 
 - A redirect link alone does not withhold a document.
 - A redirect link and a real credential in one document withhold it.
-- `page_token=abc;GITHUB_TOKEN=...` withholds it: the allow value stops at
+- `redir_token=abc;GITHUB_TOKEN=...` withholds it: the allow value stops at
   `;`, so it does not cover the credential.
-- `page_token=abc?GITHUB_TOKEN=...` and `page_token=abc,GITHUB_TOKEN:...`
+- `redir_token=abc?GITHUB_TOKEN=...` and `redir_token=abc,GITHUB_TOKEN:...`
   withhold it: the allow value also stops at `?`, `=` and `:`, so it never
   covers a second assignment.
-- `page_token=AKIA...` withholds it: an allow match never cancels an AWS key.
+- `redir_token=<20 characters>GITHUB_TOKEN=...` withholds it: the second
+  assignment starts inside the cancelled match and is judged on its own.
+- `redir_token=AKIA...` withholds it: an allow match never cancels an AWS key.
+- `page_token=...` or `redir_token=...` on any other host withholds it.
 
 The allow list applies wherever the secret patterns apply: source bytes,
 derived text, and the text a tool returns. An empty list cancels nothing. An

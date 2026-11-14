@@ -15,7 +15,7 @@ import (
 func TestSecretMatch_ManyAllowedLinksIsFast(t *testing.T) {
 	m := defaultMatcher(t)
 	tok := "to" + "ken"
-	link := "https://example.org/list?page_" + tok + "=" + fakeRun(24) + "\n"
+	link := "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=" + fakeRun(24) + "\n"
 	text := []byte(strings.Repeat(link, 100000))
 	start := time.Now()
 	if m.Match(text) {
@@ -64,12 +64,36 @@ func BenchmarkSecretMatch_ManyAllowedLinks(b *testing.B) {
 	if err != nil {
 		b.Fatalf("compile: %v", err)
 	}
-	link := "https://example.org/list?page_" + "to" + "ken=" + fakeRun(24) + "\n"
+	link := "https://www.youtube.com/redirect?event=video_description&redir_" + "to" + "ken=" + fakeRun(24) + "\n"
 	text := []byte(strings.Repeat(link, 100000))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if m.Match(text) {
 			b.Fatal("matched")
 		}
+	}
+}
+
+// TestSecretMatch_OverlappingMatchAfterACancelledOne pins the every-start rule
+// (SPEC §7.2, spec 0.93.0): a generic token match that starts inside a
+// cancelled match is judged on its own.
+func TestSecretMatch_OverlappingMatchAfterACancelledOne(t *testing.T) {
+	m := defaultMatcher(t)
+	tok := "to" + "ken"
+	text := "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=" +
+		strings.Repeat("A", 20) + "GITHUB_" + strings.ToUpper(tok) + "=" + strings.Repeat("B", 20)
+	if !m.MatchString(text) {
+		t.Fatal("a match that starts inside a cancelled match was released")
+	}
+	// Many cancelled matches before it do not hide it either, and the search
+	// stays fast.
+	link := "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=" + fakeRun(24) + "\n"
+	long := strings.Repeat(link, 100000) + text
+	start := time.Now()
+	if !m.MatchString(long) {
+		t.Fatal("the overlapping match after 100k allowed links was released")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Match took %v", elapsed)
 	}
 }

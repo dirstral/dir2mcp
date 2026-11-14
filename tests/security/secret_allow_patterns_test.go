@@ -59,10 +59,13 @@ func TestSecretDefaults_SpecFixtures(t *testing.T) {
 		"id_token":                 "id_" + strings.ToLower(tok) + ": " + fakeRun(30),
 		"OPENAI_API_KEY":           "OPENAI_API_KEY=s" + "k-proj-" + fakeRun(40),
 		"redirect plus credential": redirect + fakeRun(24) + " GITHUB_" + tok + "=" + fakeRun(40),
-		"credential after ; in an allowed parameter": "https://example.org/list?page_" + strings.ToLower(tok) + "=abc;GITHUB_" + tok + "=" + fakeRun(40),
-		"AWS key inside an allowed parameter":        "https://example.org/list?page_" + strings.ToLower(tok) + "=AK" + "IA" + fakeUpperRun(16),
-		"credential after ? in an allowed parameter": "https://example.org/list?page_" + strings.ToLower(tok) + "=abc?GITHUB_" + tok + "=" + fakeRun(40),
-		"credential after : in an allowed parameter": "https://example.org/list?page_" + strings.ToLower(tok) + "=abc,GITHUB_" + tok + ":" + fakeRun(40),
+		"credential after ; in the redirect value": redirect + "abc;GITHUB_" + tok + "=" + fakeRun(40),
+		"credential after ? in the redirect value": redirect + "abc?GITHUB_" + tok + "=" + fakeRun(40),
+		"credential after : in the redirect value": redirect + "abc,GITHUB_" + tok + ":" + fakeRun(40),
+		"match that starts inside a cancelled one": redirect + strings.Repeat("A", 20) + "GITHUB_" + tok + "=" + strings.Repeat("B", 20),
+		"AWS key inside the redirect value":        redirect + "AK" + "IA" + fakeUpperRun(16),
+		"pagination name on another host":          "https://example.org/list?page_" + strings.ToLower(tok) + "=" + fakeRun(24),
+		"redir_token name on another host":         "https://example.org/x?redir_" + strings.ToLower(tok) + "=" + fakeRun(24),
 	}
 	for name, sample := range mustHit {
 		if !m.MatchString(sample) {
@@ -76,7 +79,6 @@ func TestSecretDefaults_SpecFixtures(t *testing.T) {
 		// does the generic token match, so the allow match still covers it.
 		"redirect link with base64 padding": redirect + "QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4MTIz==&q=https%3A%2F%2Fexample.org",
 		"URL slug":                          "https://example.org/news/krasnoyar" + "s" + "k-podpisanie-dogovorov-o-sotrudnichestve",
-		"pagination cursor":                 "https://www.googleapis.com/youtube/v3/search?part=snippet&page" + "Token=" + fakeRun(24),
 	}
 	for name, sample := range mustNotHit {
 		if m.MatchString(sample) {

@@ -99,7 +99,6 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 	}{
 		// Must NOT match.
 		{"youtube redirect link", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbWRkRThBZV" + synthRun(40) + "&q=https%3A%2F%2Fexample.org%2Fpage", false},
-		{"pagination cursor in a query string", "https://example.org/list?next_page_" + tok + "=" + synthRun(30), false},
 		{"krasnoyarsk slug", "https://www.newstube.ru/media/b-elcin-i-konstantinova-v-krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
 		{"baikonur slug", "https://example.org/news/bajkonur-pu" + skDash + "soyuz-28-tm-77-kosmonavty-na-orbite", false},
 		{"task id with sk_ mid-word", "ta" + skUnder + synthLowerRun(32), false},
@@ -110,6 +109,9 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 		{"spec slug sample", "https://example.org/news/krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
 
 		// MUST match.
+		// The default allow list trusts no parameter name outside the YouTube
+		// redirect link, so a pagination cursor on another host matches.
+		{"pagination cursor in a query string", "https://example.org/list?next_page_" + tok + "=" + synthRun(30), true},
 		{"pagination key outside a query string", "next_page_" + tok + "=" + synthRun(30), true},
 		{"csrf form field", "csrf_" + tok + "=" + synthRun(30), true},
 		{"key that only ends in token", "my" + tok + "=" + synthRun(30), true},

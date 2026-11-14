@@ -427,7 +427,7 @@ security:
     - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
     - 'MYCORP-[A-Z0-9]{24}'   # your own rule
   secret_allow_patterns:
-    - '(?i)[?&;](?:redir_token|page_token|next_page_token|pagetoken|nextpagetoken)=[^\s&#;?=:<>"]*'
+    - '(?i)https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?redir_token=[^\s&#;?=:<>"]*'
 ```
 
 These are the spec 0.93.0 defaults. The generic token rule is broad on
@@ -440,9 +440,12 @@ to start a word, so a URL slug such as `krasnoyarsk-...` is not a key.
 one. An allow match cancels a match of the generic token rule that it covers
 (starts at or before it and ends at or after it). It never cancels a match of
 any other rule, also when it covers it. A text is withheld when at least one
-match is left. The default allow pattern releases redirect and pagination
-parameters in a URL (`redir_token=`, `page_token=`, `next_page_token=`,
-`pageToken=`, `nextPageToken=`). Its value stops at `&`, `#`, `;`, `?`, `=`, `:`, a
+match is left. dir2mcp looks at every start position, so a match that starts
+inside a cancelled match is judged on its own. The default allow pattern
+releases only the `redir_token=` parameter of a YouTube redirect link
+(`youtube.com/redirect`): a parameter name alone does not show that its value
+is not a credential. Add your own pattern, anchored to its host, for another
+benign parameter. The default value stops at `&`, `#`, `;`, `?`, `=`, `:`, a
 space, a quote or an angle bracket, so a credential in the next parameter or in
 a second assignment is still found. An empty list cancels nothing. An allow pattern that is not a valid
 regular expression is a `CONFIG_INVALID` error, as a secret pattern is.

@@ -5,7 +5,7 @@
 //
 // A Matcher holds two lists. security.secret_patterns finds text that looks
 // like a credential. security.secret_allow_patterns finds text that looks like
-// a credential but is not one (a redirect parameter, a pagination cursor). The
+// a credential but is not one (the redir_token of a YouTube redirect link). The
 // matcher finds every match of every secret pattern. An allow pattern can
 // cancel only a match of the generic bearer-token default (GenericTokenPattern);
 // a match of any other secret pattern (an AWS key, an sk- key, an operator
@@ -13,8 +13,10 @@
 // token match is cancelled when an allow match in the same text covers it: the
 // allow match starts at or before the start of the secret match and ends at or
 // after its end. The text matches when at least one secret match is not
-// cancelled. So an allow pattern releases only the text it covers, and a text
-// that holds a redirect link and a real credential still matches.
+// cancelled. A generic token match is judged at every start position, so a
+// match that starts inside a cancelled match is still judged on its own. So an
+// allow pattern releases only the text it covers, and a text that holds a
+// redirect link and a real credential still matches.
 package secretmatch
 
 import (
@@ -138,18 +140,43 @@ func (m *Matcher) Match(text []byte) bool {
 			}
 			continue
 		}
-		matches := rx.FindAllIndex(text, -1)
-		if len(matches) == 0 {
+		if !rx.Match(text) {
 			continue
 		}
 		if cover == nil {
 			cover = newCoverIndex(m.allowSpans(text))
 		}
-		for _, loc := range matches {
-			if !cover.covers(loc[0], loc[1]) {
-				return true
-			}
+		if uncoveredAtAnyStart(rx, text, cover) {
+			return true
 		}
+	}
+	return false
+}
+
+// uncoveredAtAnyStart reports whether rx has a match, at ANY start position in
+// text, that no allow span covers (SPEC §7.2, spec 0.93.0). A search for
+// non-overlapping matches resumes after a match, so a match that starts inside
+// a cancelled match would never be judged: in `redir_token=<20 chars>GITHUB_TOKEN=<20 chars>`
+// the first match (`token=<20 chars>GITHUB_TOKEN`) is cancelled, and the second
+// assignment starts inside it. So after a cancelled match the search starts
+// again one byte after the start of that match, not after its end.
+//
+// The cost stays linear in practice: each new search scans from the start of
+// the last match to the end of the next one, so the extra work per cancelled
+// match is bounded by the length of that match, which an allow span covers.
+// The generic token pattern has no anchor and no word-boundary assertion, so a
+// search in text[pos:] finds exactly the matches that start at or after pos.
+func uncoveredAtAnyStart(rx *regexp.Regexp, text []byte, cover *coverIndex) bool {
+	for pos := 0; pos < len(text); {
+		loc := rx.FindIndex(text[pos:])
+		if loc == nil {
+			return false
+		}
+		start, end := pos+loc[0], pos+loc[1]
+		if !cover.covers(start, end) {
+			return true
+		}
+		pos = start + 1
 	}
 	return false
 }

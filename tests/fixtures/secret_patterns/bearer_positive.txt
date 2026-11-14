@@ -8,3 +8,5 @@ access_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
 next_page_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
 csrf_token=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
 VERCEL_TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9
+https://example.org/list?page_token=Xy7Zq9WvXy7Zq9WvXy7Zq9Wv
+https://example.org/x?redir_token=Xy7Zq9WvXy7Zq9WvXy7Zq9Wv
