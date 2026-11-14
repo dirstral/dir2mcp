@@ -120,9 +120,27 @@ func libreofficeMissing(ctx context.Context, cfg config.Config) []string {
 }
 
 // libreofficeAvailable reports whether BOTH binaries of the libreoffice engine
-// resolve and pass their functional checks.
+// resolve and pass their functional checks AND a temporary directory outside
+// the corpus root is usable (libreofficeWorkBase, spec 0.93.0 §7.4.B).
 func libreofficeAvailable(cfg config.Config) bool {
-	return len(libreofficeMissing(context.Background(), cfg)) == 0
+	return libreofficeUnavailableReason(context.Background(), cfg) == ""
+}
+
+// libreofficeNoWorkBaseReason is the unavailability reason when the binaries
+// are functional but no temporary directory outside the corpus root is usable.
+const libreofficeNoWorkBaseReason = "no temporary directory outside the corpus root (set TMPDIR to a directory outside the corpus root)"
+
+// libreofficeUnavailableReason returns why the libreoffice engine cannot run
+// for cfg, or "" when it can: the missing binaries first, then a missing
+// temporary directory outside the corpus root.
+func libreofficeUnavailableReason(ctx context.Context, cfg config.Config) string {
+	if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
+		return strings.Join(missing, " and ") + " not found on PATH or failed its functional check"
+	}
+	if _, err := libreofficeWorkBase(libreofficeCorpusRoot(cfg)); err != nil {
+		return libreofficeNoWorkBaseReason
+	}
+	return ""
 }
 
 // libreofficePolicyAllows reports whether the ingest.extractor policy permits
@@ -158,9 +176,15 @@ func LibreOfficeSupportsExt(ext string) bool {
 // engine: what to install so legacy .doc files are read. It names only the
 // binaries that are missing, so an operator with LibreOffice but no pandoc is
 // told to install pandoc, and the reverse. It is empty when both are present.
+//
+// When both binaries are present but no temporary directory outside the corpus
+// root is usable, the remedy is to set TMPDIR instead.
 func LibreOfficeInstallHint(cfg config.Config) string {
 	missing := libreofficeMissing(context.Background(), cfg)
 	if len(missing) == 0 {
+		if _, err := libreofficeWorkBase(libreofficeCorpusRoot(cfg)); err != nil {
+			return "set TMPDIR to a directory outside the corpus root for legacy .doc"
+		}
 		return ""
 	}
 	return "install " + strings.Join(missing, " and ") + " for legacy .doc"

@@ -66,11 +66,19 @@ func (p *pandocExtractor) pandocBinary() string {
 // the subprocess is bounded by pandocExtractTimeout. On failure it returns a
 // wrapped error whose message never includes the user-supplied command literally.
 func (p *pandocExtractor) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
+	return p.extractIn(ctx, "", relPath, data)
+}
+
+// extractIn is Extract with the directory for the temp input file. An empty dir
+// is the system temporary directory. The libreoffice engine passes its private
+// work directory, which it has already checked is outside the corpus root, so
+// the converted document text is never written below the corpus.
+func (p *pandocExtractor) extractIn(ctx context.Context, dir, relPath string, data []byte) (string, error) {
 	ext := filepath.Ext(relPath)
 	if ext == "" {
 		ext = ".bin"
 	}
-	tmpFile, err := os.CreateTemp("", "dir2mcp-pandoc-*"+ext)
+	tmpFile, err := os.CreateTemp(dir, "dir2mcp-pandoc-*"+ext)
 	if err != nil {
 		return "", fmt.Errorf("create temp doc file: %w", err)
 	}

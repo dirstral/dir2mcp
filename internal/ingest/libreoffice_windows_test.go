@@ -31,7 +31,7 @@ func TestLibreOfficeExtract_WindowsTimeoutKillsTree(t *testing.T) {
 	}
 	t.Setenv("CHILD_PID", pidFile)
 
-	_, err := NewLibreOfficeExtractor(launcher, "", 8*time.Second).Extract(context.Background(), "slow.doc", []byte("x"))
+	_, err := NewLibreOfficeExtractor("", launcher, "", 8*time.Second).Extract(context.Background(), "slow.doc", []byte("x"))
 	var te *libreofficeTimeoutError
 	if !errors.As(err, &te) {
 		t.Fatalf("Extract error = %v, want a libreofficeTimeoutError", err)

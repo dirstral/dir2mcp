@@ -6285,6 +6285,15 @@ func emitDirInsideCorpus(dir, root string) bool {
 	return pathWithin(resolveExistingPrefix(absRoot), resolveExistingPrefix(absDir))
 }
 
+// PathInsideRoot reports whether dir resolves to root or a path below it, with
+// the same rules as the media.subtitles.emit.dir check (emitDirInsideCorpus):
+// the paths as written and the paths with symlinks resolved are both checked.
+// A blank root is never a match. The libreoffice engine uses it to keep its
+// temporary directories outside the corpus root (spec 0.93.0 §7.4.B).
+func PathInsideRoot(dir, root string) bool {
+	return emitDirInsideCorpus(dir, root)
+}
+
 // pathWithin reports whether p is base or a path below base. Both are absolute.
 func pathWithin(base, p string) bool {
 	rel, err := filepath.Rel(base, p)

@@ -38,10 +38,16 @@ const (
 // bboxes, no region spans.
 //
 // It never writes into the corpus: it gets the bytes, not the path, and every
-// file it creates (the input copy, the per-conversion profile and the output
-// directory) lives under one os.MkdirTemp directory that it removes after the
-// read step, on success, failure and timeout alike.
+// file it creates (the input copy, the per-conversion profile, the output
+// directory and the pandoc input copy) lives under one os.MkdirTemp directory
+// (mode 0700) that it removes after the read step, on success, failure and
+// timeout alike. That directory is made in a base directory outside the corpus
+// root (libreofficeWorkBase, spec 0.93.0 §7.4.B).
 type libreofficeExtractor struct {
+	// root is the corpus root. The work directory is never made inside it.
+	// Empty means no local corpus root (an object-store source), so there is
+	// nothing to keep out of.
+	root string
 	// soffice is the configured LibreOffice binary (ingest.libreoffice.command).
 	// The whole value is the path, so a path with spaces works. Empty resolves
 	// soffice (then libreoffice) from PATH at call time.
@@ -53,16 +59,18 @@ type libreofficeExtractor struct {
 	pandoc *pandocExtractor
 }
 
-// NewLibreOfficeExtractor returns the libreoffice engine. sofficeCmd is the
-// configured ingest.libreoffice.command (blank resolves soffice, then
+// NewLibreOfficeExtractor returns the libreoffice engine. root is the corpus
+// root (libreofficeCorpusRoot): the engine never makes its work directory
+// inside it. sofficeCmd is the configured ingest.libreoffice.command (blank resolves soffice, then
 // libreoffice, from PATH). pandocCmd is the configured ingest.pandoc.command
 // (blank resolves pandoc from PATH), so the .docx step uses exactly the pandoc
 // the pandoc engine uses. A timeout of 0 or less falls back to the default.
-func NewLibreOfficeExtractor(sofficeCmd, pandocCmd string, timeout time.Duration) *libreofficeExtractor {
+func NewLibreOfficeExtractor(root, sofficeCmd, pandocCmd string, timeout time.Duration) *libreofficeExtractor {
 	if timeout <= 0 {
 		timeout = defaultLibreOfficeTimeout
 	}
 	return &libreofficeExtractor{
+		root:    root,
 		soffice: strings.TrimSpace(sofficeCmd),
 		timeout: timeout,
 		pandoc:  NewPandocExtractor(pandocCmd),
@@ -95,7 +103,13 @@ func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byt
 	if err != nil {
 		return "", err
 	}
-	work, err := os.MkdirTemp("", "dir2mcp-libreoffice-*")
+	base, err := libreofficeWorkBase(l.root)
+	if err != nil {
+		return "", err
+	}
+	// os.MkdirTemp creates the directory with mode 0700, so only the owner of
+	// the dir2mcp process can read the converted text.
+	work, err := os.MkdirTemp(base, "dir2mcp-libreoffice-*")
 	if err != nil {
 		return "", fmt.Errorf("create libreoffice work dir: %w", err)
 	}
@@ -110,12 +124,60 @@ func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byt
 		return "", l.deadlineErr(ctx, dctx, err)
 	}
 	// The pandoc step infers the input format from the extension, so the
-	// converted bytes are handed over under a .docx name.
-	md, err := l.pandoc.Extract(dctx, "converted.docx", docx)
+	// converted bytes are handed over under a .docx name. Its input copy goes
+	// into work too, not into the system temporary directory, which can be
+	// inside the corpus root.
+	md, err := l.pandoc.extractIn(dctx, work, "converted.docx", docx)
 	if err != nil {
 		return "", l.deadlineErr(ctx, dctx, fmt.Errorf("read converted .docx: %w", err))
 	}
 	return md, nil
+}
+
+// errLibreOfficeNoWorkBase is the error when no temporary directory outside the
+// corpus root is usable. It names the remedy, not a path.
+var errLibreOfficeNoWorkBase = errors.New("libreoffice: no temporary directory outside the corpus root " +
+	"(the system temporary directory and the user cache directory are inside it or unusable); " +
+	"set TMPDIR to a directory outside the corpus root")
+
+// libreofficeCorpusRoot returns the corpus root the libreoffice engine must
+// keep its temporary directories out of: cfg.RootDir, or "" for an object-store
+// source, which has no local corpus directory.
+func libreofficeCorpusRoot(cfg config.Config) string {
+	if strings.EqualFold(strings.TrimSpace(cfg.Source.Kind), "s3") {
+		return ""
+	}
+	return cfg.RootDir
+}
+
+// libreofficeWorkBase returns the directory in which the engine makes its
+// per-conversion work directory. Spec 0.93.0 §7.4.B: the profile and output
+// directories MUST be outside the corpus root, and when the system temporary
+// directory is inside the root the implementation MUST use another location
+// or treat the engine as unavailable. The candidates, in order, are the system
+// temporary directory (os.TempDir, so TMPDIR on POSIX) and the user cache
+// directory (os.UserCacheDir). The first that exists and does not resolve to
+// the root or below it (symlinks resolved) wins. When none qualifies the error
+// is errLibreOfficeNoWorkBase, and the availability probe reports the engine
+// as unavailable.
+func libreofficeWorkBase(root string) (string, error) {
+	candidates := []string{os.TempDir()}
+	if dir, err := os.UserCacheDir(); err == nil {
+		candidates = append(candidates, dir)
+	}
+	for _, dir := range candidates {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			continue
+		}
+		if config.PathInsideRoot(dir, root) {
+			continue
+		}
+		return dir, nil
+	}
+	return "", errLibreOfficeNoWorkBase
 }
 
 // deadlineErr maps an error that happened because the per-document deadline

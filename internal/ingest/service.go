@@ -743,7 +743,7 @@ func (s *Service) ActivateLibreOfficeEngine(cfg config.Config) {
 		s.libreofficeExtractor = le
 		return
 	}
-	s.libreofficeExtractor = NewLibreOfficeExtractor(cfg.IngestLibreOfficeCommand, cfg.IngestPandocCommand, libreofficeTimeout(cfg))
+	s.libreofficeExtractor = NewLibreOfficeExtractor(libreofficeCorpusRoot(cfg), cfg.IngestLibreOfficeCommand, cfg.IngestPandocCommand, libreofficeTimeout(cfg))
 }
 
 // libreofficeTimeout converts ingest.libreoffice.timeout_sec to a duration.
@@ -1455,7 +1455,7 @@ func DocumentExtractorFromConfigContext(ctx context.Context, cfg config.Config) 
 	case "pandoc":
 		return NewPandocExtractor(strings.TrimSpace(cfg.IngestPandocCommand))
 	case "libreoffice":
-		return NewLibreOfficeExtractor(cfg.IngestLibreOfficeCommand, strings.TrimSpace(cfg.IngestPandocCommand), libreofficeTimeout(cfg))
+		return NewLibreOfficeExtractor(libreofficeCorpusRoot(cfg), cfg.IngestLibreOfficeCommand, strings.TrimSpace(cfg.IngestPandocCommand), libreofficeTimeout(cfg))
 	case "mistral-ocr":
 		return mistralExtractor(cfg)
 	default:

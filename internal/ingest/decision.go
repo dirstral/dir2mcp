@@ -247,12 +247,16 @@ func describePandocEngine(ctx context.Context, cfg config.Config) ExtractorDecis
 
 // describeExplicitLibreOffice resolves the libreoffice engine (T2, spec 0.93.0)
 // for ingest.extractor=libreoffice. The engine is available only when BOTH a
-// functional soffice and a functional pandoc resolve; otherwise extraction is
-// disabled with the missing binaries named (no fallback to another engine),
+// functional soffice and a functional pandoc resolve and a temporary directory
+// outside the corpus root is usable; otherwise extraction is disabled with the
+// missing binaries (or the TMPDIR remedy) named (no fallback to another engine),
 // mirroring the explicit pandoc pin.
 func describeExplicitLibreOffice(ctx context.Context, cfg config.Config) ExtractorDecision {
 	if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
 		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=libreoffice but " + strings.Join(missing, " and ") + " is unavailable or failed its functional check"}
+	}
+	if reason := libreofficeUnavailableReason(ctx, cfg); reason != "" {
+		return ExtractorDecision{Source: "disabled", Reason: "ingest.extractor=libreoffice but " + reason}
 	}
 	return ExtractorDecision{Name: "libreoffice", Source: "explicit", Reason: "LibreOffice and pandoc resolved and passed their probes"}
 }
@@ -281,8 +285,8 @@ func describeLibreOfficeEngine(ctx context.Context, cfg config.Config) Extractor
 	case "libreoffice":
 		return describeExplicitLibreOffice(ctx, cfg)
 	case "auto":
-		if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
-			return ExtractorDecision{Source: "disabled", Reason: strings.Join(missing, " and ") + " not found on PATH or failed its functional check"}
+		if reason := libreofficeUnavailableReason(ctx, cfg); reason != "" {
+			return ExtractorDecision{Source: "disabled", Reason: reason}
 		}
 		return ExtractorDecision{Name: "libreoffice", Source: "auto", Reason: "LibreOffice and pandoc resolved and passed their probes"}
 	default:

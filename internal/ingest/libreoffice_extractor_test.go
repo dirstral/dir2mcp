@@ -241,7 +241,7 @@ func TestLibreOfficeExtract_ConvertsInPrivateTempDir(t *testing.T) {
 	t.Setenv("ARGS_LOG", argsLog)
 	tmp := isolateTempDir(t)
 
-	ex := NewLibreOfficeExtractor("", "", 30*time.Second)
+	ex := NewLibreOfficeExtractor("", "", "", 30*time.Second)
 	md, err := ex.Extract(context.Background(), "letters/old.doc", []byte("legacy word bytes"))
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
@@ -281,7 +281,7 @@ func TestLibreOfficeExtract_ParallelProfilesDiffer(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		log := filepath.Join(logs, strconv.Itoa(i))
 		t.Setenv("ARGS_LOG", log)
-		if _, err := NewLibreOfficeExtractor("", "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
+		if _, err := NewLibreOfficeExtractor("", "", "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
 			t.Fatalf("Extract %d: %v", i, err)
 		}
 		raw, _ := os.ReadFile(log)
@@ -309,7 +309,7 @@ func TestLibreOfficeExtract_FailureIsAnError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			usePathOnly(t, writeStubDir(t, map[string]string{"soffice": tc.soffice, "pandoc": fakePandocOK}))
 			tmp := isolateTempDir(t)
-			_, err := NewLibreOfficeExtractor("", "", 30*time.Second).Extract(context.Background(), "bad.doc", []byte("x"))
+			_, err := NewLibreOfficeExtractor("", "", "", 30*time.Second).Extract(context.Background(), "bad.doc", []byte("x"))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Extract error = %v, want it to contain %q", err, tc.want)
 			}
@@ -328,7 +328,7 @@ func TestLibreOfficeExtract_TimeoutKillsProcessGroup(t *testing.T) {
 	tmp := isolateTempDir(t)
 
 	start := time.Now()
-	_, err := NewLibreOfficeExtractor("", "", time.Second).Extract(context.Background(), "slow.doc", []byte("x"))
+	_, err := NewLibreOfficeExtractor("", "", "", time.Second).Extract(context.Background(), "slow.doc", []byte("x"))
 	if elapsed := time.Since(start); elapsed > 20*time.Second {
 		t.Fatalf("timeout took %s, want it bounded near the 1s limit", elapsed)
 	}
@@ -370,7 +370,7 @@ func TestLibreOfficeExtract_TimeoutCoversPandocRead(t *testing.T) {
 	usePathOnly(t, writeStubDir(t, map[string]string{"soffice": fakeSofficeOK, "pandoc": hungPandoc}))
 	tmp := isolateTempDir(t)
 	start := time.Now()
-	_, err := NewLibreOfficeExtractor("", "", time.Second).Extract(context.Background(), "a.doc", []byte("x"))
+	_, err := NewLibreOfficeExtractor("", "", "", time.Second).Extract(context.Background(), "a.doc", []byte("x"))
 	if elapsed := time.Since(start); elapsed > 20*time.Second {
 		t.Fatalf("pandoc step took %s, want it bounded by the 1s libreoffice limit", elapsed)
 	}
@@ -394,7 +394,7 @@ func TestLibreOfficeCommandOverride(t *testing.T) {
 	if !LibreOfficeActive(cfg) {
 		t.Fatalf("engine inactive with a functional configured binary: %s", LibreOfficeInstallHint(cfg))
 	}
-	md, err := NewLibreOfficeExtractor(cfg.IngestLibreOfficeCommand, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x"))
+	md, err := NewLibreOfficeExtractor("", cfg.IngestLibreOfficeCommand, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x"))
 	if err != nil || !strings.Contains(md, "Привет") {
 		t.Fatalf("Extract via the configured binary = (%q, %v)", md, err)
 	}
@@ -422,7 +422,7 @@ func TestLibreOfficeCommand_PathWithSpaces(t *testing.T) {
 	if !LibreOfficeActive(cfg) {
 		t.Fatalf("a configured binary under a path with a space must be active: %s", LibreOfficeInstallHint(cfg))
 	}
-	if _, err := NewLibreOfficeExtractor(bin, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
+	if _, err := NewLibreOfficeExtractor("", bin, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
 		t.Fatalf("Extract via a path with a space: %v", err)
 	}
 }
@@ -444,7 +444,7 @@ func TestLibreOfficeCommand_RelativePath(t *testing.T) {
 	if !LibreOfficeActive(config.Config{IngestLibreOfficeCommand: rel}) {
 		t.Fatal("the relative binary must pass its probe")
 	}
-	if _, err := NewLibreOfficeExtractor(rel, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
+	if _, err := NewLibreOfficeExtractor("", rel, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
 		t.Fatalf("Extract via a relative binary: %v", err)
 	}
 }
@@ -456,7 +456,7 @@ func TestLibreOfficeExtract_BinaryGoneAfterProbe(t *testing.T) {
 	usePathOnly(t, writeStubDir(t, map[string]string{"pandoc": fakePandocOK}))
 	tmp := isolateTempDir(t)
 	missing := filepath.Join(testutil.TempDir(t), "gone", "soffice")
-	_, err := NewLibreOfficeExtractor(missing, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x"))
+	_, err := NewLibreOfficeExtractor("", missing, "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x"))
 	if err == nil {
 		t.Fatal("Extract with a missing binary must return an error")
 	}
@@ -521,7 +521,7 @@ func TestLibreOfficeConvert_RealSoffice(t *testing.T) {
 	}
 
 	convWork := testutil.TempDir(t)
-	l := NewLibreOfficeExtractor("", "", 120*time.Second)
+	l := NewLibreOfficeExtractor("", "", "", 120*time.Second)
 	docx, err := l.convertToDocx(context.Background(), bin, convWork, doc)
 	if err != nil {
 		t.Fatalf("convertToDocx: %v", err)

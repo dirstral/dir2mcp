@@ -249,8 +249,8 @@ and `dir2mcp status` and `dir2mcp doctor` tell you what to install.
 | `soffice` (LibreOffice) **and** `pandoc` | `libreoffice` (T2) | legacy Word `.doc` | `brew install --cask libreoffice`, `apt-get install --no-install-recommends libreoffice-writer-nogui` (Debian 12, Ubuntu 22.04 and later), plus pandoc |
 
 The `libreoffice` engine needs both binaries: it converts each `.doc` to
-`.docx` with headless LibreOffice in a private temporary folder, then reads the
-`.docx` with pandoc. It never writes next to the source file, so a read-only
+`.docx` with headless LibreOffice in a private temporary folder outside the
+corpus root, then reads the `.docx` with pandoc. It never writes next to the source file, so a read-only
 corpus mount works. dir2mcp uses `ingest.libreoffice.command` when it is set,
 else it looks for `soffice` first, then `libreoffice`.
 `libreoffice-writer-nogui` is the smallest package that converts Word files on

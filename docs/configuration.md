@@ -531,7 +531,9 @@ either is missing, the engine is off and each `.doc` is a durable skip
 
 For each `.doc`, the engine:
 
-1. Copies the bytes into a new private temporary folder outside the corpus. It
+1. Copies the bytes into a new private temporary folder outside the corpus.
+   Only the owner of the dir2mcp process can read or write this folder (mode
+   `0700` on POSIX systems), because it holds the document text. The engine
    never writes into the corpus, so a read-only corpus mount works.
 2. Runs `soffice --headless --norestore --convert-to docx` in that folder, with
    a LibreOffice profile and an output folder for that conversion only, so
@@ -543,6 +545,13 @@ For each `.doc`, the engine:
    `provider: libreoffice`.
 4. Removes the temporary folder after the read, also after a failure or a
    timeout in either step.
+
+The temporary folder is in the system temporary directory (`TMPDIR` on POSIX
+systems). When that directory is inside the corpus root, the engine uses the
+user cache directory (for example `~/.cache` on Linux or `~/Library/Caches` on
+macOS). When that directory is also inside the corpus root, the engine is
+unavailable, each `.doc` is an `unsupported_format` skip, and `dir2mcp doctor`
+tells you to set `TMPDIR` to a directory outside the corpus root.
 
 Under `ingest.extractor: auto` the engine runs beside the primary engine and
 reads only `.doc`. `ingest.extractor: libreoffice` pins it: only `.doc` is
@@ -563,6 +572,7 @@ ingest:
 - When the limit expires, dir2mcp stops every process the engine started for the document (the whole LibreOffice process tree, with `taskkill /T` on Windows, or the pandoc process) and records an error for that document only. Indexing continues with the next document. The error names the document and the setting, for example `libreoffice extract old/notes.doc: libreoffice extraction timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
 - A conversion that fails (for example an encrypted or damaged `.doc`) is a per-document error under the usual rules. The daemon log gets one line that names the engine and the document.
 - A `.doc` that an earlier scan recorded as an `unsupported_format` skip or error is extracted on the first scan in which the engine is available, also when its content is unchanged. You do not need `--force` or a reindex.
+- A `.doc` that is already indexed (`status=ok`) keeps its text while its content is unchanged. A new engine reads it again only on an explicit `dir2mcp reindex`, so a new engine never reads a corpus again without your request.
 
 See [optional extraction binaries](install.md#optional-extraction-binaries) for the install commands.
 
