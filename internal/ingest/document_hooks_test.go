@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // docErrorStubStore is the minimal model.Store needed to drive
@@ -68,7 +69,7 @@ func TestPersistNonFatalDocError_NotifiesWithRedactedMessage(t *testing.T) {
 	doc := model.Document{RelPath: "docs/broken.pdf", DocType: "pdf"}
 	cause := errors.New("ocr call failed: token s3cr3t-abc123 rejected")
 
-	svc.persistNonFatalDocError(context.Background(), doc, cause, []*regexp.Regexp{secret})
+	svc.persistNonFatalDocError(context.Background(), doc, cause, secretmatch.New([]*regexp.Regexp{secret}, nil))
 
 	if calls != 1 {
 		t.Fatalf("callback invoked %d times, want exactly 1", calls)

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +27,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/scancache"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subexport"
@@ -504,7 +504,7 @@ type Service struct {
 	// annotation, recognition, sidecar) and threading one more argument through all
 	// of them would say nothing the existing per-document Service state does not
 	// already say: the scan loop is sequential, at most one asset is in flight.
-	docSecretPatterns []*regexp.Regexp
+	docSecretPatterns *secretmatch.Matcher
 
 	// secretExcludedThisDoc records that a DERIVED text of the document currently
 	// being processed matched a configured secret pattern (#681), so the document
@@ -513,6 +513,14 @@ type Service struct {
 	// sequential-scan justification as quarantinedThisDoc; reset by
 	// beginDocumentSecretScope at each document entry point.
 	secretExcludedThisDoc bool
+
+	// secretWithholdFailedThisDoc records that withholding the current document
+	// did not complete: its live representations could not be retired, or its
+	// `secret_excluded` row could not be written (SPEC §7.2). The row is then
+	// left without its done marker and the document fails, so the next scan
+	// processes it again and retries, instead of settling a withheld row whose
+	// chunks are still searchable. Reset with secretExcludedThisDoc.
+	secretWithholdFailedThisDoc bool
 
 	// reconcileOutputs arms the per-document output-set reconciliation (#692) for
 	// the scan currently running. It is set once per scan by
@@ -1019,7 +1027,7 @@ func (s *Service) recordPartialTranscriptSkip(ctx context.Context, doc model.Doc
 // credit the document as indexed (#426), because it is now recorded as either an
 // error or a skip. (The error-vs-skip counting is done here, not by the caller, so
 // returning true never double-counts.)
-func (s *Service) degradeUnsupportedExtraction(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp) (suppressCredit bool) {
+func (s *Service) degradeUnsupportedExtraction(ctx context.Context, doc model.Document, secretPatterns *secretmatch.Matcher) (suppressCredit bool) {
 	cause := unsupportedExtractionErr(doc.RelPath, s.extractorLabel())
 	if s.onUnsupported == onUnsupportedStrict {
 		s.getLogger().Printf("unsupported format (strict) for %s (%s): %v", doc.RelPath, doc.DocType, cause)
@@ -1928,7 +1936,7 @@ func (s *Service) SetQualityGate(gate *quality.Gate) {
 }
 
 // ProcessDocument exposes single-document processing for external tests.
-func (s *Service) ProcessDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+func (s *Service) ProcessDocument(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher, forceReindex bool) error {
 	return s.processDocument(ctx, f, secretPatterns, forceReindex, nil)
 }
 
@@ -2124,8 +2132,16 @@ func (s *Service) runScan(ctx context.Context) error {
 	oversizeDrops.recordHeld(variants.Oversize)
 	s.reportVariantCapInteractions(variants.Interactions, discoverOpts.MediaVariants.Select, capMB)
 
-	compiledSecrets, err := compileSecretPatterns(s.cfg.SecretPatterns)
+	compiledSecrets, err := compileSecretMatcher(s.cfg)
 	if err != nil {
+		return err
+	}
+	// A changed pattern set (a binary upgrade with new defaults, or an operator
+	// edit) must reach documents withheld under the old set, which the
+	// incremental gates would otherwise never re-read, and indexed documents
+	// that the new set matches (SPEC §7.2, spec 0.93.0). Both are applied here,
+	// before any document is visited.
+	if err := s.beginSecretPolicyReevaluation(ctx, compiledSecrets); err != nil {
 		return err
 	}
 
@@ -2213,7 +2229,7 @@ func (s *Service) finishScan(ctx context.Context, existing, seen map[string]stru
 // representation generator performs differs, governed by s.activePass. The seen
 // set is shared across passes so markMissingAsDeleted sees the union of assets
 // observed in either pass.
-func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []DiscoveredFile, compiledSecrets []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []DiscoveredFile, compiledSecrets *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}) error {
 	s.activePass = pass
 	s.batch.startPass(pass.label(), len(discovered))
 
@@ -2479,7 +2495,7 @@ func (s *Service) skipUnchangedDocument(ctx context.Context, f DiscoveredFile, e
 // status="error" row (with the source ETag preserved) and returns the original
 // build error. The scan error counter is intentionally not incremented here:
 // runScan already counts any non-nil return value as an error.
-func (s *Service) persistBuildError(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, buildErr error) error {
+func (s *Service) persistBuildError(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher, buildErr error) error {
 	doc := model.Document{
 		RelPath:      f.RelPath,
 		DocType:      ClassifyDocType(f.RelPath),
@@ -2548,7 +2564,7 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 // processDocument indexes one discovered file: it builds the document row from the
 // file's content, records the status transition, and generates the representations
 // of an ok document.
-func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}) error {
 	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
 	// flag. The scan loop is sequential (at most one asset in flight), so resetting
 	// here — at the VERY START, before any early-return branch (build error, remote
@@ -2604,16 +2620,14 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// no-op when no batch run is active.
 	s.recordContentHash(doc.ContentHash)
 
-	existingDoc, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
-	if isUnexpectedStoreErr(err) {
-		return fmt.Errorf("get existing document: %w", err)
-	}
-
 	// #681: a secret found in DERIVED text is not reproducible from the source
 	// bytes, so the verdict is carried on the row rather than recomputed. Applied
 	// before the gate and the upsert so an unchanged withheld document stays
 	// withheld instead of being written back as "ok".
-	carrySecretExclusion(&doc, existingDoc)
+	existingDoc, err := s.existingDocWithSecretVerdict(ctx, &doc)
+	if err != nil {
+		return err
+	}
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
@@ -2705,12 +2719,27 @@ func (s *Service) settleProcessedDocument(
 	finalContentHash string,
 	nonFatalErrored, indexedPending bool,
 ) error {
+	// Under the two-phase split, the stamp below clears the secret-policy
+	// pending mark before the derivation pass has checked the translations
+	// (SPEC §7.2). Retire them first, before any step reads the document's
+	// representations (the summary below reads them and sends them to a
+	// provider), so no unchecked text is read or stays live.
+	if err := s.retireUncheckedTranslations(ctx, doc.RelPath); err != nil {
+		return err
+	}
 	// Derive the optional document-level `summary` representation over the
 	// committed chunks (SPEC §5.2/§9.7). It runs AFTER the fine chunks are written
 	// (it summarizes them) and is fail-open by construction: it never returns an
 	// error, so an absent summary leaves the document fully indexed and
 	// flat-retrievable, and the next scan retries.
 	s.GenerateDocumentSummaries(ctx, *doc)
+	// The summary step checks its source and its output against the secret
+	// policy. A match withheld the document there, so it is settled as
+	// secret_excluded, and none of the steps below runs: they would finalize it
+	// as indexed and clear its pending mark (SPEC §7.2).
+	if s.secretExcludedThisDoc {
+		return s.finalizeSecretExcluded(ctx, doc, finalContentHash)
+	}
 	// Every output this pipeline produces for the document has now committed, so
 	// it is safe to retire the ones it no longer produces (#692). Running the
 	// reconciliation AFTER the generation pass is what guarantees a representation
@@ -2944,7 +2973,7 @@ func (s *Service) suppressIndexedCredit(nonFatalErrored bool) bool {
 // is configured. Non-media documents, sidecar-transcript documents, and assets
 // with no source transcript are recorded as skipped and produce nothing — keeping
 // the derivation pass's per-asset manifest/progress totals faithful (§8.6.11).
-func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) error {
+func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher) error {
 	// The per-document quality-gate quarantine flag (§8.6.6 / #426) was already
 	// reset at processDocument entry (deriveDocument is reached only from there),
 	// so a translation rejected in this derivation pass is counted once and cannot
@@ -2962,6 +2991,16 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	doc, err := s.store.GetDocumentByPath(ctx, f.RelPath)
 	if isUnexpectedStoreErr(err) {
 		return fmt.Errorf("get existing document: %w", err)
+	}
+	// A withheld document can still hold live representations: a derivation
+	// pass that withheld it for a translated transcript may have failed to
+	// retire them. Its done marker stays stamped (blanking it would republish
+	// the clean transcript), so the fast path never re-reads it. Retire again
+	// here, on every derivation pass; with nothing live the step is one list
+	// query and changes nothing.
+	if err == nil && doc.Status == string(model.DocumentStatusSecretExcluded) {
+		s.markActiveSkipped()
+		return s.retireRepresentationsForPath(ctx, doc.RelPath, "secret policy")
 	}
 	// A document the transcription pass did not record as a healthy media asset has
 	// no source transcript to translate or to write back; skip it.
@@ -3113,7 +3152,7 @@ func (s *Service) readDocumentContent(ctx context.Context, relPath string) ([]by
 // content changed (or a full reindex was requested) it extracts and processes
 // the members; otherwise it retains the existing member paths in seen so that
 // markMissingAsDeleted does not tombstone them.
-func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
+func (s *Service) handleArchiveDocument(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
 	if needsProcessing {
 		complete, err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen)
 		if err != nil {
@@ -3236,7 +3275,7 @@ func (s *Service) archiveMaxTotalBytesEff() int64 {
 // failure (an unsupported format, an unreadable archive, or context cancellation)
 // the caller persists/propagates separately; complete is meaningless when
 // err != nil.
-func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) (complete bool, err error) {
+func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}) (complete bool, err error) {
 	// Archive readers need a real filesystem path. Localize returns the in-root
 	// path for a local corpus (no-op cleanup) or a temp download for an object
 	// store, so this works uniformly across backends.
@@ -3318,7 +3357,7 @@ func (s *Service) reportArchiveExtraction(archiveRelPath string, extraction arch
 // One bad member is logged and does not abort the rest (#398 best-effort); it
 // only clears the allOK result so the container's done marker stays withheld.
 // A non-nil error is context cancellation, which must abort the whole archive.
-func (s *Service) ingestArchiveMembers(ctx context.Context, f DiscoveredFile, members []archiveMember, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) (allOK bool, err error) {
+func (s *Service) ingestArchiveMembers(ctx context.Context, f DiscoveredFile, members []archiveMember, secretPatterns *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}) (allOK bool, err error) {
 	allOK = true
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
@@ -3486,7 +3525,7 @@ func buildArchiveMemberDocument(
 	content []byte,
 	mtimeUnix int64,
 	skipExtraction bool,
-	secretPatterns []*regexp.Regexp,
+	secretPatterns *secretmatch.Matcher,
 ) model.Document {
 	doc := model.Document{
 		RelPath:     relPath,
@@ -3512,7 +3551,7 @@ func buildArchiveMemberDocument(
 // processDocumentFromContent ingests a document whose content is already in
 // memory (e.g. an archive member). relPath is the virtual path stored in the
 // documents table; mtimeUnix is inherited from the parent archive.
-func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns *secretmatch.Matcher, forceReindex bool) error {
 	// Each archive member is an independent document, so it opens its own
 	// per-document secret scope (#681) even though the members of one archive run
 	// under a single processDocument entry.
@@ -3535,7 +3574,9 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// #681: same carry as the top-level path, for the same reason. A member
 	// withheld for a secret in its DERIVED text must not be written back as "ok"
 	// when the container is re-extracted with the member's bytes unchanged.
-	carrySecretExclusion(&doc, existingDoc)
+	if err := s.settleSecretVerdict(ctx, &doc, existingDoc); err != nil {
+		return err
+	}
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 
 	// Withhold the content_hash done marker until representations commit so an
@@ -3585,7 +3626,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 
 // buildDocumentWithContent reads the file's content and returns its document row,
 // with the status (ok, skipped or secret_excluded) and the content hash.
-func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
+func (s *Service) buildDocumentWithContent(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher) (model.Document, []byte, error) {
 	docType := ClassifyDocType(f.RelPath)
 	doc := model.Document{
 		RelPath:   f.RelPath,
@@ -4122,7 +4163,7 @@ func (s *Service) addRepresentations(delta int64) {
 // `augment` keeps OCR and adds the media chunks. It returns whether any media
 // chunks were produced so the caller can apply the same `replace`-skips-text
 // rule to the audio transcript path.
-func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp) (mediaProduced, nonFatalErrored bool, err error) {
+func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns *secretmatch.Matcher) (mediaProduced, nonFatalErrored bool, err error) {
 	// A non-empty span set means media chunks will be produced. In `replace` we
 	// then skip OCR; in `augment` OCR is kept alongside.
 	spans := s.mediaSpansFor(ctx, doc, content)
@@ -4455,7 +4496,7 @@ func isEmbeddableAudio(relPath string) bool {
 // status="error" and incremented the error counter itself while returning no
 // hard error: the caller MUST NOT then also credit the document as indexed, or it
 // would be double-counted as both indexed and error (issue #426).
-func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex bool) (bool, error) {
+func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte, secretPatterns *secretmatch.Matcher, forceReindex bool) (bool, error) {
 	// Reset the per-document quality-gate quarantine flag (§8.6.6 / #426). The scan
 	// loop is sequential, so this scopes the flag to the document about to be
 	// processed even though it is Service-level state. The #894
@@ -4573,7 +4614,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 // runs. Its already-persisted status="error" and error count are preserved either
 // way, so the transcript is retried on the next incremental run even when
 // recognition indexed annotations in the meantime.
-func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep, transcriptSoftFailed bool) (bool, error) {
+func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns *secretmatch.Matcher, noVideoRep, transcriptSoftFailed bool) (bool, error) {
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
 		// The daemon itself is going away (shutdown, an outer deadline): that says
@@ -4671,7 +4712,7 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 func (s *Service) degradeIncompleteRecognition(
 	doc model.Document,
 	cause error,
-	secretPatterns []*regexp.Regexp,
+	secretPatterns *secretmatch.Matcher,
 	alreadyCounted bool,
 ) bool {
 	// Redact once, then use the same message for both sinks. The recognizer contract
@@ -4746,7 +4787,7 @@ func (s *Service) htmlRoutesToStructured(relPath string) bool {
 // structure, it falls back to flat raw_text so html is never dropped. html has no
 // media/transcript path, so it returns immediately after the text representation;
 // the (nonFatalErrored, err) contract matches generateRepresentations.
-func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp) (bool, error) {
+func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document, content []byte, secretPatterns *secretmatch.Matcher) (bool, error) {
 	if se, ok := s.extractor.(structuredExtractor); ok {
 		res, err := s.readOrComputeStructured(ctx, doc, content, se)
 		switch {
@@ -4819,7 +4860,7 @@ func (s *Service) resolveSidecarTranscript(ctx context.Context, doc model.Docume
 // no transcript, no sidecar and no media chunks — a PROVISIONAL verdict the
 // caller finalizes only after recognition has had its chance, since recognition
 // is an independent representation source (#622).
-func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, bool, error) {
+func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns *secretmatch.Matcher, forceReindex, mediaProduced bool) (bool, bool, error) {
 	done, err := s.resolveSidecarTranscript(ctx, doc, forceReindex)
 	if err != nil || done {
 		return false, false, err
@@ -4943,7 +4984,7 @@ func (s *Service) retireStaleSidecarTranscripts(ctx context.Context, doc model.D
 // (#413). The upsert error is logged and swallowed because the original failure
 // is the more actionable signal, mirroring the generateRepresentations error
 // path. The live error counter is incremented separately by the caller.
-func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Document, cause error, secretPatterns []*regexp.Regexp) {
+func (s *Service) persistNonFatalDocError(ctx context.Context, doc model.Document, cause error, secretPatterns *secretmatch.Matcher) {
 	doc.Status = string(model.DocumentStatusError)
 	doc.ErrorMessage = RedactSecretsInMessage(cause.Error(), secretPatterns)
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
@@ -5004,7 +5045,7 @@ func (s *Service) notifyDocumentError(doc model.Document) {
 // On failure the container was re-persisted as an error and its skipped credit
 // withdrawn (addSkipped(-1)), so it must raise a `file_error` instead — the two
 // events partition the never-indexed set (SPEC §3.2).
-func (s *Service) handleArchiveDocumentAndNotify(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
+func (s *Service) handleArchiveDocumentAndNotify(ctx context.Context, doc model.Document, f DiscoveredFile, secretPatterns *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}, needsProcessing bool, finalContentHash string) error {
 	if err := s.handleArchiveDocument(ctx, doc, f, secretPatterns, forceReindex, seen, needsProcessing, finalContentHash); err != nil {
 		return err
 	}
@@ -6688,7 +6729,7 @@ func annotationPreview(flattened string) string {
 // "stored": true and echoes the annotation back to the caller. The returned
 // sentinel and its message carry no part of the matched text.
 func (s *Service) screenAnnotationForSecrets(doc model.Document, jsonText, flattened string) error {
-	patterns, err := compileSecretPatterns(s.cfg.SecretPatterns)
+	patterns, err := compileSecretMatcher(s.cfg)
 	if err != nil {
 		return fmt.Errorf("compile secret patterns: %w", err)
 	}

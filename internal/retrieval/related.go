@@ -36,10 +36,25 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
-	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, k)
+	// A seed document that waits for re-evaluation against a broader secret
+	// policy is withheld whole (SPEC §7.2, spec 0.93.0). Its text must not
+	// reach the embedder, so the check runs before relatedNeighbors embeds it.
+	if err := s.rejectPendingSeed(ctx, seed); err != nil {
+		return model.RelatedResult{}, err
+	}
+	// Retrieve more than k, so the secret screen below can leave hits out and
+	// the next neighbours take their places (spec 0.93.0). The cut to k runs
+	// after the screen.
+	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, 2*k+relatedExcludeMargin)
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
+	// The same secret screen search applies (spec 0.93.0).
+	hits, err = s.screenServedHits(ctx, hits)
+	if err != nil {
+		return model.RelatedResult{}, err
+	}
+	hits = truncateSearchHits(hits, k)
 	indexingComplete, _ := s.IndexingComplete(ctx)
 	return model.RelatedResult{
 		SourceChunkID:    seed.chunkID,
@@ -87,6 +102,20 @@ type relatedSeed struct {
 	axis        string // text|code|both
 	excludeIDs  map[uint64]struct{}
 	textsByAxis map[string][]string
+}
+
+// rejectPendingSeed returns model.ErrForbidden when the seed document waits
+// for a secret-policy re-evaluation, for a chunk_id seed and a rel_path seed
+// alike. A failed lookup is returned: the seed cannot be proven safe to embed.
+func (s *Service) rejectPendingSeed(ctx context.Context, seed *relatedSeed) error {
+	pending, err := s.secretReevalPending(ctx, seed.relPath)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return model.ErrForbidden
+	}
+	return nil
 }
 
 // resolveRelatedSource dispatches to the chunk_id or rel_path seed resolver.
@@ -190,7 +219,9 @@ func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, se
 	perAxis := make([][]model.SearchHit, 0, 2)
 	searched := make([]string, 0, 2)
 	for _, ax := range activeAxes(seed.axis) {
-		texts := seed.textsByAxis[ax]
+		// Seed text that matches the secret policy is not sent to the
+		// embedder (spec 0.93.0); an axis with no text left is skipped.
+		texts := s.seedTextsNotSecret(seed.textsByAxis[ax])
 		if len(texts) == 0 {
 			continue
 		}
@@ -243,6 +274,21 @@ func (s *Service) indexAndModelForAxis(axis string) (model.Index, string) {
 		return s.codeIndex, s.codeModel
 	}
 	return s.textIndex, s.textModel
+}
+
+// seedTextsNotSecret drops the seed texts that match the secret policy, so
+// text that the policy withholds is not sent to the embedder again.
+func (s *Service) seedTextsNotSecret(texts []string) []string {
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	kept := make([]string, 0, len(texts))
+	for _, text := range texts {
+		if !matcher.MatchString(text) {
+			kept = append(kept, text)
+		}
+	}
+	return kept
 }
 
 // buildSeedVector re-embeds the seed text(s) at the index-time embed role and

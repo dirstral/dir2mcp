@@ -46,12 +46,12 @@ ingest:
 `ingest.max_file_mb` is the per-file size policy, and it is enforced as a bound on the
 reads themselves, not only as a check at discovery. Discovery refuses a file over it, and
 so does every read that follows: the document read, the subtitle sidecar, the
-object-store download, the multimodal media read, and the on-demand `annotate` /
-`transcribe` reads. A check only measures a file at one instant; a file that grows
-afterwards, or an object that serves more bytes than it listed, is caught by the read.
-(`open_file` answers a window rather than a whole file, so its raw-text read carries its
-own budget derived from `max_chars`; the cap still bounds the source read it needs to
-locate cached extracted text.)
+object-store download, the multimodal media read, the on-demand `annotate` /
+`transcribe` reads, and the `open_file` raw-text read. A check only measures a file at
+one instant; a file that grows afterwards, or an object that serves more bytes than it
+listed, is caught by the read. `open_file` reads the whole source, up to the cap, and
+checks all of it against the secret patterns before it returns a window. A source over
+the cap returns `FILE_TOO_LARGE`, because ingest never checked or indexed it either.
 
 During indexing a file over the cap is a **skip, not an error**: it keeps a visible
 `skipped` row with reason `size_cap`, it is counted in the skip breakdown `dir2mcp status`
@@ -404,6 +404,66 @@ affected files. One case waits: on an S3 corpus, an unchanged object with an
 unknown extension that an older version stored as binary keeps that result
 until its ETag changes. Only its bytes can show that it is text, and the S3
 fast path exists to avoid that read. Run `dir2mcp reindex` to re-sniff them.
+
+### Secret patterns (`security.secret_patterns`, `security.secret_allow_patterns`)
+
+A document whose content matches one of the `secret_patterns` regular
+expressions is withheld as `secret_excluded`. For ingest, a list in your
+config replaces the defaults, so copy the defaults into it when you only want
+to add a rule. The tools that return text (`search`, `ask`, `related`,
+`open_file`, `annotate`, `transcribe`) always apply the shipped defaults too,
+also when your list leaves one out. So a tool can refuse text that ingest
+indexed under your list.
+
+```yaml
+security:
+  secret_patterns:
+    - 'AKIA[0-9A-Z]{16}'
+    - '(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}'
+    - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    - '(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
+    - '(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})'
+    - '(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}'
+    - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
+    - 'MYCORP-[A-Z0-9]{24}'   # your own rule
+  secret_allow_patterns:
+    - '(?i)https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?redir_token=[^\s&#;?=:<>"]*'
+```
+
+These are the spec 0.93.0 defaults. The generic token rule is broad on
+purpose: it matches any key that ends in `token`, so it catches the
+credential keys of every provider (`GITHUB_TOKEN`, `VERCEL_TOKEN`,
+`DISCORD_TOKEN`, `id_token`). The `sk-`, `sk_` and `api_` rules require the key
+to start a word, so a URL slug such as `krasnoyarsk-...` is not a key.
+
+`secret_allow_patterns` lists text that looks like a credential but is not
+one. An allow match cancels a match of the generic token rule that it covers
+(starts at or before it and ends at or after it). It never cancels a match of
+any other rule, also when it covers it. A text is withheld when at least one
+match is left. dir2mcp looks at every start position, so a match that starts
+inside a cancelled match is judged on its own. The default allow pattern
+releases only the `redir_token=` parameter of a YouTube redirect link
+(`youtube.com/redirect`): a parameter name alone does not show that its value
+is not a credential. Add your own pattern, anchored to its host, for another
+benign parameter. The default value stops at `&`, `#`, `;`, `?`, `=`, `:`, a
+space, a quote or an angle bracket, so a credential in the next parameter or in
+a second assignment is still found. An empty list cancels nothing. An allow pattern that is not a valid
+regular expression is a `CONFIG_INVALID` error, as a secret pattern is.
+
+After a change to either list, the next scan applies it in both directions;
+no reindex is necessary. A withheld document that the new lists do not match
+is indexed again. When the change can match more (a new or edited secret
+pattern, or a removed or edited allow pattern), the scan also reads every
+indexed document again (OCR, transcription and translation come from their
+caches), and withholds each one that the new lists match. Until the scan has
+read a document again, no tool returns any part of it. A change that can only
+match less reads only the withheld documents again and hides nothing. Only
+three changes count as "can only match less": a removed secret pattern, an
+added allow pattern, and the shipped narrowings of the `sk-`, `sk_` and `api_`
+rules. Any other edit counts as a change that can match more, also one that
+is stricter in fact (for example `MYCORP-[0-9]+` edited to `MYCORP-[0-9]{4}`).
+The scan logs
+`secret policy: security.secret_patterns or security.secret_allow_patterns changed since the last scan; ...`.
 
 ### Document extraction: modes & fallback
 

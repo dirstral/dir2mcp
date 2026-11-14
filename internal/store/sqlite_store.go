@@ -800,6 +800,12 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// without the column gets it here; its rows were all written beside the
 		// media, which is the '' default.
 		`ALTER TABLE emitted_artifacts ADD COLUMN output_root TEXT NOT NULL DEFAULT ''`,
+		// secret_reeval_pending marks a live document that waits for a
+		// secret-policy re-evaluation against a broader pattern set (SPEC
+		// §7.2, spec 0.93.0). Retrieval returns no part of such a document.
+		// ResetForSecretPolicy sets it; UpsertDocument clears it when the row
+		// gets a content hash again.
+		`ALTER TABLE documents ADD COLUMN secret_reeval_pending INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
@@ -1132,7 +1138,8 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   deleted=excluded.deleted,
 		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END,
 		   error_message=excluded.error_message,
-		   skip_reason=excluded.skip_reason`,
+		   skip_reason=excluded.skip_reason,
+		   secret_reeval_pending=CASE WHEN excluded.content_hash <> '' THEN 0 ELSE documents.secret_reeval_pending END`,
 		relPath,
 		normalizeDocType(doc.DocType),
 		normalizeSourceType(doc.SourceType),
@@ -1396,7 +1403,8 @@ func (s *SQLiteStore) RestoreContentHashes(ctx context.Context) error {
 		        SELECT b.content_hash FROM `+reindexHashBackupTable+` b
 		        WHERE b.doc_id = documents.doc_id
 		    )
-		  WHERE doc_id IN (SELECT doc_id FROM `+reindexHashBackupTable+`)`)
+		  WHERE doc_id IN (SELECT doc_id FROM `+reindexHashBackupTable+`)
+		    AND secret_reeval_pending = 0`)
 	if err != nil {
 		return err
 	}

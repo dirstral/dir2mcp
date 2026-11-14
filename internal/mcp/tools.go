@@ -30,6 +30,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/providerfactory"
 	"github.com/dirstral/dir2mcp/internal/relpath"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // maxOpenFilePage caps the open_file page argument so a caller cannot request
@@ -107,6 +108,12 @@ type toolExecutionError struct {
 	Code      string
 	Message   string
 	Retryable bool
+}
+
+// secretMatcher is the optional retriever capability that reports whether text
+// matches the retriever's secret pattern set (the set open_file enforces).
+type secretMatcher interface {
+	MatchesSecret(text string) bool
 }
 
 type retrieverOpenFileWithMeta interface {
@@ -1424,6 +1431,9 @@ func mapRelatedError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "INVALID_FIELD", Message: "chunk_id or rel_path does not resolve to an indexed segment", Retryable: false}
 	case errors.Is(err, model.ErrRelatedNotSupported):
 		return &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "related retrieval not available", Retryable: false}
+	case errors.Is(err, model.ErrForbidden):
+		// The seed document waits for a secret-policy re-evaluation (SPEC §7.2).
+		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	case errors.Is(err, model.ErrIndexNotReady) || errors.Is(err, model.ErrIndexNotConfigured):
 		return &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 	default:
@@ -3417,14 +3427,25 @@ func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool
 // derived text (transcript segments, OCR/annotation previews) that open_file
 // would refuse for a document matching secret_patterns, so mirror the gate here
 // to close the exfiltration path. The offending text is never logged.
+//
+// When the retriever exposes its secret pattern set (retrieval.Service does),
+// the gate uses that set, so annotate/transcribe refuse exactly what open_file,
+// search, ask and related refuse (spec 0.93.0). Otherwise it compiles
+// security.secret_patterns and security.secret_allow_patterns itself.
 func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
+	if screener, ok := s.retriever.(secretMatcher); ok {
+		if screener.MatchesSecret(text) {
+			return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
+		}
+		return nil
+	}
 	s.secretPatternOnce.Do(func() {
-		s.secretPatterns, s.secretPatternErr = ingest.CompileSecretPatterns(s.cfg.SecretPatterns)
+		s.secretPatterns, s.secretPatternErr = secretmatch.Compile(s.cfg.SecretPatterns, s.cfg.SecretAllowPatterns)
 	})
 	if s.secretPatternErr != nil {
 		return &toolExecutionError{Code: "CONFIG_INVALID", Message: fmt.Sprintf("compile secret patterns: %v", s.secretPatternErr), Retryable: false}
 	}
-	if ingest.HasSecretMatch([]byte(text), s.secretPatterns) {
+	if s.secretPatterns.MatchString(text) {
 		return &toolExecutionError{Code: protocol.ErrorCodeForbidden, Message: "forbidden", Retryable: false}
 	}
 	return nil

@@ -5,66 +5,28 @@ import (
 	"context"
 	"errors"
 	"io"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
-// This file holds the bounded read path for open_file (issue #690).
+// This file holds the span selectors for open_file (issue #690).
 //
 // open_file publishes a bounded answer: max_chars is clamped to 50000 runes.
-// The raw-source path used to read the COMPLETE local file or S3 object into
-// memory, convert the full byte slice to a string, scan that string, slice it,
-// and only then truncate. A source that grew after indexing, or a large remote
-// text file, therefore cost unbounded memory for a strictly bounded answer.
-//
-// The selectors below stream the source instead. Each one retains at most one
-// read budget of bytes, and it discards every other byte after it has looked at
-// it. Peak memory is therefore a function of max_chars, not of source size.
-// The shape follows internal/protocol.ReadLimitedResponseBody (PR #803): read
-// through io.LimitReader, keep one unit past the cap so an overflow is visible,
-// and give the caller a clear result instead of a confusing failure.
+// The caller reads the source once, bounded by ingest.max_file_mb, and checks
+// all of it against the secret policy (see openFileFromResolvedPath). The
+// selectors below then stream over those bytes and retain at most one read
+// budget, so the answer itself never costs more than one budget, and no line,
+// page or transcript selection builds a second copy of the source.
 
 const (
 	// openFileReadChunkBytes is the fixed working buffer that moves source
-	// bytes through the selectors and the secret scanner. It bounds the
+	// bytes through the selectors. It bounds the
 	// per-read allocation, and it is large enough that one syscall serves many
 	// lines of ordinary text.
 	openFileReadChunkBytes = 64 << 10
-
-	// secretScanOverlapBytes is the number of trailing bytes that carry from
-	// one scanned chunk into the next. A secret that lands on a chunk boundary
-	// is still matched, because the scanner always sees the boundary inside one
-	// window. 4 KiB is far longer than the shortest match of any credential
-	// pattern the product ships or an operator writes.
-	secretScanOverlapBytes = 4 << 10
-
-	// secretScanMarginBytes is how far past the answer the scanner keeps
-	// reading. The margin covers a secret that starts inside the answer window
-	// and continues past its end, and it holds the scan to a fixed cost instead
-	// of the size of the source.
-	//
-	// The value matches the ingest-time head sample (64 KiB, see
-	// internal/ingest.secretScanSampleBytes). open_file always reads from the
-	// first byte of the source, so every request scans at least the same head
-	// bytes that ingest scans.
-	//
-	// Since #681 that head sample is ingest's FLOOR, not its whole policy: a text
-	// source is scanned in full at ingest time. So a document ingest withholds can
-	// still have a clean early window served here. What SPEC 15.4 requires is
-	// preserved either way, because every byte this tool returns was scanned and
-	// found clean: the credential itself is never served, and neither is anything
-	// behind it. See the note on openFileFromResolvedPath.
-	secretScanMarginBytes = 64 << 10
 )
-
-// errSecretMatch reports that a secret pattern matched the source. It travels
-// out of the reader, so a match stops the read at once instead of after the
-// whole source has moved. The caller maps it to model.ErrForbidden, which is
-// the error the tool contract publishes.
-var errSecretMatch = errors.New("retrieval: source matches a secret pattern")
 
 // openFileReadBudgetBytes returns the number of source bytes that a selector
 // may retain to build a maxChars-rune answer.
@@ -107,104 +69,6 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return c.r.Read(p)
-}
-
-// secretScanner applies the configured secret patterns to a stream instead of
-// to one buffered string. It keeps only a small overlap window, so every byte
-// that open_file reads is covered while memory stays flat.
-//
-// One property differs from a whole-string match: a pattern that is anchored to
-// the start or the end of the text (^ or $ without the multi-line flag) sees a
-// chunk boundary as a text boundary. The drift is fail-closed, because it can
-// only refuse content that a whole-string match would have served. It never
-// serves content that a whole-string match would have refused.
-type secretScanner struct {
-	patterns []*regexp.Regexp
-	// tail holds the last bytes of the previous chunk, and window joins that
-	// tail to the current chunk. Both buffers are reused across chunks, so a
-	// scan of a large source allocates nothing per chunk.
-	tail   []byte
-	window []byte
-}
-
-func newSecretScanner(patterns []*regexp.Regexp) *secretScanner {
-	active := make([]*regexp.Regexp, 0, len(patterns))
-	for _, re := range patterns {
-		if re != nil {
-			active = append(active, re)
-		}
-	}
-	return &secretScanner{patterns: active}
-}
-
-// enabled reports whether any pattern is configured. With no pattern the read
-// stops as soon as the answer is complete, so an object store never sends the
-// bytes past the requested window.
-func (sc *secretScanner) enabled() bool {
-	return sc != nil && len(sc.patterns) > 0
-}
-
-// scan checks one chunk together with the tail of the previous chunk.
-func (sc *secretScanner) scan(p []byte) error {
-	if !sc.enabled() || len(p) == 0 {
-		return nil
-	}
-	window := p
-	if len(sc.tail) > 0 {
-		sc.window = append(sc.window[:0], sc.tail...)
-		sc.window = append(sc.window, p...)
-		window = sc.window
-	}
-	for _, re := range sc.patterns {
-		if re.Match(window) {
-			return errSecretMatch
-		}
-	}
-	sc.keepTail(window)
-	return nil
-}
-
-// keepTail stores the last secretScanOverlapBytes bytes of the scanned window.
-func (sc *secretScanner) keepTail(window []byte) {
-	keep := window
-	if len(keep) > secretScanOverlapBytes {
-		keep = keep[len(keep)-secretScanOverlapBytes:]
-	}
-	sc.tail = append(sc.tail[:0], keep...)
-}
-
-// scanMargin reads secretScanMarginBytes past the answer and keeps none of
-// them, so a secret that begins inside the answer window and runs past its end
-// is still matched. With no pattern configured the function returns at once and
-// those bytes stay unread.
-func (sc *secretScanner) scanMargin(r io.Reader) error {
-	if !sc.enabled() {
-		return nil
-	}
-	// io.Discard reads through a pooled buffer, so the margin keeps no bytes
-	// and allocates nothing per chunk.
-	if _, err := io.Copy(io.Discard, io.LimitReader(r, secretScanMarginBytes)); err != nil {
-		return err
-	}
-	return nil
-}
-
-// scanningReader feeds every byte that a selector reads to the secret scanner
-// before the selector sees it. The scanner therefore covers the stream in
-// order, across both the selection phase and the margin phase.
-type scanningReader struct {
-	r       io.Reader
-	scanner *secretScanner
-}
-
-func (s *scanningReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 {
-		if scanErr := s.scanner.scan(p[:n]); scanErr != nil {
-			return n, scanErr
-		}
-	}
-	return n, err
 }
 
 // boundedBuilder collects selected text up to a hard byte limit. It reports

@@ -24,9 +24,12 @@ import (
 // source that grew after indexing, or a large remote text file, therefore cost
 // unbounded memory and bandwidth for a strictly bounded answer.
 //
-// The tests below fail against the buffered implementation: the capped readers
-// return an error as soon as the read runs past the budget, and the allocation
-// probe sees the whole-source copies.
+// Since spec 0.93.0 open_file checks the WHOLE source against the secret
+// policy before it returns any byte (SPEC §7.2, §15.4), so the read is bounded
+// by ingest.max_file_mb, the cap ingest applies to the same file, and not by
+// max_chars. A source above the cap is refused with FILE_TOO_LARGE after cap+1
+// bytes. The tests below pin that bound: the capped readers fail as soon as the
+// read runs past it, and the allocation probe sees any extra copy.
 
 // errReadPastCap reports that a reader was asked for more bytes than the test
 // allows. It stands in for the memory and bandwidth an unbounded read spends.
@@ -166,13 +169,14 @@ func allocatedBytes(fn func()) uint64 {
 }
 
 // TestOpenFile_LocalSourceGrewAfterIndexing_ReadStaysBounded covers the exact
-// condition #690 describes: the source is far larger than the answer, because it
-// grew after it was indexed. open_file must answer from a bounded read.
+// condition #690 describes: the source grew after it was indexed. A source that
+// grew past ingest.max_file_mb is refused with FILE_TOO_LARGE after cap+1 bytes;
+// ingest refuses the same file at discovery. A source that grew but stays under
+// the cap is checked whole and answered.
 //
-// The probe is allocation. The buffered path allocated the file as bytes, again
-// as a string, and again as a rune slice inside the truncation, so a 24 MiB file
-// cost about 150 MiB. The streaming path reads one read budget: 200004 bytes at
-// the 50000-rune cap.
+// The probe is allocation. The old buffered path allocated a 24 MiB file about
+// six times over (bytes, string, rune slice), about 150 MiB. The bounded read
+// holds at most cap+1 bytes plus the growth of one read buffer.
 func TestOpenFile_LocalSourceGrewAfterIndexing_ReadStaysBounded(t *testing.T) {
 	root := testutil.TempDir(t)
 	relPath := "notes/grown.txt"
@@ -180,87 +184,86 @@ func TestOpenFile_LocalSourceGrewAfterIndexing_ReadStaysBounded(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// The document as indexed: small.
 	if err := os.WriteFile(abs, []byte("short at index time\n"), 0o644); err != nil {
 		t.Fatalf("write small file: %v", err)
 	}
-	// The document as it is now: 24 MiB, with the head still readable.
-	const grownBytes = 24 << 20
+	const capBytes = 4 << 20
 	head := "alpha bravo charlie delta echo foxtrot golf hotel india juliet\n"
-	if err := os.WriteFile(abs, []byte(repeatToSize(head, grownBytes)), 0o644); err != nil {
+	svc := newBoundedService(root)
+	svc.SetMaxFileBytes(capBytes)
+
+	// Grown past the cap: 24 MiB.
+	if err := os.WriteFile(abs, []byte(repeatToSize(head, 24<<20)), 0o644); err != nil {
 		t.Fatalf("grow file: %v", err)
 	}
-
-	svc := newBoundedService(root)
-
-	var out string
-	var truncated bool
 	var err error
 	allocated := allocatedBytes(func() {
-		out, truncated, err = svc.OpenFileWithMeta(context.Background(), relPath, model.Span{}, 50000)
+		_, _, err = svc.OpenFileWithMeta(context.Background(), relPath, model.Span{}, 50000)
 	})
+	if !errors.Is(err, corpusfs.ErrObjectTooLarge) {
+		t.Fatalf("OpenFileWithMeta on a source past the cap: err = %v, want corpusfs.ErrObjectTooLarge", err)
+	}
+	if allocCap := uint64(4 * capBytes); allocated > allocCap {
+		t.Fatalf("open_file allocated %d bytes for a source past a %d-byte cap; want at most %d", allocated, capBytes, allocCap)
+	}
+
+	// Grown, but under the cap: 3 MiB.
+	if err := os.WriteFile(abs, []byte(repeatToSize(head, 3<<20)), 0o644); err != nil {
+		t.Fatalf("grow file: %v", err)
+	}
+	out, truncated, err := svc.OpenFileWithMeta(context.Background(), relPath, model.Span{}, 50000)
 	if err != nil {
-		t.Fatalf("OpenFileWithMeta on a grown source returned err: %v", err)
+		t.Fatalf("OpenFileWithMeta on a source under the cap returned err: %v", err)
 	}
 	if got := utf8.RuneCountInString(out); got != 50000 {
 		t.Fatalf("answer holds %d runes, want the published cap of 50000", got)
 	}
 	if !truncated {
-		t.Fatalf("expected truncated=true for a 24 MiB source answered with 50000 runes")
+		t.Fatalf("expected truncated=true for a 3 MiB source answered with 50000 runes")
 	}
 	if !strings.HasPrefix(out, "alpha bravo charlie") {
 		t.Fatalf("answer does not start with the document head: %q", out[:40])
 	}
-	// One read budget is 200004 bytes. 8 MiB leaves generous room for the
-	// runtime's own allocations while still failing the buffered path, which
-	// allocated about 150 MiB for this file.
-	const allocCap = 8 << 20
-	if allocated > allocCap {
-		t.Fatalf("open_file allocated %d bytes for a %d-byte source; want at most %d", allocated, grownBytes, allocCap)
-	}
 }
 
-// TestOpenFile_CorpusFSLargeObject_StopsAfterTheWindow verifies that a large
-// remote text object is not downloaded in full for a bounded answer. The capped
-// reader fails the request once the read runs past 1 MiB.
-func TestOpenFile_CorpusFSLargeObject_StopsAfterTheWindow(t *testing.T) {
+// TestOpenFile_CorpusFSLargeObject_StopsAtTheCap verifies that a large remote
+// text object is not downloaded past the cap. The capped reader fails the
+// request once the read runs past cap+1 bytes.
+func TestOpenFile_CorpusFSLargeObject_StopsAtTheCap(t *testing.T) {
 	root := testutil.TempDir(t)
 	const objectBytes = 16 << 20
+	const capBytes = 1 << 20
 	body := repeatToSize("remote object line with enough text to be interesting\n", objectBytes)
-	fs := &cappedCorpusFS{objects: map[string][]byte{"docs/big.md": []byte(body)}, cap: 1 << 20}
+	fs := &cappedCorpusFS{objects: map[string][]byte{"docs/big.md": []byte(body)}, cap: capBytes + 1}
 
 	svc := newBoundedService(root)
 	svc.SetCorpusFS(fs)
+	svc.SetMaxFileBytes(capBytes)
 
-	out, truncated, err := svc.OpenFileWithMeta(context.Background(), "docs/big.md", model.Span{}, 20000)
-	if err != nil {
-		t.Fatalf("OpenFileWithMeta over CorpusFS returned err: %v", err)
+	_, _, err := svc.OpenFileWithMeta(context.Background(), "docs/big.md", model.Span{}, 20000)
+	if !errors.Is(err, corpusfs.ErrObjectTooLarge) {
+		t.Fatalf("OpenFileWithMeta over CorpusFS: err = %v, want corpusfs.ErrObjectTooLarge", err)
 	}
-	if got := utf8.RuneCountInString(out); got != 20000 {
-		t.Fatalf("answer holds %d runes, want 20000", got)
-	}
-	if !truncated {
-		t.Fatalf("expected truncated=true for a 16 MiB object answered with 20000 runes")
-	}
-	if fs.bytesRead > 1<<20 {
-		t.Fatalf("read %d bytes of a %d-byte object for a 20000-rune answer", fs.bytesRead, objectBytes)
+	if fs.bytesRead > capBytes+1 {
+		t.Fatalf("read %d bytes of a %d-byte object; the read must stop at cap+1", fs.bytesRead, objectBytes)
 	}
 }
 
-// TestOpenFile_LateLineRange_DoesNotBufferTheTail covers the line addressing
-// case. Line 9000 is not the first 50000 characters: the selector must stream
-// past the lines before it and keep none of them, and it must stop once the
-// requested range is complete instead of buffering the rest of the document.
-func TestOpenFile_LateLineRange_DoesNotBufferTheTail(t *testing.T) {
+// TestOpenFile_LateLineRange_ReturnsTheRequestedLines covers the line
+// addressing case. Line 9000 is not the first 50000 characters: the selector
+// must stream past the lines before it and return exactly the requested range,
+// also when a large tail follows it.
+func TestOpenFile_LateLineRange_ReturnsTheRequestedLines(t *testing.T) {
 	root := testutil.TempDir(t)
 	var b strings.Builder
 	for i := 1; i <= 9002; i++ {
 		fmt.Fprintf(&b, "line %d: the quick brown fox jumps over the lazy dog\n", i)
 	}
 	prefixBytes := b.Len()
-	// A large tail after the requested range. A bounded read never touches it.
-	b.WriteString(repeatToSize("tail padding that must never be buffered\n", 16<<20))
-	fs := &cappedCorpusFS{objects: map[string][]byte{"docs/lines.txt": []byte(b.String())}, cap: prefixBytes + (1 << 20)}
+	// A large tail after the requested range. The secret check reads it; the
+	// answer does not contain it.
+	b.WriteString(repeatToSize("tail padding after the requested range\n", 4<<20))
+	fs := &cappedCorpusFS{objects: map[string][]byte{"docs/lines.txt": []byte(b.String())}, cap: prefixBytes + (8 << 20)}
 
 	svc := newBoundedService(root)
 	svc.SetCorpusFS(fs)
@@ -369,47 +372,30 @@ func TestOpenFile_SecretBeforeTheWindow_AlwaysRefuses(t *testing.T) {
 	}
 }
 
-// TestOpenFile_SecretFarPastTheWindow_IsNotRead documents the one semantic the
-// bounded read changes on purpose. The buffered path read the whole source, so
-// a secret 8 MiB down refused the head of the document as well. The bounded
-// read stops after the answer and its margin, so the head is served. The bytes
-// it returns were all scanned, and ingest itself decides on a 64 KiB sample, so
-// this document was indexed and searchable already.
-func TestOpenFile_SecretFarPastTheWindow_IsNotRead(t *testing.T) {
+// TestOpenFile_SecretFarPastTheWindow_Refuses pins the whole-source check
+// (spec 0.93.0). The earlier bounded read stopped after the answer and a margin,
+// so it served the head of a document whose credential sat 8 MiB down, a
+// document that ingest withholds. The whole-source check refuses it, as ingest
+// does, and the read stays bounded by the cap.
+func TestOpenFile_SecretFarPastTheWindow_Refuses(t *testing.T) {
 	root := testutil.TempDir(t)
 	relPath := "docs/late-secret.txt"
 	head := repeatToSize("harmless prose that says nothing at all\n", 8<<20)
 	svc := writeSecretDoc(t, root, relPath, head+"\nAKIAIOSFODNN7EXAMPLE\n")
 
-	var out string
-	var err error
-	allocated := allocatedBytes(func() {
-		out, err = svc.OpenFile(context.Background(), relPath, model.Span{}, 20000)
-	})
-	if err != nil {
-		t.Fatalf("OpenFile returned err: %v", err)
-	}
-	if !strings.HasPrefix(out, "harmless prose") {
-		t.Fatalf("expected the scanned head of the document, got %q", out[:40])
-	}
-	if strings.Contains(out, "AKIA") {
-		t.Fatalf("the answer holds secret material")
-	}
-	const allocCap = 8 << 20
-	if allocated > allocCap {
-		t.Fatalf("open_file allocated %d bytes for an 8 MiB source; want at most %d", allocated, allocCap)
+	if _, err := svc.OpenFile(context.Background(), relPath, model.Span{}, 20000); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for a secret far past the window, got %v", err)
 	}
 }
 
-// TestOpenFile_SecretAcrossAChunkBoundary_StillRefuses checks the overlap the
-// streaming scanner carries between chunks. A secret that straddles two reads
-// must still match.
+// TestOpenFile_SecretAcrossAChunkBoundary_StillRefuses checks that a secret
+// that straddles two reads of the source still matches.
 func TestOpenFile_SecretAcrossAChunkBoundary_StillRefuses(t *testing.T) {
 	root := testutil.TempDir(t)
 	relPath := "docs/boundary.txt"
 	const secret = "AKIAIOSFODNN7EXAMPLE"
 	// Place the secret so that it spans several plausible chunk edges. Every
-	// offset stays inside the answer plus its scan margin.
+	// offset sits near a 64 KiB read boundary.
 	for _, offset := range []int{(64 << 10) - 7, (64 << 10) - 1, 100 << 10} {
 		body := strings.Repeat("x", offset) + secret + strings.Repeat("y", 4096)
 		svc := writeSecretDoc(t, root, relPath, body)

@@ -4,3 +4,5 @@ not_a_token_field: value
 version=1.2.3
 Authorization: Bearer abc.def.ghi
 plain text without credentials
+# spec 0.93.0: the default allow list releases the redir_token of a YouTube redirect link
+https://www.youtube.com/redirect?event=video_description&redir_token=QUFFLUhqbWRkRThBZVXy7Zq9WvXy7Zq9Wv&q=https%3A%2F%2Fexample.org

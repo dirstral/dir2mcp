@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -133,7 +133,7 @@ func (s *Service) Watch(ctx context.Context) error {
 		s.getLogger().Printf("watch: registering directories: %v", err)
 	}
 
-	secrets, err := compileSecretPatterns(s.cfg.SecretPatterns)
+	secrets, err := compileSecretMatcher(s.cfg)
 	if err != nil {
 		return err
 	}
@@ -199,7 +199,7 @@ type fsWatchLoop struct {
 	svc     *Service
 	watcher *fsnotify.Watcher
 	absRoot string
-	secrets []*regexp.Regexp
+	secrets *secretmatch.Matcher
 	opts    DiscoverOptions
 	// excluded is the directory ignore set resolved from opts once, so every
 	// watch decision reads the list the initial scan read (#773).
