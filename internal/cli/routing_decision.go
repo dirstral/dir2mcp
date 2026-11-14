@@ -77,6 +77,9 @@ func routingDecisions(cfg config.Config) []routingRow {
 	if row, ok := pandocRow(cfg, primary); ok {
 		rows = append(rows, row)
 	}
+	if row, ok := libreofficeRow(cfg, primary); ok {
+		rows = append(rows, row)
+	}
 	return rows
 }
 
@@ -133,4 +136,28 @@ func pandocRow(cfg config.Config, primary ingest.ExtractorDecision) (routingRow,
 		}, true
 	}
 	return routingRow{Capability: "Pandoc", Provider: d.Name, Reason: "secondary engine; " + d.Reason}, true
+}
+
+// libreofficeRow renders the capability-activated libreoffice engine (T2, spec
+// 0.93.0) as its own banner row under `ingest.extractor: auto`, mirroring
+// pandocRow: a missing soffice or pandoc is what leaves legacy .doc uncovered,
+// and SPEC §7.7 lists an eligible-but-unavailable engine with its reason. No row
+// when libreoffice is the primary (the OCR row names it) or when the policy
+// makes it ineligible.
+func libreofficeRow(cfg config.Config, primary ingest.ExtractorDecision) (routingRow, bool) {
+	if primary.Name == "libreoffice" {
+		return routingRow{}, false
+	}
+	d := ingest.DescribeLibreOfficeEngine(cfg)
+	if d.Source == "ineligible" {
+		return routingRow{}, false
+	}
+	if d.Name == "" {
+		return routingRow{
+			Capability: "LibreOffice",
+			Provider:   "unavailable",
+			Reason:     d.Reason + "; T2 engine for legacy .doc",
+		}, true
+	}
+	return routingRow{Capability: "LibreOffice", Provider: d.Name, Reason: "secondary engine; " + d.Reason}, true
 }

@@ -60,8 +60,15 @@ func computeExtractionCoverage(ctx context.Context, counter extractableExtension
 	// pandoc (T2, #393) can be a second active engine under `auto` (and is the
 	// primary under its pin); fold its availability in so a format it covers is
 	// never reported as a gap.
-	pandocActive := ingest.PandocActive(cfg)
-	uncovered, docs := uncoveredExtractableExtensions(extCounts, cfg.IngestExtractor, structured, flatOCR, pandocActive)
+	// The libreoffice engine (T2, spec 0.93.0) is the same kind of secondary
+	// engine, for legacy .doc.
+	engines := ingest.ActiveEngines{
+		Structured:  structured,
+		FlatOCR:     flatOCR,
+		Pandoc:      ingest.PandocActive(cfg),
+		LibreOffice: ingest.LibreOfficeActive(cfg),
+	}
+	uncovered, docs := uncoveredExtractableExtensions(extCounts, cfg.IngestExtractor, engines)
 	cov := extractionCoverage{Engine: decision.Name, Uncovered: uncovered, Docs: docs}
 	if len(uncovered) == 0 {
 		return cov, nil
@@ -72,7 +79,11 @@ func computeExtractionCoverage(ctx context.Context, counter extractableExtension
 		cov.Remedy = "ingest.extractor is off; set it to auto (or pin an engine) to extract these formats."
 		return cov, nil
 	}
-	cov.Remedy = uncoveredExtractionRemedy(uncovered, structured, pandocActive)
+	libreofficeHint := ""
+	if !engines.LibreOffice {
+		libreofficeHint = ingest.LibreOfficeInstallHint(cfg)
+	}
+	cov.Remedy = uncoveredExtractionRemedy(uncovered, engines, libreofficeHint)
 	if decision.Name == "" {
 		// No primary engine resolved at all: the cascade's own reason ("docling
 		// not found on PATH, no docling-serve URL, and no Mistral credential") is

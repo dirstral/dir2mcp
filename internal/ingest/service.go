@@ -65,7 +65,12 @@ type Service struct {
 	// the `pandoc` pin it is also the primary. It is nil under any non-pandoc pin
 	// (docling/docling-serve/mistral/off) or when no functional pandoc resolves.
 	pandocExtractor *pandocExtractor
-	transcriber     model.Transcriber
+	// libreofficeExtractor is the capability-activated libreoffice engine (T2,
+	// spec 0.93.0) for legacy .doc. Under `auto` it runs beside the primary;
+	// under the `libreoffice` pin it is also the primary. It is nil under any
+	// other pin or when soffice or pandoc is missing.
+	libreofficeExtractor *libreofficeExtractor
+	transcriber          model.Transcriber
 	// recognizer is the optional recognition binding (design 0004): a backend
 	// that turns video into time-ranged annotation statements. Nil when
 	// recognize.provider is off (the default).
@@ -704,6 +709,9 @@ func (s *Service) activeExtractionAvailability() extractionAvailability {
 	case *pandocExtractor:
 		// Primary is pandoc (the `pandoc` pin or the auto-only-pandoc case);
 		// avail.pandoc is set below from s.pandocExtractor.
+	case *libreofficeExtractor:
+		// Primary is libreoffice (the `libreoffice` pin); avail.libreoffice is
+		// set below from s.libreofficeExtractor.
 	default:
 		if _, structured := s.extractor.(structuredExtractor); structured {
 			avail.structured = true
@@ -714,7 +722,40 @@ func (s *Service) activeExtractionAvailability() extractionAvailability {
 	if s.pandocExtractor != nil {
 		avail.pandoc = true
 	}
+	if s.libreofficeExtractor != nil {
+		avail.libreoffice = true
+	}
 	return avail
+}
+
+// ActivateLibreOfficeEngine wires the capability-activated libreoffice engine
+// (T2, spec 0.93.0) when cfg permits it (ingest.extractor auto or the
+// libreoffice pin) AND both soffice and pandoc are functional. Under the
+// `libreoffice` pin the primary IS this engine, so the same instance is reused.
+// Like ActivatePandocEngine it is called by the CLI and MCP wiring after the
+// primary extractor is set, so NewService stays free of PATH probes.
+func (s *Service) ActivateLibreOfficeEngine(cfg config.Config) {
+	if !libreofficeEngineActive(cfg) {
+		s.libreofficeExtractor = nil
+		return
+	}
+	if le, ok := s.extractor.(*libreofficeExtractor); ok {
+		s.libreofficeExtractor = le
+		return
+	}
+	s.libreofficeExtractor = NewLibreOfficeExtractor(libreofficeCorpusRoot(cfg), cfg.IngestLibreOfficeCommand, cfg.IngestPandocCommand, libreofficeTimeout(cfg))
+}
+
+// libreofficeTimeout converts ingest.libreoffice.timeout_sec to a duration.
+func libreofficeTimeout(cfg config.Config) time.Duration {
+	return time.Duration(cfg.IngestLibreOfficeTimeoutSec) * time.Second
+}
+
+// anyExtractionEngine reports whether at least one extraction engine is wired:
+// the primary, or a capability-activated T2 engine (pandoc, libreoffice) that
+// can be the only active one.
+func (s *Service) anyExtractionEngine() bool {
+	return s.extractor != nil || s.pandocExtractor != nil || s.libreofficeExtractor != nil
 }
 
 // ActivatePandocEngine wires the capability-activated pandoc engine (T2, #393) as
@@ -759,12 +800,12 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 	// set), so gate on whether ANY engine is active rather than on the primary
 	// alone — otherwise a pandoc-routed born-digital format would be wrongly
 	// treated as unreadable at index time.
-	if s.extractor == nil && s.pandocExtractor == nil {
+	if !s.anyExtractionEngine() {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	switch s.routeExtractionExt(ext) {
-	case routeStructured, routePandoc, routeFlatOCR:
+	case routeStructured, routePandoc, routeLibreOffice, routeFlatOCR:
 		return true
 	default:
 		return false
@@ -775,11 +816,14 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 // #394 unsupported-format diagnostic. It reflects the same structured/flat split
 // extractorCanReadExt uses, not the concrete provider profile name.
 func (s *Service) extractorLabel() string {
-	if s.extractor == nil && s.pandocExtractor == nil {
+	if !s.anyExtractionEngine() {
 		return "none available"
 	}
 	if _, ok := s.extractor.(*pandocExtractor); ok {
 		return "pandoc"
+	}
+	if _, ok := s.extractor.(*libreofficeExtractor); ok {
+		return "libreoffice"
 	}
 	if _, structured := s.extractor.(structuredExtractor); structured {
 		return "docling"
@@ -1410,6 +1454,8 @@ func DocumentExtractorFromConfigContext(ctx context.Context, cfg config.Config) 
 		return NewDoclingServeExtractor(cfg.IngestDoclingServeURL)
 	case "pandoc":
 		return NewPandocExtractor(strings.TrimSpace(cfg.IngestPandocCommand))
+	case "libreoffice":
+		return NewLibreOfficeExtractor(libreofficeCorpusRoot(cfg), cfg.IngestLibreOfficeCommand, strings.TrimSpace(cfg.IngestPandocCommand), libreofficeTimeout(cfg))
 	case "mistral-ocr":
 		return mistralExtractor(cfg)
 	default:
@@ -2520,6 +2566,17 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	// was stored as a binary skip. Without this the row was relabelled
 	// status=ok with no representation generated: indexed but unsearchable.
 	if existingDoc.DocType != "" && existingDoc.DocType != doc.DocType {
+		return true
+	}
+	// An engine became active for a format that an earlier run stored as an
+	// unsupported_format skip (for example a legacy .doc once soffice and pandoc
+	// are installed, spec 0.93.0). The lenient skip row normally carries no
+	// content_hash, so the gate above already reprocesses it; this trigger also
+	// covers a skip row that does carry one, so the upgrade never depends on
+	// how an older binary wrote the row.
+	if existingDoc.Status == string(model.DocumentStatusSkipped) &&
+		existingDoc.SkipReason == model.SkipReasonUnsupportedFormat &&
+		s.extractorCanReadExt(doc.RelPath) {
 		return true
 	}
 	if doc.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
@@ -4137,7 +4194,7 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
 	if ShouldGenerateExtractedMarkdown(doc.DocType) && !skipOCR {
-		haveExtractor := s.extractor != nil || s.pandocExtractor != nil
+		haveExtractor := s.anyExtractionEngine()
 		if haveExtractor && s.extractorCanReadExt(doc.RelPath) {
 			if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
 				return false, false, err
@@ -5120,8 +5177,8 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	// checked before the s.extractor nil-guard so pandoc works when it is the only
 	// active engine (auto with no docling/OCR, or the pandoc pin).
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
-	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		return s.logExtractFailure(ctx, doc, "pandoc", s.generatePandocMarkdownRepresentation(ctx, doc, content))
+	if eng, ok := s.flatEngineForExt(ext); ok {
+		return s.logExtractFailure(ctx, doc, eng.name, s.generateFlatEngineMarkdownRepresentation(ctx, doc, content, eng))
 	}
 
 	if s.extractor == nil {
@@ -5297,9 +5354,10 @@ func (s *Service) extractionMetaJSON(text string) string {
 	switch ex := s.extractor.(type) {
 	case *doclingExtractor:
 		meta["command"] = strings.TrimSpace(ex.commandTemplate)
-	case *pandocExtractor:
-		// provider "pandoc" already set from extractorProviderModel; no user command
-		// is embedded (kept secret-free, unlike docling's command field).
+	case *pandocExtractor, *libreofficeExtractor:
+		// provider "pandoc"/"libreoffice" already set from extractorProviderModel;
+		// no user command is embedded (kept secret-free, unlike docling's command
+		// field).
 	case *doclingServeExtractor:
 		// Sanitized (scheme/host/path only): this is persisted per-document, so
 		// any userinfo/query in the URL must not become durable metadata.
@@ -5346,6 +5404,8 @@ func (s *Service) extractorProviderModel() (providerName string, modelName strin
 		return "docling-serve", ""
 	case *pandocExtractor:
 		return "pandoc", ""
+	case *libreofficeExtractor:
+		return "libreoffice", ""
 	case *mistral.Client:
 		return "mistral", strings.TrimSpace(ex.DefaultOCRModel)
 	default:
@@ -5358,20 +5418,47 @@ func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
 }
 
-// generatePandocMarkdownRepresentation produces the extracted_markdown
-// representation for a born-digital document via the pandoc engine (T2, #393). It
-// mirrors the flat branch of generateOCRMarkdownRepresentation but records
-// provider "pandoc" and, because pandoc emits no pages, chunks the Markdown by
-// lines WITHOUT fabricating page/bbox provenance.
+// flatEngine is a capability-activated T2 engine that turns a born-digital
+// document into flat Markdown: pandoc (#393) or libreoffice (spec 0.93.0). name
+// is the provider recorded in meta_json and the cache directory under
+// <state>/cache.
+type flatEngine struct {
+	name string
+	ex   model.DocumentExtractor
+}
+
+// flatEngineForExt returns the T2 engine the per-format route selects for ext,
+// when that engine is wired. It is the one routing lookup the index path, the
+// annotation path and the cache purge share.
+func (s *Service) flatEngineForExt(ext string) (flatEngine, bool) {
+	switch s.routeExtractionExt(ext) {
+	case routePandoc:
+		if s.pandocExtractor != nil {
+			return flatEngine{name: "pandoc", ex: s.pandocExtractor}, true
+		}
+	case routeLibreOffice:
+		if s.libreofficeExtractor != nil {
+			return flatEngine{name: "libreoffice", ex: s.libreofficeExtractor}, true
+		}
+	}
+	return flatEngine{}, false
+}
+
+// generateFlatEngineMarkdownRepresentation produces the extracted_markdown
+// representation for a born-digital document via a T2 engine (pandoc, #393, or
+// libreoffice, spec 0.93.0). It mirrors the flat branch of
+// generateOCRMarkdownRepresentation but records the engine as provider and,
+// because these engines emit no pages, chunks the Markdown by lines WITHOUT
+// fabricating page/bbox provenance.
 //
 // #393 follow-up: section-breadcrumb spans (a SHOULD progressive enhancement per
 // §7.4.B.1) are deferred — deriving them would require new Markdown-heading parsing
 // machinery, so this ships the flat extracted_markdown without breadcrumb spans.
-func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
-	if s.repGen == nil || s.pandocExtractor == nil {
+func (s *Service) generateFlatEngineMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte, eng flatEngine) error {
+	if s.repGen == nil || eng.ex == nil {
 		return nil
 	}
-	md, err := s.readOrComputePandoc(ctx, doc, content)
+	md, err := s.readOrComputeFlatEngine(ctx, doc, content, eng)
 	if err != nil {
 		return err
 	}
@@ -5380,10 +5467,14 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 		return nil
 	}
 
-	// #681: pandoc converts a container format (docx, epub, odt) into the text this
-	// document will be searched by, so it is screened before the title and before
-	// any persistence.
+	// #681: the engine converts a container format (doc, docx, epub, odt) into
+	// the text this document will be searched by, so it is screened before the
+	// title and before any persistence.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindExtraction, md) {
+		// readOrComputeFlatEngine already cached the text. A withheld text
+		// must not stay on disk under <state>/cache/<engine>, the same rule the
+		// annotation path follows (PurgeExtractionCache, #407).
+		s.purgeFlatEngineCache(eng.name, content)
 		return nil
 	}
 
@@ -5397,13 +5488,13 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 		DocID:       doc.DocID,
 		RepType:     RepTypeExtractedMarkdown,
 		RepHash:     computeRepHash([]byte(md)),
-		MetaJSON:    s.pandocExtractionMetaJSON(md),
+		MetaJSON:    s.flatEngineExtractionMetaJSON(eng.name, md),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}
 	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
 	if err != nil {
-		return fmt.Errorf("upsert pandoc representation: %w", err)
+		return fmt.Errorf("upsert %s representation: %w", eng.name, err)
 	}
 
 	segments := chunkRawTextByDocType(doc.DocType, md)
@@ -5411,44 +5502,42 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 		return nil
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
-		return fmt.Errorf("persist pandoc chunks: %w", err)
+		return fmt.Errorf("persist %s chunks: %w", eng.name, err)
 	}
 	return nil
 }
 
-// readOrComputePandoc returns the pandoc-converted Markdown for content, caching
-// it under <state>/cache/pandoc keyed by content hash so re-indexing does not
-// re-run pandoc. pandoc is a single deterministic engine with no model concept, so
-// the bytes-only key is sufficient (its own cache dir isolates it from the OCR
-// cache). A pandoc failure is wrapped as ErrOCRProviderFailure so it classifies as
-// a retryable per-document OCR_FAILED in the run manifest (§14.4), mirroring
+// readOrComputeFlatEngine returns the engine's Markdown for content, caching it
+// under <state>/cache/<engine> keyed by content hash so re-indexing does not
+// re-run the engine. Each engine is deterministic with no model concept, so the
+// bytes-only key is sufficient (its own cache dir isolates it from the OCR
+// cache). A failure is wrapped as ErrOCRProviderFailure so it classifies as a
+// retryable per-document OCR_FAILED in the run manifest (§14.4), mirroring
 // readOrComputeOCR.
-func (s *Service) readOrComputePandoc(ctx context.Context, doc model.Document, content []byte) (string, error) {
-	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "pandoc")
+func (s *Service) readOrComputeFlatEngine(ctx context.Context, doc model.Document, content []byte, eng flatEngine) (string, error) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", eng.name)
 	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", fmt.Errorf("create pandoc cache dir: %w", err)
+		return "", fmt.Errorf("create %s cache dir: %w", eng.name, err)
 	}
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
+	cachePath := s.flatEngineCachePath(eng.name, content)
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
-	md, err := s.pandocExtractor.Extract(ctx, doc.RelPath, content)
+	md, err := eng.ex.Extract(ctx, doc.RelPath, content)
 	if err != nil {
-		return "", fmt.Errorf("%w: pandoc extract %s: %w", ErrOCRProviderFailure, doc.RelPath, err)
+		return "", fmt.Errorf("%w: %s extract %s: %w", ErrOCRProviderFailure, eng.name, doc.RelPath, err)
 	}
 	mdBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(md, "\r\n", "\n"), "\r", "\n"))
 	if err := statefs.WriteFile(cachePath, mdBytes); err != nil {
-		return "", fmt.Errorf("write pandoc cache: %w", err)
+		return "", fmt.Errorf("write %s cache: %w", eng.name, err)
 	}
 	return string(mdBytes), nil
 }
 
-// pandocCachePath returns the cache file readOrComputePandoc writes for content.
-// The pandoc cache is keyed by content hash alone (pandoc is a single
-// deterministic engine with no model concept), so no active-extractor key is
-// mixed in as PurgeOCRCache does.
-func (s *Service) pandocCachePath(content []byte) string {
-	return filepath.Join(s.cfg.StateDir, "cache", "pandoc", computeContentHash(content)+".md")
+// flatEngineCachePath returns the cache file readOrComputeFlatEngine writes for
+// content under the named engine's cache directory.
+func (s *Service) flatEngineCachePath(engine string, content []byte) string {
+	return filepath.Join(s.cfg.StateDir, "cache", engine, computeContentHash(content)+".md")
 }
 
 // PurgePandocCache removes the pandoc cache entry for content, mirroring
@@ -5456,19 +5545,26 @@ func (s *Service) pandocCachePath(content []byte) string {
 // Markdown (e.g. the MCP secret-pattern gate, #407) use it so a refused result is
 // never left persisted in {StateDir}/cache/pandoc. Missing files are ignored.
 func (s *Service) PurgePandocCache(content []byte) {
-	if err := os.Remove(s.pandocCachePath(content)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		s.getLogger().Printf("purge pandoc cache: %v", err)
+	s.purgeFlatEngineCache("pandoc", content)
+}
+
+// purgeFlatEngineCache removes the named T2 engine's cache entry for content.
+// Missing files are ignored.
+func (s *Service) purgeFlatEngineCache(engine string, content []byte) {
+	if err := os.Remove(s.flatEngineCachePath(engine, content)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.getLogger().Printf("purge %s cache: %v", engine, err)
 	}
 }
 
-// pandocExtractionMetaJSON builds the per-document extracted_markdown meta_json for
-// a pandoc extraction: provider "pandoc" (no model concept) plus a best-effort
-// detected language (§8.8). It is separate from extractionMetaJSON because that
-// switches on the PRIMARY s.extractor, which under `auto` is docling — so a pandoc
-// extraction must not be mislabeled with the primary's provider. No user-supplied
+// flatEngineExtractionMetaJSON builds the per-document extracted_markdown
+// meta_json for a T2 extraction: provider "pandoc" or "libreoffice" (no model
+// concept) plus a best-effort detected language (§8.8). It is separate from
+// extractionMetaJSON because that switches on the PRIMARY s.extractor, which
+// under `auto` is docling, so a T2 extraction must not be mislabeled with the
+// primary's provider. No user-supplied
 // command is embedded, keeping diagnostics secret-free.
-func (s *Service) pandocExtractionMetaJSON(text string) string {
-	meta := map[string]string{"provider": "pandoc"}
+func (s *Service) flatEngineExtractionMetaJSON(engine, text string) string {
+	meta := map[string]string{"provider": engine}
 	if tag, _, ok := s.detectLanguage(text); ok {
 		meta["language"] = tag
 		meta["language_source"] = langSourceDetected
@@ -6974,6 +7070,8 @@ func (s *Service) CanExtractSourceText(doc model.Document) bool {
 	switch s.routeExtractionExt(ext) {
 	case routePandoc:
 		return s.pandocExtractor != nil
+	case routeLibreOffice:
+		return s.libreofficeExtractor != nil
 	case routeStructured, routeFlatOCR:
 		return s.extractor != nil
 	default:
@@ -6992,8 +7090,8 @@ func (s *Service) CanExtractSourceText(doc model.Document) bool {
 // to the corresponding cache (OCR or pandoc); PurgeExtractionCache removes it.
 func (s *Service) ExtractSourceText(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
-	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		return s.readOrComputePandoc(ctx, doc, content)
+	if eng, ok := s.flatEngineForExt(ext); ok {
+		return s.readOrComputeFlatEngine(ctx, doc, content, eng)
 	}
 	return s.readOrComputeOCR(ctx, doc, content)
 }
@@ -7005,8 +7103,8 @@ func (s *Service) ExtractSourceText(ctx context.Context, doc model.Document, con
 // it.
 func (s *Service) PurgeExtractionCache(doc model.Document, content []byte) {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
-	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		s.PurgePandocCache(content)
+	if eng, ok := s.flatEngineForExt(ext); ok {
+		s.purgeFlatEngineCache(eng.name, content)
 		return
 	}
 	s.PurgeOCRCache(content)

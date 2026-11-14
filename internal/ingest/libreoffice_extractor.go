@@ -1,0 +1,319 @@
+package ingest
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/dirstral/dir2mcp/internal/config"
+)
+
+const (
+	// libreofficeInputName is the file name the .doc bytes get inside the
+	// private work directory. A fixed ASCII name keeps the source path (which
+	// can hold any characters) out of the command line, and LibreOffice names
+	// its output after it (input.docx).
+	libreofficeInputName = "input.doc"
+	// maxLibreOfficeDocxBytes caps the .docx read back from the conversion. A
+	// .docx is a zip of the same content, so it is never much larger than the
+	// .doc; the cap only bounds a pathological conversion.
+	maxLibreOfficeDocxBytes = 256 * 1024 * 1024
+	// maxLibreOfficeLogBytes caps the LibreOffice stdout+stderr kept for an
+	// error message.
+	maxLibreOfficeLogBytes = 64 * 1024
+)
+
+// libreofficeExtractor is the libreoffice extraction engine (T2, spec 0.93.0).
+// It converts a legacy binary Word document (.doc) to .docx with headless
+// LibreOffice in a private temp directory, then reads that .docx with the
+// existing pandoc docx path. The output is therefore the same flat Markdown,
+// with the same provenance, as a .docx the pandoc engine reads: no pages, no
+// bboxes, no region spans.
+//
+// It never writes into the corpus: it gets the bytes, not the path, and every
+// file it creates (the input copy, the per-conversion profile, the output
+// directory and the pandoc input copy) lives under one os.MkdirTemp directory
+// (mode 0700) that it removes after the read step, on success, failure and
+// timeout alike. That directory is made in a base directory outside the corpus
+// root (libreofficeMakeWorkDir, spec 0.93.0 §7.4.B).
+type libreofficeExtractor struct {
+	// root is the corpus root. The work directory is never made inside it.
+	// Empty means no local corpus root (an object-store source), so there is
+	// nothing to keep out of.
+	root string
+	// soffice is the configured LibreOffice binary (ingest.libreoffice.command).
+	// The whole value is the path, so a path with spaces works. Empty resolves
+	// soffice (then libreoffice) from PATH at call time.
+	soffice string
+	// timeout bounds one extraction of one document: the conversion AND the
+	// pandoc read together (ingest.libreoffice.timeout_sec).
+	timeout time.Duration
+	// pandoc reads the converted .docx.
+	pandoc *pandocExtractor
+}
+
+// NewLibreOfficeExtractor returns the libreoffice engine. root is the corpus
+// root (libreofficeCorpusRoot): the engine never makes its work directory
+// inside it. sofficeCmd is the configured ingest.libreoffice.command (blank resolves soffice, then
+// libreoffice, from PATH). pandocCmd is the configured ingest.pandoc.command
+// (blank resolves pandoc from PATH), so the .docx step uses exactly the pandoc
+// the pandoc engine uses. A timeout of 0 or less falls back to the default.
+func NewLibreOfficeExtractor(root, sofficeCmd, pandocCmd string, timeout time.Duration) *libreofficeExtractor {
+	if timeout <= 0 {
+		timeout = defaultLibreOfficeTimeout
+	}
+	return &libreofficeExtractor{
+		root:    root,
+		soffice: strings.TrimSpace(sofficeCmd),
+		timeout: timeout,
+		pandoc:  NewPandocExtractor(pandocCmd),
+	}
+}
+
+// defaultLibreOfficeTimeout mirrors config.DefaultLibreOfficeTimeoutSec for
+// callers that build the extractor without a config.
+const defaultLibreOfficeTimeout = config.DefaultLibreOfficeTimeoutSec * time.Second
+
+// libreofficeTimeoutError is the per-document error for an extraction that hit
+// ingest.libreoffice.timeout_sec. It names the limit so the operator knows
+// which setting to raise.
+type libreofficeTimeoutError struct {
+	limit time.Duration
+}
+
+func (e *libreofficeTimeoutError) Error() string {
+	return fmt.Sprintf("libreoffice extraction timed out after %s (ingest.libreoffice.timeout_sec=%d)", e.limit, int64(e.limit/time.Second))
+}
+
+// Extract converts data (a .doc) to .docx and returns the Markdown pandoc
+// reads from it. One deadline (l.timeout) covers both steps; when it expires,
+// the LibreOffice process group or the pandoc process is killed. relPath is not
+// used: the conversion works on the bytes only, so the source path never
+// reaches a command line or a temp file name (the caller names the document in
+// the error).
+func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byte) (string, error) {
+	bin, err := l.sofficeBinary()
+	if err != nil {
+		return "", err
+	}
+	work, err := libreofficeMakeWorkDir(l.root)
+	if err != nil {
+		return "", err
+	}
+	// Removed after the read step, and after a failure or a timeout in either
+	// step.
+	defer func() { _ = os.RemoveAll(work) }()
+
+	dctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
+	docx, err := l.convertToDocx(dctx, bin, work, data)
+	if err != nil {
+		return "", l.deadlineErr(ctx, dctx, err)
+	}
+	// The pandoc step infers the input format from the extension, so the
+	// converted bytes are handed over under a .docx name. Its input copy goes
+	// into work too, not into the system temporary directory, which can be
+	// inside the corpus root.
+	md, err := l.pandoc.extractIn(dctx, work, "converted.docx", docx)
+	if err != nil {
+		return "", l.deadlineErr(ctx, dctx, fmt.Errorf("read converted .docx: %w", err))
+	}
+	return md, nil
+}
+
+// errLibreOfficeNoWorkBase is the error when no temporary directory outside the
+// corpus root is usable. It names the remedy, not a path.
+var errLibreOfficeNoWorkBase = errors.New("libreoffice: no temporary directory outside the corpus root " +
+	"(the system temporary directory and the user cache directory are inside it or not writable); " +
+	"set TMPDIR to a directory outside the corpus root")
+
+// libreofficeCorpusRoot returns the corpus root the libreoffice engine must
+// keep its temporary directories out of: cfg.RootDir, or "" for an object-store
+// source, which has no local corpus directory.
+func libreofficeCorpusRoot(cfg config.Config) string {
+	if strings.EqualFold(strings.TrimSpace(cfg.Source.Kind), "s3") {
+		return ""
+	}
+	return cfg.RootDir
+}
+
+// libreofficeWorkCandidates returns the base directories for the
+// per-conversion work directory, in order: the system temporary directory
+// (os.TempDir, so TMPDIR on POSIX) and the user cache directory
+// (os.UserCacheDir).
+func libreofficeWorkCandidates() []string {
+	candidates := []string{os.TempDir()}
+	if dir, err := os.UserCacheDir(); err == nil {
+		candidates = append(candidates, dir)
+	}
+	return candidates
+}
+
+// libreofficeMakeWorkDir makes the private per-conversion work directory.
+// Spec 0.93.0 §7.4.B: the profile and output directories MUST be outside the
+// corpus root, and when the system temporary directory is inside the root the
+// implementation MUST use another location or treat the engine as
+// unavailable. It tries each libreofficeWorkCandidates base in order. It skips
+// a base that resolves to the root or below it (symlinks resolved), and a base
+// in which it cannot create a directory (missing or not writable), so the next
+// candidate gets a chance. os.MkdirTemp creates the directory with mode 0700,
+// so only the owner of the dir2mcp process can read the converted text. When
+// no base qualifies the error is errLibreOfficeNoWorkBase. The caller owns and
+// removes the returned directory.
+func libreofficeMakeWorkDir(root string) (string, error) {
+	for _, base := range libreofficeWorkCandidates() {
+		if strings.TrimSpace(base) == "" || config.PathInsideRoot(base, root) {
+			continue
+		}
+		work, err := os.MkdirTemp(base, "dir2mcp-libreoffice-*")
+		if err != nil {
+			continue
+		}
+		// The new directory itself must also resolve outside the root (a
+		// base that is a symlink into the corpus is caught above, and this
+		// is the final check on the real path).
+		if config.PathInsideRoot(work, root) {
+			_ = os.RemoveAll(work)
+			continue
+		}
+		return work, nil
+	}
+	return "", errLibreOfficeNoWorkBase
+}
+
+// libreofficeWorkDirUsable reports whether libreofficeMakeWorkDir can make a
+// work directory for root. It makes one and removes it at once. The
+// availability probe uses it, so an engine that could not make its work
+// directory is reported as unavailable, not as a per-document error.
+func libreofficeWorkDirUsable(root string) bool {
+	work, err := libreofficeMakeWorkDir(root)
+	if err != nil {
+		return false
+	}
+	_ = os.RemoveAll(work)
+	return true
+}
+
+// deadlineErr maps an error that happened because the per-document deadline
+// expired (and not because the caller cancelled) to libreofficeTimeoutError.
+func (l *libreofficeExtractor) deadlineErr(parent, dctx context.Context, err error) error {
+	if errors.Is(dctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+		return &libreofficeTimeoutError{limit: l.timeout}
+	}
+	return err
+}
+
+// sofficeBinary returns the LibreOffice executable to run: the configured
+// ingest.libreoffice.command, else soffice or libreoffice from PATH. It uses
+// the same resolution as the availability probe.
+func (l *libreofficeExtractor) sofficeBinary() (string, error) {
+	if bin, ok := resolveSofficeBinary(config.Config{IngestLibreOfficeCommand: l.soffice}); ok {
+		return bin, nil
+	}
+	return "", errors.New("soffice (LibreOffice) not found on PATH")
+}
+
+// convertToDocx runs one headless LibreOffice conversion inside work and
+// returns the .docx bytes. work holds the input copy, the output directory and
+// a per-conversion LibreOffice profile, so conversions can run in parallel
+// (LibreOffice locks its profile) and two documents with the same name never
+// share an output file. The caller owns and removes work.
+func (l *libreofficeExtractor) convertToDocx(ctx context.Context, bin, work string, data []byte) ([]byte, error) {
+	profileDir := filepath.Join(work, "profile")
+	outDir := filepath.Join(work, "out")
+	for _, dir := range []string{profileDir, outDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create libreoffice work dir: %w", err)
+		}
+	}
+	inPath := filepath.Join(work, libreofficeInputName)
+	if err := os.WriteFile(inPath, data, 0o600); err != nil {
+		return nil, fmt.Errorf("write libreoffice input: %w", err)
+	}
+	if err := runSofficeConversion(ctx, bin, profileDir, outDir, inPath); err != nil {
+		return nil, err
+	}
+	return readConvertedDocx(filepath.Join(outDir, strings.TrimSuffix(libreofficeInputName, ".doc")+".docx"))
+}
+
+// runSofficeConversion runs soffice under ctx. A cancelled ctx (the deadline)
+// stops the whole process tree (prepareLibreOfficeCmd), and on unix a finished
+// run also kills what is left of the process group, so no soffice.bin helper
+// survives the conversion. cmd.Dir is left unset on purpose: every path on the
+// command line is absolute, and a working directory would change how a
+// relative configured binary is found (Go resolves it against cmd.Dir).
+func runSofficeConversion(ctx context.Context, bin, profileDir, outDir, inPath string) error {
+	cmd := exec.CommandContext(ctx, bin,
+		"--headless", "--norestore",
+		"-env:UserInstallation="+fileURL(profileDir),
+		"--convert-to", "docx",
+		"--outdir", outDir,
+		inPath,
+	)
+	cmd.Env = os.Environ()
+	prepareLibreOfficeCmd(cmd)
+	cmd.WaitDelay = pandocWaitDelay
+	var logs bytes.Buffer
+	sink := &limitedBuffer{buf: &logs, limit: maxLibreOfficeLogBytes}
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	runErr := cmd.Run()
+	reapLibreOfficeGroup(cmd)
+	if runErr == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	msg := strings.TrimSpace(logs.String())
+	if msg == "" {
+		msg = runErr.Error()
+	}
+	return fmt.Errorf("libreoffice conversion failed: %s", msg)
+}
+
+// readConvertedDocx reads the conversion output. soffice can exit 0 without
+// writing the output (an unreadable or encrypted input), so a missing or empty
+// file is an error, not an empty document.
+func readConvertedDocx(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("libreoffice conversion produced no .docx output")
+		}
+		return nil, fmt.Errorf("stat libreoffice output: %w", err)
+	}
+	if info.Size() == 0 {
+		return nil, errors.New("libreoffice conversion produced an empty .docx")
+	}
+	if info.Size() > maxLibreOfficeDocxBytes {
+		return nil, errors.New("libreoffice conversion output exceeded limit")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read libreoffice output: %w", err)
+	}
+	return data, nil
+}
+
+// fileURL renders an absolute directory as the file:// URL LibreOffice expects
+// for -env:UserInstallation. A Windows drive path (C:/x) gets the leading slash
+// a file URL needs (file:///C:/x); special characters are percent-encoded.
+func fileURL(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return (&url.URL{Scheme: "file", Path: p}).String()
+}

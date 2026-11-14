@@ -133,3 +133,30 @@ func pandocCacheEntries(t *testing.T, stateDir string) []string {
 	}
 	return matches
 }
+
+// TestMCPToolsCallAnnotate_DocWithoutLibreOfficeNamesIt: a legacy .doc is
+// read only by the libreoffice engine (spec 0.93.0). With no soffice on PATH,
+// the CONFIG_INVALID message names LibreOffice (soffice), pandoc and the
+// ingest.extractor policy, not docling or Mistral OCR, which cannot read .doc.
+func TestMCPToolsCallAnnotate_DocWithoutLibreOfficeNamesIt(t *testing.T) {
+	cfg, st, _ := setupMCPToolStore(t, "old.doc", "document", []byte("legacy word bytes"))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("model must not be called when no engine reads .doc")
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+	cfg = withMistralUpstream(t, cfg, "mistral", upstream.URL)
+	cfg.IngestPandocCommand = writeStubPandoc(t, "unused")
+	// No soffice and no libreoffice launcher can resolve from an empty PATH.
+	t.Setenv("PATH", testutil.TempDir(t))
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":87,"method":"tools/call","params":{"name":"dir2mcp_annotate","arguments":{"rel_path":"old.doc","schema_json":{"type":"object","properties":{"summary":{"type":"string"}}}}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	assertToolCallErrorCodeAndMessage(t, resp, "CONFIG_INVALID",
+		[]string{"LibreOffice (soffice)", "pandoc", "ingest.extractor"},
+		[]string{"docling", "MISTRAL_API_KEY"})
+}

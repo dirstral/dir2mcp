@@ -67,6 +67,10 @@ and mount a `.dir2mcp.yaml` that binds to it.
 The image holds ffmpeg for audio and video, and no docling: for PDFs and
 images use `ingest.extractor: mistral` or a docling-serve container
 ([document extraction](configuration.md#docling-extraction-over-http-docling-serve)).
+The image also holds no pandoc and no LibreOffice, so `.odt`, `.rtf`, `.epub`
+and legacy `.doc` files are skipped as `unsupported_format` in it. To read them,
+build an image on top of this one that adds both packages, or run the binary
+on a host that has them ([optional extraction binaries](#optional-extraction-binaries)).
 `docker build -t dir2mcp .` builds the same image from source.
 
 ### Nix (macOS + Linux)
@@ -231,6 +235,32 @@ Pick the row that matches how you run `dir2mcp`:
 | Public MCP via Cloudflare Tunnel | Local MCP requirements + `cloudflared` installed |
 | Public MCP via ngrok | Local MCP requirements + `ngrok` installed + verified ngrok account + authtoken |
 | x402-gated MCP | Public MCP requirements + facilitator URL + facilitator token + full x402 route policy fields |
+
+### Optional extraction binaries
+
+dir2mcp finds these binaries on `PATH` and turns on the related extraction
+engine when the binary passes a short probe. You do not set a flag. When a
+binary is missing, another active engine can still read some of its formats:
+for example, docling reads `.docx`, and `.html` always has a raw-text
+baseline. A format that no active engine reads is skipped as
+`unsupported_format` (or is a per-document `UNSUPPORTED_FORMAT` error under
+`ingest.on_unsupported: strict`), and `dir2mcp status` and `dir2mcp doctor`
+tell you what to install.
+
+| Binary | Engine | Formats | Install |
+|---|---|---|---|
+| `pandoc` | `pandoc` (T2) | `.docx`, `.odt`, `.rtf`, `.epub`, `.html` | `brew install pandoc`, `apt-get install pandoc` |
+| `soffice` (LibreOffice) **and** `pandoc` | `libreoffice` (T2) | legacy Word `.doc` | `brew install --cask libreoffice`, `apt-get install --no-install-recommends libreoffice-writer-nogui` (Debian 12, Ubuntu 22.04 and later), plus pandoc |
+
+The `libreoffice` engine needs both binaries: it converts each `.doc` to
+`.docx` with headless LibreOffice in a private temporary folder outside the
+corpus root, then reads the `.docx` with pandoc. It never writes next to the source file, so a read-only
+corpus mount works. dir2mcp uses `ingest.libreoffice.command` when it is set,
+else it looks for `soffice` first, then `libreoffice`.
+`libreoffice-writer-nogui` is the smallest package that converts Word files on
+Debian and Ubuntu; on Alpine the package is `libreoffice-writer`. See
+[document extraction](configuration.md#document-extraction-modes--fallback)
+for the per-file time limit (`ingest.libreoffice.timeout_sec`).
 
 ## Build from source
 

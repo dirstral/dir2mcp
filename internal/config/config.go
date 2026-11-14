@@ -142,6 +142,14 @@ const (
 // gate passed. A real hang still stops at the limit.
 const DefaultDoclingTimeoutSec = 3600
 
+// DefaultLibreOfficeTimeoutSec is the shipped time limit, in seconds, for one
+// headless LibreOffice conversion of one legacy .doc file to .docx (the
+// libreoffice extraction engine, spec 0.93.0, ingest.libreoffice.timeout_sec).
+// A conversion starts a fresh LibreOffice profile, which costs a few seconds,
+// and a large .doc converts in well under a minute, so five minutes is ample
+// headroom while a hung conversion still stops.
+const DefaultLibreOfficeTimeoutSec = 300
+
 // DefaultTranscriptChunkSec and DefaultTranscriptChunkGapSec are the shipped
 // transcript chunk window (SPEC 8.6.1, media.transcript_chunk_sec /
 // media.transcript_chunk_gap_sec). 40 s is about a conversational turn or a
@@ -332,6 +340,19 @@ type Config struct {
 	// the limit expires the document gets a per-document error that names the
 	// document and the limit. The docling-serve transport does not use it.
 	IngestDoclingTimeoutSec int
+	// IngestLibreOfficeTimeoutSec is the time limit, in seconds, for one
+	// headless LibreOffice conversion of one legacy .doc file (config
+	// `ingest.libreoffice.timeout_sec`, env DIR2MCP_LIBREOFFICE_TIMEOUT_SEC,
+	// spec 0.93.0). It must be greater than 0. When the limit expires the whole
+	// LibreOffice process group is killed and the document gets a per-document
+	// error.
+	IngestLibreOfficeTimeoutSec int
+	// IngestLibreOfficeCommand optionally overrides the LibreOffice binary of
+	// the libreoffice extraction engine (config `ingest.libreoffice.command`,
+	// spec 0.93.0). The whole value is one path (spaces allowed), not a command
+	// template. Empty resolves `soffice`,
+	// then `libreoffice`, from PATH.
+	IngestLibreOfficeCommand string
 	// IngestPandocCommand optionally configures a local pandoc CLI command
 	// (its first field is the binary) used for the capability-activated pandoc
 	// document extractor (#393). Empty resolves `pandoc` from PATH.
@@ -1567,6 +1588,8 @@ type fileConfig struct {
 
 	IngestDoclingServeURL               *string
 	IngestDoclingTimeoutSec             *int
+	IngestLibreOfficeTimeoutSec         *int
+	IngestLibreOfficeCommand            *string
 	IngestPandocCommand                 *string
 	ElevenLabsBaseURL                   *string
 	ElevenLabsTTSVoiceID                *string
@@ -1743,22 +1766,23 @@ type fileConfig struct {
 }
 
 type persistedConfig struct {
-	RootDir         string   `yaml:"root_dir"`
-	StateDir        string   `yaml:"state_dir"`
-	ListenAddr      string   `yaml:"listen_addr"`
-	MCPPath         string   `yaml:"mcp_path"`
-	ProtocolVersion string   `yaml:"protocol_version"`
-	Public          bool     `yaml:"public"`
-	AuthMode        string   `yaml:"auth_mode"`
-	ServerName      string   `yaml:"server_name"`
-	RateLimitRPS    int      `yaml:"rate_limit_rps"`
-	RateLimitBurst  int      `yaml:"rate_limit_burst"`
-	TrustedProxies  []string `yaml:"trusted_proxies"`
-	PathExcludes    []string `yaml:"path_excludes"`
-	SecretPatterns  []string `yaml:"secret_patterns"`
-	DoclingCommand  string   `yaml:"docling_command"`
-	DoclingServeURL string   `yaml:"docling_serve_url"`
-	PandocCommand   string   `yaml:"pandoc_command"`
+	RootDir            string   `yaml:"root_dir"`
+	StateDir           string   `yaml:"state_dir"`
+	ListenAddr         string   `yaml:"listen_addr"`
+	MCPPath            string   `yaml:"mcp_path"`
+	ProtocolVersion    string   `yaml:"protocol_version"`
+	Public             bool     `yaml:"public"`
+	AuthMode           string   `yaml:"auth_mode"`
+	ServerName         string   `yaml:"server_name"`
+	RateLimitRPS       int      `yaml:"rate_limit_rps"`
+	RateLimitBurst     int      `yaml:"rate_limit_burst"`
+	TrustedProxies     []string `yaml:"trusted_proxies"`
+	PathExcludes       []string `yaml:"path_excludes"`
+	SecretPatterns     []string `yaml:"secret_patterns"`
+	DoclingCommand     string   `yaml:"docling_command"`
+	DoclingServeURL    string   `yaml:"docling_serve_url"`
+	PandocCommand      string   `yaml:"pandoc_command"`
+	LibreOfficeCommand string   `yaml:"libreoffice_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -1814,6 +1838,7 @@ type persistedConfig struct {
 	IngestFollowSymlinks                bool          `yaml:"ingest_follow_symlinks"`
 	IngestMaxFileMB                     int           `yaml:"ingest_max_file_mb"`
 	IngestDoclingTimeoutSec             int           `yaml:"ingest_docling_timeout_sec"`
+	IngestLibreOfficeTimeoutSec         int           `yaml:"ingest_libreoffice_timeout_sec"`
 	IngestExcludeDirs                   []string      `yaml:"ingest_exclude_dirs"`
 	IngestPDFMode                       string        `yaml:"ingest_pdf_mode"`
 	IngestImagesMode                    string        `yaml:"ingest_images_mode"`
@@ -2125,6 +2150,8 @@ func Default() Config {
 		IngestWatchDebounce:   500 * time.Millisecond,
 		// One docling CLI call on one document (SPEC 7.4.B, #1105).
 		IngestDoclingTimeoutSec: DefaultDoclingTimeoutSec,
+		// One LibreOffice .doc conversion (spec 0.93.0).
+		IngestLibreOfficeTimeoutSec: DefaultLibreOfficeTimeoutSec,
 		// "auto", not "mistral" (SPEC §8.2, §8.1.3): transcription is an optional
 		// capability selected by precedence among eligible profiles, and it stays
 		// off when none is eligible. The explicit "mistral" default made a
@@ -2270,6 +2297,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		DoclingCommand:                      cfg.DoclingCommand,
 		DoclingServeURL:                     cfg.IngestDoclingServeURL,
 		PandocCommand:                       cfg.IngestPandocCommand,
+		LibreOfficeCommand:                  cfg.IngestLibreOfficeCommand,
 		SessionInactivityTimeout:            cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:                  cfg.SessionMaxLifetime,
 		HealthCheckInterval:                 cfg.HealthCheckInterval,
@@ -2323,6 +2351,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestFollowSymlinks:                cfg.IngestFollowSymlinks,
 		IngestMaxFileMB:                     cfg.IngestMaxFileMB,
 		IngestDoclingTimeoutSec:             cfg.IngestDoclingTimeoutSec,
+		IngestLibreOfficeTimeoutSec:         cfg.IngestLibreOfficeTimeoutSec,
 		IngestExcludeDirs:                   append([]string(nil), cfg.IngestExcludeDirs...),
 		IngestPDFMode:                       cfg.IngestPDFMode,
 		IngestImagesMode:                    cfg.IngestImagesMode,
@@ -3032,8 +3061,14 @@ func applyModelClientsFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestDoclingTimeoutSec != nil {
 		cfg.IngestDoclingTimeoutSec = *fc.IngestDoclingTimeoutSec
 	}
+	if fc.IngestLibreOfficeTimeoutSec != nil {
+		cfg.IngestLibreOfficeTimeoutSec = *fc.IngestLibreOfficeTimeoutSec
+	}
 	if fc.IngestPandocCommand != nil {
 		cfg.IngestPandocCommand = *fc.IngestPandocCommand
+	}
+	if fc.IngestLibreOfficeCommand != nil {
+		cfg.IngestLibreOfficeCommand = *fc.IngestLibreOfficeCommand
 	}
 	if fc.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fc.ElevenLabsBaseURL
@@ -3931,6 +3966,8 @@ var configKeyAliases = map[string]string{
 	"ingest.docling.serve_url":                 "docling_serve_url",
 	"pandoc.command":                           "pandoc_command",
 	"ingest.pandoc.command":                    "pandoc_command",
+	"libreoffice.command":                      "libreoffice_command",
+	"ingest.libreoffice.command":               "libreoffice_command",
 	"stt.elevenlabs.api_key":                   "elevenlabs_api_key",
 	"secrets.elevenlabs_api_key":               "elevenlabs_api_key",
 	"secrets.x402_facilitator_url":             "x402_facilitator_url",
@@ -4008,6 +4045,8 @@ var configKeyAliases = map[string]string{
 	"ingest_max_file_mb":                       "ingest.max_file_mb",
 	"ingest_docling_timeout_sec":               "ingest.docling.timeout_sec",
 	"docling.timeout_sec":                      "ingest.docling.timeout_sec",
+	"ingest_libreoffice_timeout_sec":           "ingest.libreoffice.timeout_sec",
+	"libreoffice.timeout_sec":                  "ingest.libreoffice.timeout_sec",
 	"max_file_mb":                              "ingest.max_file_mb",
 	"ingest_scan_cache":                        "ingest.scan_cache",
 	"scan_cache":                               "ingest.scan_cache",
@@ -4179,7 +4218,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	}
 	switch key {
-	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "ingest.libreoffice", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "libreoffice", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -4319,6 +4358,7 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"chunking.overlap_tokens":            func(c *fileConfig) **int { return &c.ChunkingOverlapTokens },
 	"ingest.max_file_mb":                 func(c *fileConfig) **int { return &c.IngestMaxFileMB },
 	"ingest.docling.timeout_sec":         func(c *fileConfig) **int { return &c.IngestDoclingTimeoutSec },
+	"ingest.libreoffice.timeout_sec":     func(c *fileConfig) **int { return &c.IngestLibreOfficeTimeoutSec },
 	"rerank.candidate_pool":              func(c *fileConfig) **int { return &c.RerankCandidatePool },
 	"media.audio_window_sec":             func(c *fileConfig) **int { return &c.MediaAudioWindowSec },
 	"media.translate.whisper_window_sec": func(c *fileConfig) **int { return &c.MediaTranslateWhisperWindowSec },
@@ -4576,6 +4616,8 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestDoclingServeURL = strPtr(value)
 	case "pandoc_command":
 		cfg.IngestPandocCommand = strPtr(value)
+	case "libreoffice_command":
+		cfg.IngestLibreOfficeCommand = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "rag.evidence_threshold":
@@ -4903,7 +4945,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("docling_serve_url", cfg.DoclingServeURL)
 	writeInt("ingest_docling_timeout_sec", cfg.IngestDoclingTimeoutSec)
+	writeInt("ingest_libreoffice_timeout_sec", cfg.IngestLibreOfficeTimeoutSec)
 	writeScalar("pandoc_command", cfg.PandocCommand)
+	writeScalar("libreoffice_command", cfg.LibreOfficeCommand)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
@@ -5388,6 +5432,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 	}
 	applyRouteRetryAfterEnv(cfg, env)
 	applyDoclingTimeoutEnv(cfg, env)
+	applyLibreOfficeTimeoutEnv(cfg, env)
 	applyRetrievalAdaptiveKEnv(cfg, env)
 	// rag.evidence_threshold (#1081): applied as text; Validate parses it, so
 	// a bad override fails loudly as CONFIG_INVALID rather than being ignored.
@@ -5411,6 +5456,24 @@ func applyDoclingTimeoutEnv(cfg *Config, env map[string]string) {
 		return
 	}
 	cfg.IngestDoclingTimeoutSec = parsed
+}
+
+// applyLibreOfficeTimeoutEnv applies DIR2MCP_LIBREOFFICE_TIMEOUT_SEC onto
+// cfg.IngestLibreOfficeTimeoutSec with the same rules as
+// applyDoclingTimeoutEnv: a value that is not an integer is not applied and
+// gives a warning; an integer of 0 or less is applied, and Validate rejects it.
+func applyLibreOfficeTimeoutEnv(cfg *Config, env map[string]string) {
+	raw, ok := envLookup("DIR2MCP_LIBREOFFICE_TIMEOUT_SEC", env)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return
+	}
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := strconv.Atoi(trimmed)
+	if err != nil {
+		cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid integer for DIR2MCP_LIBREOFFICE_TIMEOUT_SEC: %q (ignored)", trimmed))
+		return
+	}
+	cfg.IngestLibreOfficeTimeoutSec = parsed
 }
 
 // applyBoolEnvField sets *field from env[key] when the variable is set, non-empty,
@@ -6222,6 +6285,15 @@ func emitDirInsideCorpus(dir, root string) bool {
 	return pathWithin(resolveExistingPrefix(absRoot), resolveExistingPrefix(absDir))
 }
 
+// PathInsideRoot reports whether dir resolves to root or a path below it, with
+// the same rules as the media.subtitles.emit.dir check (emitDirInsideCorpus):
+// the paths as written and the paths with symlinks resolved are both checked.
+// A blank root is never a match. The libreoffice engine uses it to keep its
+// temporary directories outside the corpus root (spec 0.93.0 §7.4.B).
+func PathInsideRoot(dir, root string) bool {
+	return emitDirInsideCorpus(dir, root)
+}
+
 // pathWithin reports whether p is base or a path below base. Both are absolute.
 func pathWithin(base, p string) bool {
 	rel, err := filepath.Rel(base, p)
@@ -6290,11 +6362,12 @@ func normalizeLowerUniqueList(raw []string) []string {
 }
 
 // validateIngestExtractor normalizes IngestExtractor (defaulting empty) and
-// rejects any value outside auto/docling/docling-serve/pandoc/mistral/off. The
+// rejects any value outside auto/docling/docling-serve/pandoc/libreoffice/
+// mistral/off. The
 // accepted set is the one the error message prints, so the two cannot drift.
 func (c *Config) validateIngestExtractor() error {
 	normalized, err := normalizeClosedEnum("ingest.extractor", c.IngestExtractor, Default().IngestExtractor,
-		[]string{"auto", "docling", "docling-serve", "pandoc", "mistral", "off"})
+		[]string{"auto", "docling", "docling-serve", "pandoc", "libreoffice", "mistral", "off"})
 	if err != nil {
 		return err
 	}
@@ -6808,6 +6881,9 @@ func (c *Config) validateNumericBounds() error {
 	if err := c.validateDoclingTimeout(); err != nil {
 		return err
 	}
+	if err := c.validateLibreOfficeTimeout(); err != nil {
+		return err
+	}
 	if err := c.validateRetrievalNumericBounds(); err != nil {
 		return err
 	}
@@ -6827,6 +6903,19 @@ func (c *Config) validateDoclingTimeout() error {
 	}
 	if int64(c.IngestDoclingTimeoutSec) > MaxDoclingTimeoutSec {
 		return fmt.Errorf("ingest.docling.timeout_sec must not be greater than %d: %d", MaxDoclingTimeoutSec, c.IngestDoclingTimeoutSec)
+	}
+	return nil
+}
+
+// validateLibreOfficeTimeout checks ingest.libreoffice.timeout_sec (spec
+// 0.93.0) with the same bounds as ingest.docling.timeout_sec: greater than 0,
+// and small enough to convert to a time.Duration without overflow.
+func (c *Config) validateLibreOfficeTimeout() error {
+	if c.IngestLibreOfficeTimeoutSec <= 0 {
+		return fmt.Errorf("ingest.libreoffice.timeout_sec must be greater than 0: %d", c.IngestLibreOfficeTimeoutSec)
+	}
+	if int64(c.IngestLibreOfficeTimeoutSec) > MaxDoclingTimeoutSec {
+		return fmt.Errorf("ingest.libreoffice.timeout_sec must not be greater than %d: %d", MaxDoclingTimeoutSec, c.IngestLibreOfficeTimeoutSec)
 	}
 	return nil
 }

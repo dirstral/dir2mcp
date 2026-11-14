@@ -45,6 +45,12 @@ const (
 	// office/markup/ebook formats to Markdown and reads exactly pandocReadableExt.
 	// It reads NO pdf/raster input and produces NO page/bbox provenance.
 	enginePandoc
+	// engineLibreOffice is the capability-activated libreoffice engine (spec
+	// 0.93.0): a second T2 engine. It converts legacy binary Word (.doc) to .docx
+	// with headless LibreOffice and reads that .docx with the pandoc docx path, so
+	// it needs BOTH a functional soffice and a functional pandoc. It reads exactly
+	// libreofficeReadableExt and, like pandoc, produces NO page/bbox provenance.
+	engineLibreOffice
 )
 
 // flatOCRReadableExt is the exact set of extensions the flat OCR path can read —
@@ -83,7 +89,9 @@ var structuredUnreadableExt = map[string]struct{}{
 // It deliberately EXCLUDES formats pandoc cannot read as INPUT: .pptx and .xlsx
 // (pandoc has no PowerPoint/Excel reader — .pptx is writer-only, .xlsx has no
 // reader) and legacy binary .doc (pandoc reads OOXML .docx, not the old .doc).
-// Those stay with docling (T1) where supported, or degrade (§7.4.B.2). pandoc
+// Those stay with docling (T1) where supported, legacy .doc goes to the
+// libreoffice engine (T2, spec 0.93.0) when it is active, or they degrade
+// (§7.4.B.2). pandoc
 // reads NO pdf/raster input, so none of flatOCRReadableExt appears here.
 var pandocReadableExt = map[string]struct{}{
 	".docx":  {},
@@ -93,6 +101,14 @@ var pandocReadableExt = map[string]struct{}{
 	".html":  {},
 	".htm":   {},
 	".xhtml": {},
+}
+
+// libreofficeReadableExt is the format set of the libreoffice engine (T2, spec
+// 0.93.0): legacy binary Word only. Every other format LibreOffice could open
+// already has a higher-fidelity or equal-tier engine in the §7.4.B.1 matrix, so
+// the engine deliberately claims nothing else.
+var libreofficeReadableExt = map[string]struct{}{
+	".doc": {},
 }
 
 // engineSupportsExt reports whether the given extraction engine can read ext.
@@ -115,6 +131,9 @@ func engineSupportsExt(engine extractionEngine, ext string) bool {
 		return !denied
 	case enginePandoc:
 		_, ok := pandocReadableExt[ext]
+		return ok
+	case engineLibreOffice:
+		_, ok := libreofficeReadableExt[ext]
 		return ok
 	default:
 		return false
@@ -154,7 +173,8 @@ func ExtractorSupportsExt(structured bool, ext string) bool {
 // capability matrix and mandates "best-available per format" routing under
 // `ingest.extractor: auto`: for each classified document, select the ACTIVE
 // engine of lowest fidelity tier whose matrix cell for that format is ✅, falling
-// through the tier order (T1 docling → T2 pandoc → T3 mistral OCR → T4 raw_text).
+// through the tier order (T1 docling → T2 pandoc / libreoffice → T3 mistral OCR →
+// T4 raw_text).
 // A format no active engine supports degrades per §7.4.B.2; html is the one format
 // whose T4 `raw_text` baseline (§7.4.A) is unconditional, so it is never dropped.
 // selectExtractionRoute below is that algorithm; the ingest service consumes it
@@ -199,6 +219,10 @@ const (
 	// no pages), so no region spans. Ordered by fidelity between the structured
 	// (T1) and flat-OCR (T3) tiers.
 	routePandoc
+	// routeLibreOffice: the libreoffice engine (T2, spec 0.93.0): legacy .doc
+	// converted to .docx by headless LibreOffice, then read by the pandoc docx
+	// path. Flat extracted_markdown with the same provenance as routePandoc.
+	routeLibreOffice
 	// routeFlatOCR: the mistral OCR engine (T3) — page-separated extracted_markdown
 	// (§7.4.B "Page-separated extraction").
 	routeFlatOCR
@@ -221,6 +245,10 @@ type extractionAvailability struct {
 	// pandoc is true when the capability-activated pandoc engine (T2, #393) is
 	// active — a functional pandoc resolved and the policy permits it.
 	pandoc bool
+	// libreoffice is true when the capability-activated libreoffice engine (T2,
+	// spec 0.93.0) is active: a functional soffice AND a functional pandoc
+	// resolved and the policy permits it.
+	libreoffice bool
 }
 
 // selectExtractionRoute implements SPEC §7.4.B.1's best-available per-format
@@ -235,6 +263,8 @@ type extractionAvailability struct {
 //     eligible — a pinned engine gets no cross-engine fallback (§7.4.B.1).
 //   - `pandoc`: only the pandoc (T2) engine is eligible — a pandoc pin gets no
 //     docling/mistral fallback, so a format pandoc cannot read degrades.
+//   - `libreoffice`: only the libreoffice (T2) engine is eligible, so every
+//     format other than legacy .doc degrades (html keeps its raw_text baseline).
 //   - `mistral`: only the flat OCR engine is eligible.
 //   - `off`: no extraction engine is eligible; html still falls to its raw_text
 //     baseline, and pdf/image/document simply produce no extracted representation.
@@ -243,23 +273,25 @@ type extractionAvailability struct {
 // (html), whose raw_text baseline (§7.4.A) is unconditional and exempt from the
 // pin restriction so html is never dropped.
 // extractionPolicyAllows maps the normalized `ingest.extractor` policy to which
-// engine tiers are ELIGIBLE (subject to availability). A pin restricts eligibility
-// to its single engine — no cross-engine fallback (§7.4.B.1); `auto` allows all;
-// an unrecognized value allows none (html still reaches its raw_text baseline).
-// Split out of selectExtractionRoute to keep that function under the cyclomatic
-// budget.
-func extractionPolicyAllows(policy string) (structured, pandoc, flat bool) {
+// engine tiers are ELIGIBLE (subject to availability), expressed as an
+// extractionAvailability mask. A pin restricts eligibility to its single engine:
+// no cross-engine fallback (§7.4.B.1); `auto` allows all; an unrecognized value
+// allows none (html still reaches its raw_text baseline). Split out of
+// selectExtractionRoute to keep that function under the cyclomatic budget.
+func extractionPolicyAllows(policy string) extractionAvailability {
 	switch policy {
 	case "auto":
-		return true, true, true
+		return extractionAvailability{structured: true, pandoc: true, libreoffice: true, flatOCR: true}
 	case "docling", "docling-serve":
-		return true, false, false
+		return extractionAvailability{structured: true}
 	case "pandoc":
-		return false, true, false
+		return extractionAvailability{pandoc: true}
+	case "libreoffice":
+		return extractionAvailability{libreoffice: true}
 	case "mistral":
-		return false, false, true
+		return extractionAvailability{flatOCR: true}
 	default:
-		return false, false, false
+		return extractionAvailability{}
 	}
 }
 
@@ -268,22 +300,28 @@ func selectExtractionRoute(policy string, avail extractionAvailability, ext stri
 	if policy == "" {
 		policy = "auto"
 	}
-	structuredAllowed, pandocAllowed, flatAllowed := extractionPolicyAllows(policy)
+	eligible := extractionPolicyAllows(policy)
 
 	// T1 docling (structured): reads every extraction format except the
 	// structured-unreadable denylist.
-	if structuredAllowed && avail.structured && engineSupportsExt(engineStructured, ext) {
+	if eligible.structured && avail.structured && engineSupportsExt(engineStructured, ext) {
 		return routeStructured
 	}
 	// T2 pandoc (#393): born-digital office/markup/ebook formats. Selected below
 	// docling and above mistral OCR — it covers the docling-unreadable born-digital
 	// family (.odt/.rtf/.epub) and, when docling is absent, the OOXML/markup formats
 	// it can read (.docx/.html).
-	if pandocAllowed && avail.pandoc && engineSupportsExt(enginePandoc, ext) {
+	if eligible.pandoc && avail.pandoc && engineSupportsExt(enginePandoc, ext) {
 		return routePandoc
 	}
+	// T2 libreoffice (spec 0.93.0): legacy .doc, which no other engine reads. The
+	// two T2 engines claim disjoint formats, so their relative order is not
+	// observable; it sits after pandoc only for readability.
+	if eligible.libreoffice && avail.libreoffice && engineSupportsExt(engineLibreOffice, ext) {
+		return routeLibreOffice
+	}
 	// T3 mistral OCR (flat): the pdf/png/jpg/jpeg/webp allowlist.
-	if flatAllowed && avail.flatOCR && engineSupportsExt(engineFlatOCR, ext) {
+	if eligible.flatOCR && avail.flatOCR && engineSupportsExt(engineFlatOCR, ext) {
 		return routeFlatOCR
 	}
 	// T4 raw_text baseline: markup (html) only, always available and exempt from
@@ -295,6 +333,21 @@ func selectExtractionRoute(policy string, avail extractionAvailability, ext stri
 	return routeDegrade
 }
 
+// ActiveEngines names which extraction engines are active for a run, for
+// out-of-package callers (the doctor and `up` coverage checks) of
+// ExtractionCovered. It is the exported mirror of extractionAvailability.
+type ActiveEngines struct {
+	// Structured is the docling family (docling CLI or docling-serve).
+	Structured bool
+	// FlatOCR is the mistral (bespoke) OCR engine.
+	FlatOCR bool
+	// Pandoc is the capability-activated pandoc engine (T2, #393).
+	Pandoc bool
+	// LibreOffice is the capability-activated libreoffice engine (T2, spec
+	// 0.93.0) for legacy .doc.
+	LibreOffice bool
+}
+
 // ExtractionCovered reports whether the active extraction engines produce searchable
 // extracted text for ext under the given `ingest.extractor` policy — i.e. the
 // per-format route is an actual extraction engine (structured/pandoc/flat OCR) and
@@ -303,12 +356,17 @@ func selectExtractionRoute(policy string, avail extractionAvailability, ext stri
 // routes, including the pandoc (T2, #393) tier that the coarse structured/flat
 // boolean cannot express (a pandoc primary reads neither the docling nor the OCR
 // set). Callers pass which engines are active (derived from the resolved extractor
-// decision) plus pandoc availability. Extractable exts are pdf/image/document only,
-// so routeRawText (markup/html) never appears here.
-func ExtractionCovered(policy string, structured, flatOCR, pandoc bool, ext string) bool {
-	avail := extractionAvailability{structured: structured, flatOCR: flatOCR, pandoc: pandoc}
+// decision) plus pandoc and libreoffice availability. Extractable exts are
+// pdf/image/document only, so routeRawText (markup/html) never appears here.
+func ExtractionCovered(policy string, engines ActiveEngines, ext string) bool {
+	avail := extractionAvailability{
+		structured:  engines.Structured,
+		flatOCR:     engines.FlatOCR,
+		pandoc:      engines.Pandoc,
+		libreoffice: engines.LibreOffice,
+	}
 	switch selectExtractionRoute(policy, avail, ext) {
-	case routeStructured, routePandoc, routeFlatOCR:
+	case routeStructured, routePandoc, routeLibreOffice, routeFlatOCR:
 		return true
 	default:
 		return false
