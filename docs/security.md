@@ -110,8 +110,15 @@ need to run `dir2mcp reindex`.
   derivation pass then makes them again from the cache and checks them.
 - **Document summaries use checked text only.** Before dir2mcp sends a
   representation to the summary model, it checks the text against the active
-  lists. It does not send text that matches, and it does not keep a summary
-  that matches.
+  lists, and it checks the summary that comes back. A match in either sends
+  nothing more and keeps no summary: the document is withheld as
+  `secret_excluded`, as for any derived text that matches.
+- **Between the change and the start of the scan, no tool returns any indexed
+  document.** The scan records the new lists and marks the documents at its
+  start. A server can answer before that (`up` starts to serve before its
+  first scan, and `ask` runs no scan). So on each request dir2mcp compares the
+  recorded lists with the configured ones. When the configured lists can
+  match more, it withholds every indexed document until the scan records them.
 - **Until the scan has read a marked document again, no tool returns any part
   of it.** `search` and `related` leave out its hits, `ask` leaves out its
   passages before it builds the prompt, and `open_file` returns `FORBIDDEN`.

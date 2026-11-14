@@ -2733,6 +2733,13 @@ func (s *Service) settleProcessedDocument(
 	// error, so an absent summary leaves the document fully indexed and
 	// flat-retrievable, and the next scan retries.
 	s.GenerateDocumentSummaries(ctx, *doc)
+	// The summary step checks its source and its output against the secret
+	// policy. A match withheld the document there, so it is settled as
+	// secret_excluded, and none of the steps below runs: they would finalize it
+	// as indexed and clear its pending mark (SPEC §7.2).
+	if s.secretExcludedThisDoc {
+		return s.finalizeSecretExcluded(ctx, doc, finalContentHash)
+	}
 	// Every output this pipeline produces for the document has now committed, so
 	// it is safe to retire the ones it no longer produces (#692). Running the
 	// reconciliation AFTER the generation pass is what guarantees a representation

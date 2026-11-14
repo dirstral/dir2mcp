@@ -136,6 +136,10 @@ func (s *Service) GenerateDocumentSummaries(ctx context.Context, doc model.Docum
 	}
 	selected := selectSummarySourceReps(candidates, s.cfg.RetrievalHierarchicalSourceReps)
 	for _, src := range selected {
+		if s.secretExcludedThisDoc {
+			// A secret withheld the document: nothing more is summarized.
+			return
+		}
 		if err := s.generateSummaryForRep(ctx, doc, reader, src, len(selected) > 1); err != nil {
 			// Fail-open per document/representation (§9.7): log and move on. The
 			// document keeps its fine chunks and falls back to flat retrieval; the
@@ -238,8 +242,8 @@ func primarySummarySourceRep(eligible []store.SummarySourceRep) (store.SummarySo
 // not made because its source, or its output, matched the secret policy. The
 // messages name no text.
 var (
-	errSummarySourceSecret = errors.New("summary source matches a configured secret pattern; nothing was sent to the summarizer")
-	errSummaryOutputSecret = errors.New("summary output matches a configured secret pattern; it was not persisted")
+	errSummarySourceSecret = errors.New("summary source matches a configured secret pattern; nothing was sent to the summarizer and the document is withheld")
+	errSummaryOutputSecret = errors.New("summary output matches a configured secret pattern; it was not persisted and the document is withheld")
 )
 
 // generateSummaryForRep derives, caches, and persists one `summary`
@@ -261,10 +265,12 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 	// The source text goes to a provider, so it is checked against the active
 	// secret policy first (SPEC §7.2). The whole representation is checked, not
 	// only the part the prompt takes, because a credential can sit past the cut.
-	// A match sends nothing and persists nothing. The pipeline normally has
-	// withheld such a document before this step; this check keeps a stored
-	// representation that it did not regenerate from reaching the summarizer.
-	if s.derivedTextHasSecret(fullText) {
+	// A match sends nothing, and the document is withheld like any document
+	// whose derived text matches: its representations and chunks are retired
+	// and the caller settles it as secret_excluded (settleProcessedDocument).
+	// The pipeline normally withholds such a document before this step; this
+	// check covers a stored representation that it did not regenerate.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindSummary, fullText) {
 		return errSummarySourceSecret
 	}
 	sourceText := truncateSummarySource(fullText)
@@ -278,8 +284,8 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 		return fmt.Errorf("generator returned an empty summary")
 	}
 	// A summary is model output: check it like any derived text before it is
-	// persisted.
-	if s.derivedTextHasSecret(summaryText) {
+	// persisted. A match withholds the document, as for any derived text.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindSummary, summaryText) {
 		return errSummaryOutputSecret
 	}
 

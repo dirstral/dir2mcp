@@ -179,3 +179,96 @@ func TestSecretPolicy_SummaryNeverReadsUncheckedTranslations(t *testing.T) {
 	}
 	requireStatus(t, st, rel, model.DocumentStatusSecretExcluded)
 }
+
+// codenameSummarizer returns a summary that holds a codename.
+type codenameSummarizer struct {
+	recordingSummarizer
+}
+
+func (c *codenameSummarizer) Generate(ctx context.Context, prompt string) (string, error) {
+	if _, err := c.recordingSummarizer.Generate(ctx, prompt); err != nil {
+		return "", err
+	}
+	return "summary: project BLUEHERON-alpha-2026 covers the budget", nil
+}
+
+// TestSecretPolicy_SummaryMatchWithholdsTheDocument pins the settle path of
+// the summary step (SPEC §7.2). A summary source or a summary output that
+// matches the policy withholds the whole document: it is settled as
+// secret_excluded with no live representation, its pending mark is not
+// cleared by an "ok" finalize, and no summary is persisted.
+func TestSecretPolicy_SummaryMatchWithholdsTheDocument(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	codename := `BLUEHERON-[a-z]+-[0-9]{4}`
+
+	t.Run("summary output", func(t *testing.T) {
+		root := testutil.TempDir(t)
+		writeFile(t, filepath.Join(root, "notes.txt"), "the report covers the regional budget and the new bridge")
+		st := newRealStore(t)
+		cfg := hierarchicalConfig(testutil.TempDir(t))
+		cfg.RootDir = root
+		cfg.STTProvider = "off"
+		cfg.SecretPatterns = append(append([]string(nil), config.Default().SecretPatterns...), codename)
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetSummarizer(&codenameSummarizer{}, "mistral", "mistral-small-latest")
+		if err := svc.Run(ctx); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		requireWithheldAndRetired(t, st, "notes.txt")
+	})
+
+	t.Run("summary source", func(t *testing.T) {
+		root := testutil.TempDir(t)
+		mustWriteFile(t, filepath.Join(root, "media", "clip.mp3"), []byte("fake-audio"))
+		stateDir := testutil.TempDir(t)
+		st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+		if err := st.Init(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		run := func(patterns, targets []string, sum *recordingSummarizer) {
+			t.Helper()
+			cfg := config.Default()
+			cfg.RootDir = root
+			cfg.StateDir = stateDir
+			cfg.STTProvider = "off"
+			cfg.SecretPatterns = patterns
+			cfg.RetrievalHierarchicalEnabled = true
+			cfg.RetrievalHierarchicalLevels = []string{config.HierarchicalLevelDocument}
+			cfg.RetrievalHierarchicalSourceReps = []string{"transcript-en"}
+			cfg.RetrievalHierarchicalMaxTokens = config.DefaultHierarchicalMaxTokens
+			cfg.RetrievalHierarchicalPromptVersion = config.DefaultHierarchicalPromptVersion
+			svc := mustNewIngestService(t, cfg, st)
+			svc.SetTranscriber(&fakeTranscriber{text: "[00:00] the report covers the regional budget and the new bridge"})
+			svc.SetSTTIdentity("whisper", "large-v3")
+			svc.SetTranscriptLanguage("de")
+			if len(targets) > 0 {
+				svc.SetTranslator(&codenameTranslator{}, "mistral", "model-a", targets)
+			}
+			svc.SetSummarizer(sum, "mistral", "mistral-small-latest")
+			if err := svc.Run(ctx); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+		}
+		defaults := config.Default().SecretPatterns
+		// Single pass: the translation holds the codename.
+		run(defaults, []string{"en"}, &recordingSummarizer{})
+		requireStatus(t, st, "media/clip.mp3", model.DocumentStatusOK)
+		// A broader pattern, and translation switched off. The scan re-reads
+		// the document; the stored translation is not made again, and the
+		// summary step reads it before the output reconciliation retires it.
+		broader := append(append([]string(nil), defaults...), codename)
+		sum := &recordingSummarizer{}
+		run(broader, nil, sum)
+		sum.mu.Lock()
+		for _, p := range sum.prompts {
+			if strings.Contains(p, "BLUEHERON") {
+				sum.mu.Unlock()
+				t.Fatalf("the summarizer received a source that matches the policy:\n%s", p)
+			}
+		}
+		sum.mu.Unlock()
+		requireWithheldAndRetired(t, st, "media/clip.mp3")
+	})
+}

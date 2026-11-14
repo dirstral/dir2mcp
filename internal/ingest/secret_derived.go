@@ -53,6 +53,9 @@ const (
 	derivedKindTranslation = "translation"
 	derivedKindRecognition = "recognition"
 	derivedKindSidecar     = "subtitle sidecar"
+	// derivedKindSummary is the summary step: its source representation text
+	// (read back from the store) and the summary the model returns.
+	derivedKindSummary = "summary"
 )
 
 // ErrSecretExcluded reports that derived text was withheld because it matched a
