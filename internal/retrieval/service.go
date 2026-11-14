@@ -1773,34 +1773,7 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// slot it took (#686). A pool with no summary candidates (every corpus with
 	// the feature off) makes exactly one retrieval call and returns unchanged, so
 	// the flat path is untouched.
-	hits, err := s.searchWithSummaryRefill(ctx, query, poolK)
-	if err != nil {
-		return nil, err
-	}
-	// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
-	// re-scores each hit by its source-document age, so the floor compares the
-	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
-	// pass-through (no allocation, no lookups).
-	hits = s.applyRecencyDecay(ctx, hits)
-	// Apply the server-side relevance floor: after scoring/fusion/rerank,
-	// the optional HyDE fusion, any cross-lingual fusion, their dedup/truncation,
-	// and the recency decay, using each hit's final authoritative Score.
-	// Config-only; default 0 ⇒ pass-through.
-	hits = s.applyMinScoreFloor(hits)
-	// Truncate to the caller's k only now — after decay reordering and the floor
-	// have run over the wider pool — so decay determines top-k membership and the
-	// floor can surface k+1..k+n survivors. A no-op when poolK == k (#427).
-	hits = truncateSearchHits(hits, k)
-	// Prune (and evict) any chunk the store has since tombstoned — the partial
-	// incremental-reindex staleness of issue #409. Done LAST, on the small final
-	// result set, so at most k store lookups run per query and deleted content is
-	// never returned (nor cited) even before the next restart.
-	hits = s.pruneTombstonedHits(ctx, hits)
-	// Leave out every hit of a document that waits for re-evaluation against
-	// a broader secret policy, and any hit whose text matches the secret
-	// pattern set, so a credential that a changed set finds is not served (and
-	// not placed in an ask prompt) before the scan retires it (spec 0.93.0).
-	hits, err = s.screenServedHits(ctx, hits)
+	hits, err := s.searchScreenedPool(ctx, query, k, poolK)
 	if err != nil {
 		return nil, err
 	}
@@ -1811,6 +1784,62 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// call computes the null baseline.
 	stampEvidenceVerdicts(s.effectiveEvidenceThresholds(ctx), hits)
 	return hits, nil
+}
+
+// secretScreenRefillRounds bounds how many times search widens its pool to
+// refill slots that the secret screen emptied.
+const secretScreenRefillRounds = 3
+
+// searchScreenedPool retrieves a pool of poolK candidates, applies the recency
+// decay and the relevance floor, screens the pool against the secret policy
+// (screenServedHits), and only then cuts it to k and prunes tombstoned chunks.
+// The screen runs BEFORE the cut, so the next candidate takes the place of a
+// hit that it removes. When the screen removed hits, fewer than k remain and
+// the pool was full, it retrieves a wider pool and tries again, up to
+// secretScreenRefillRounds times, so a credential that ranks first does not
+// cost the caller a result (SPEC §7.2, spec 0.93.0).
+func (s *Service) searchScreenedPool(ctx context.Context, query model.SearchQuery, k, poolK int) ([]model.SearchHit, error) {
+	for round := 0; ; round++ {
+		hits, err := s.searchWithSummaryRefill(ctx, query, poolK)
+		if err != nil {
+			return nil, err
+		}
+		retrieved := len(hits)
+		// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
+		// re-scores each hit by its source-document age, so the floor compares the
+		// decayed score and newer content survives a tie. Config-only; default 0
+		// is a pass-through (no allocation, no lookups).
+		hits = s.applyRecencyDecay(ctx, hits)
+		// Apply the server-side relevance floor: after scoring/fusion/rerank,
+		// the optional HyDE fusion, any cross-lingual fusion, their dedup/cut,
+		// and the recency decay, using each hit's final authoritative Score.
+		// Config-only; default 0 is a pass-through.
+		hits = s.applyMinScoreFloor(hits)
+		// Leave out every hit of a document that waits for re-evaluation against
+		// a broader secret policy, and any hit whose text matches the secret
+		// pattern set, so a credential that a changed set finds is not served (and
+		// not placed in an ask prompt) before the scan retires it (spec 0.93.0).
+		floored := len(hits)
+		hits, err = s.screenServedHits(ctx, hits)
+		if err != nil {
+			return nil, err
+		}
+		screened := floored - len(hits)
+		if screened > 0 && len(hits) < k && retrieved >= poolK && round < secretScreenRefillRounds {
+			poolK = poolK*2 + screened
+			continue
+		}
+		// Cut to the caller's k only now, after decay reordering, the floor and
+		// the secret screen have run over the pool, so decay determines top-k
+		// membership and the floor and the screen can surface k+1..k+n survivors
+		// (#427).
+		hits = truncateSearchHits(hits, k)
+		// Prune (and evict) any chunk the store has since tombstoned (the partial
+		// incremental-reindex staleness of issue #409). Done on the small final
+		// result set, so at most k store lookups run per query and a tombstoned
+		// chunk is never returned (nor cited) even before the next restart.
+		return s.pruneTombstonedHits(ctx, hits), nil
+	}
 }
 
 // searchByMode runs the index-mode dispatch (text/code/both/auto) for one query
@@ -3920,7 +3949,7 @@ func (s *Service) rerankSafeCandidates(ctx context.Context, hits []model.SearchH
 // The returned candidates keep their order. A candidate left out here is left
 // out of the result as well, as the final screen would do.
 func (s *Service) rerankDocsNotSecret(ctx context.Context, cand []model.SearchHit) ([]model.SearchHit, []string) {
-	docs := s.rerankDocs(ctx, cand)
+	docs, raw := s.rerankDocs(ctx, cand)
 	s.metaMu.RLock()
 	matcher := s.secretMatcher
 	s.metaMu.RUnlock()
@@ -3930,7 +3959,11 @@ func (s *Service) rerankDocsNotSecret(ctx context.Context, cand []model.SearchHi
 	keptHits := make([]model.SearchHit, 0, len(cand))
 	keptDocs := make([]string, 0, len(docs))
 	for i, doc := range docs {
-		if matcher.MatchString(doc) || matcher.MatchString(cand[i].Snippet) {
+		// The stored text is checked as it is, before any normalization:
+		// trimming changes what an anchored allow pattern can cover, so a check
+		// of the trimmed text alone can release a match that the stored text
+		// holds. The text sent to the provider and the snippet are checked too.
+		if matcher.MatchString(raw[i]) || matcher.MatchString(doc) || matcher.MatchString(cand[i].Snippet) {
 			continue
 		}
 		keptHits = append(keptHits, cand[i])
@@ -3939,8 +3972,12 @@ func (s *Service) rerankDocsNotSecret(ctx context.Context, cand []model.SearchHi
 	return keptHits, keptDocs
 }
 
-func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []string {
-	docs := make([]string, len(cand))
+// rerankDocs returns the reranker input for each candidate (the trimmed full
+// chunk text, or the snippet when the store cannot give it) and the stored
+// full text as it is, untrimmed ("" when it was not read).
+func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) (docs, raw []string) {
+	docs = make([]string, len(cand))
+	raw = make([]string, len(cand))
 	fetcher, _ := s.store.(chunkByIDer)
 	for i, h := range cand {
 		docs[i] = h.Snippet
@@ -3951,11 +3988,12 @@ func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []stri
 		if err != nil {
 			continue
 		}
+		raw[i] = task.Text
 		if full := strings.TrimSpace(task.Text); full != "" {
 			docs[i] = full
 		}
 	}
-	return docs
+	return docs, raw
 }
 
 // diversifyAndTruncate applies the optional MMR diversity re-ordering (issue
