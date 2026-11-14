@@ -91,3 +91,48 @@ func TestSecretScreen_RerankChecksTheStoredTextAsIs(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretScreen_AskChecksTheTrimmedPromptText pins the ask prompt boundary:
+// the prompt takes the trimmed chunk text, so the trimmed text is checked too.
+// With the allow pattern ^ token=A+ $, the stored text " token=AAAA... " is
+// covered, but the trimmed text is not. The snippet is clean, so only the
+// prompt-boundary check can keep the chunk out.
+func TestSecretScreen_AskChecksTheTrimmedPromptText(t *testing.T) {
+	tok := "to" + "ken"
+	chunk := " " + tok + "=" + strings.Repeat("A", 24) + " "
+	allow := []string{`^ ` + tok + `=A+ $`}
+	m, err := secretmatch.Compile([]string{secretmatch.GenericTokenPattern}, allow)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if m.MatchString(chunk) || !m.MatchString(strings.TrimSpace(chunk)) {
+		t.Fatal("the fixture must pass as stored and match once trimmed")
+	}
+
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	st := &fullTextStore{text: map[uint64]string{
+		1: chunk,
+		2: "clean notes about the bridge",
+	}}
+	gen := &fakeGenerator{out: "notes [b.md]"}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+		t.Fatalf("SetSecretPolicy: %v", err)
+	}
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "notes"})
+	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "notes"})
+
+	if _, err := svc.Ask(context.Background(), "what do the notes say", model.SearchQuery{K: 2, Index: "text"}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if gen.lastPrompt == "" {
+		t.Fatal("the generator was not called; the test proves nothing")
+	}
+	if strings.Contains(gen.lastPrompt, tok+"=AAAA") {
+		t.Fatalf("the prompt holds the chunk that matches once trimmed:\n%s", gen.lastPrompt)
+	}
+}

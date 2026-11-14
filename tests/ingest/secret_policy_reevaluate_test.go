@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -108,6 +109,30 @@ func forgetSecretPolicyIdentity(t *testing.T, st *store.SQLiteStore, dbPath stri
 	}
 	if recorded != "" {
 		t.Fatalf("SecretPolicyIdentity after delete = %q, want empty", recorded)
+	}
+}
+
+// keepOldBinarySnapshot writes the effective-config snapshot that a release
+// before spec 0.93.0 left in the state directory (it records secret_patterns
+// and no allow list), then saves the new snapshot the way every command does
+// at config load. The save keeps the old lists as the provenance of the
+// previous secret policy (config.PreviousSecretPolicy).
+func keepOldBinarySnapshot(t *testing.T, cfg config.Config, oldSecret []string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("root_dir: " + cfg.RootDir + "\nsecret_patterns:\n")
+	for _, p := range oldSecret {
+		b.WriteString("  - '" + strings.ReplaceAll(p, "'", "''") + "'\n")
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, config.EffectiveConfigSnapshotFile), []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("write old snapshot: %v", err)
+	}
+	if _, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{}); err != nil {
+		t.Fatalf("SaveEffectiveSnapshot: %v", err)
+	}
+	prov, ok, err := config.PreviousSecretPolicy(cfg.StateDir)
+	if err != nil || !ok || len(prov.Secret) != len(oldSecret) || len(prov.Allow) != 0 {
+		t.Fatalf("PreviousSecretPolicy = (%+v, %v, %v), want the old lists and no allow list", prov, ok, err)
 	}
 }
 
@@ -365,4 +390,38 @@ func TestSecretPolicy_ReleasedDocumentKeepsTheOtherGates(t *testing.T) {
 	for _, rel := range []string{"ignored.md", "excluded.md", "big.md"} {
 		requireNotSearchable(t, st, rel)
 	}
+}
+
+// TestSecretPolicy_ErrorRowWithLiveRepsIsRetiredWhenWithheld covers an
+// existing row that is not `ok` but still holds live representations (an
+// `error` row can: recognition keeps its annotations after an error, and a
+// hard failure can leave earlier representations live). When its raw bytes
+// are withheld, those representations must be retired before the
+// `secret_excluded` status is written.
+func TestSecretPolicy_ErrorRowWithLiveRepsIsRetiredWhenWithheld(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "memo.md"), "Project codename: BLUEHERON-internal-2026\n")
+	st, _ := newPolicyStore(t)
+
+	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
+	doc := requireStatus(t, st, "memo.md", model.DocumentStatusOK)
+	// A later run recorded an error for the document and left its
+	// representations live.
+	doc.Status = string(model.DocumentStatusError)
+	doc.ErrorMessage = "recognition failed"
+	doc.ContentHash = ""
+	if err := st.UpsertDocument(ctx, doc); err != nil {
+		t.Fatalf("UpsertDocument: %v", err)
+	}
+	reps, err := st.ActiveRepresentations(ctx, "memo.md")
+	if err != nil || len(reps) == 0 {
+		t.Fatalf("the error row holds no live representation (%d, %v); the test proves nothing", len(reps), err)
+	}
+
+	custom := append(append([]string(nil), config.Default().SecretPatterns...), `BLUEHERON-[a-z]+-[0-9]{4}`)
+	runPolicyScan(t, policyConfig(root, stateDir, custom), st)
+	requireWithheldAndRetired(t, st, "memo.md")
 }

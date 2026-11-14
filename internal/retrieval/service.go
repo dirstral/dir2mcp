@@ -347,6 +347,9 @@ type Service struct {
 	secretMatcher     *secretmatch.Matcher
 	secretPatternList []string
 	secretAllowList   []string
+	// secretOperatorList is the operator list as last configured, without the
+	// baseline; nil until a setter runs (then the shipped defaults apply).
+	secretOperatorList []string
 	// ingestPolicy is the policy ingest applies for the same configuration:
 	// the operator lists as configured, without the retrieval baseline. It is
 	// compared with the policy the store recorded (see
@@ -1236,27 +1239,37 @@ func (s *Service) SetPathExcludes(patterns []string) {
 	s.metaMu.Unlock()
 }
 
+// SetSecretPatterns installs security.secret_patterns, merged with the
+// baseline, and keeps the current allow list. It goes through the same path
+// as SetSecretPolicy, so the ingest policy that the transition check compares
+// stays in step.
 func (s *Service) SetSecretPatterns(patterns []string) error {
-	// Start with the baseline so that the default secret-detection patterns
-	// (AWS keys, JWT tokens, etc.) are never dropped when callers add custom
-	// patterns.
-	merged := make([]string, 0, len(defaultSecretPatternLiterals)+len(patterns))
-	merged = append(merged, defaultSecretPatternLiterals...)
-	merged = append(merged, patterns...)
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	matcher, err := secretmatch.Compile(merged, s.secretAllowList)
-	if err != nil {
-		return err
+	s.metaMu.RLock()
+	allow := append([]string{}, s.secretAllowList...)
+	s.metaMu.RUnlock()
+	return s.SetSecretPolicy(patterns, allow)
+}
+
+// SetSecretAllowPatterns installs security.secret_allow_patterns (SPEC §7.2)
+// and keeps the current operator secret list. A secret match that an allow
+// match covers is cancelled. The list replaces the default allow list; an
+// empty list cancels nothing. It goes through the same path as
+// SetSecretPolicy.
+func (s *Service) SetSecretAllowPatterns(patterns []string) error {
+	s.metaMu.RLock()
+	operator := s.secretOperatorList
+	s.metaMu.RUnlock()
+	if operator == nil {
+		operator = defaultSecretPatternLiterals
 	}
-	s.secretMatcher = matcher
-	s.secretPatternList = merged
-	return nil
+	return s.SetSecretPolicy(append([]string{}, operator...), patterns)
 }
 
 // SetSecretPolicy installs security.secret_patterns (merged with the
-// baseline, as SetSecretPatterns does) and security.secret_allow_patterns in
-// one step. Nothing changes when either list does not compile.
+// baseline) and security.secret_allow_patterns in one step. Nothing changes
+// when either list does not compile. Every secret setter goes through it, so
+// the matcher and the ingest policy (the operator lists as configured, which
+// the transition check compares with the recorded policy) never disagree.
 func (s *Service) SetSecretPolicy(patterns, allowPatterns []string) error {
 	merged := make([]string, 0, len(defaultSecretPatternLiterals)+len(patterns))
 	merged = append(merged, defaultSecretPatternLiterals...)
@@ -1273,6 +1286,7 @@ func (s *Service) SetSecretPolicy(patterns, allowPatterns []string) error {
 	s.metaMu.Lock()
 	s.secretMatcher = matcher
 	s.secretPatternList = merged
+	s.secretOperatorList = append([]string{}, patterns...)
 	s.secretAllowList = allow
 	s.ingestPolicy = ingestMatcher.Policy()
 	s.ingestPolicyKnown = true
@@ -1288,32 +1302,31 @@ type secretPolicyRecordStore interface {
 	SecretPolicyAllowPatterns(ctx context.Context) ([]string, bool, error)
 }
 
-// shippedDefaultSecretPolicy is the policy of the shipped default lists.
-var shippedDefaultSecretPolicy = func() secretmatch.Policy {
-	m, err := secretmatch.Compile(defaultSecretPatternLiterals, defaultSecretAllowPatternLiterals)
-	if err != nil {
-		return secretmatch.Policy{}
-	}
-	return m.Policy()
-}()
-
 // secretPolicyTransitionPending reports whether the configured policy can
-// match more than the policy the store recorded, and ingest has not applied
-// the move yet (SPEC §7.2). Ingest records the new policy and marks every
-// indexed document pending in one transaction at the start of its next scan.
-// Until then no document carries the mark, so this check withholds every
+// match more than the previous one, and ingest has not applied the move yet
+// (SPEC §7.2). Ingest records the new policy and marks every indexed document
+// pending in one transaction at the start of its next scan; from then on each
+// document comes back as soon as the scan decides it again. Until that
+// transaction, no document carries the mark, so this check withholds every
 // indexed document instead. It runs inside every serve path, so the order in
 // which a process starts its transport and its ingest worker, or a process
 // that serves without a scan (ask), cannot expose a document that the new
-// policy withholds. A change that can only match less hides nothing.
+// policy withholds. A move that the previous lists prove narrower hides
+// nothing.
 //
-// A service without the configured lists (no SetSecretPolicy) or a store
+// The previous policy is the one the store recorded, or, for a corpus that an
+// older release indexed, the provenance that the effective-config snapshot
+// kept (config.PreviousSecretPolicy). With neither, it is unknown and counts
+// as broader.
+//
+// A service without the configured lists (no secret setter called) or a store
 // without the record skips the check. A store error is returned: the result
 // cannot be proven safe.
 func (s *Service) secretPolicyTransitionPending(ctx context.Context) (bool, error) {
 	s.metaMu.RLock()
 	active, known := s.ingestPolicy, s.ingestPolicyKnown
 	st := s.store
+	stateDir := s.stateDir
 	s.metaMu.RUnlock()
 	if !known {
 		return false, nil
@@ -1326,36 +1339,46 @@ func (s *Service) secretPolicyTransitionPending(ctx context.Context) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("secret policy: read the recorded secret policy identity: %w", err)
 	}
-	recorded := secretmatch.Recorded{Identity: identity}
-	if identity != "" && identity != active.Identity() {
-		secret, secretKnown, err := rs.SecretPolicyPatterns(ctx)
-		if err != nil {
-			return false, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
-		}
-		allow, allowKnown, err := rs.SecretPolicyAllowPatterns(ctx)
-		if err != nil {
-			return false, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
-		}
-		recorded.Policy = secretmatch.Policy{Secret: secret, Allow: allow}
-		recorded.Known = secretKnown && allowKnown
+	previous, err := previousSecretPolicy(ctx, rs, identity, active, stateDir)
+	if err != nil {
+		return false, err
 	}
-	return secretmatch.NeedsIndexedReevaluation(recorded, active, shippedDefaultSecretPolicy), nil
+	return secretmatch.NeedsIndexedReevaluation(previous, active), nil
 }
 
-// SetSecretAllowPatterns installs security.secret_allow_patterns (SPEC §7.2).
-// A secret match that an allow match covers is cancelled. The list replaces
-// the default allow list; an empty list cancels nothing.
-func (s *Service) SetSecretAllowPatterns(patterns []string) error {
-	allow := append([]string{}, patterns...)
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	matcher, err := secretmatch.Compile(s.secretPatternList, allow)
-	if err != nil {
-		return err
+// previousSecretPolicy reads the previous policy for the transition check: the
+// recorded lists when the store records an identity that differs from the
+// active one, else the snapshot provenance when the store records none.
+func previousSecretPolicy(ctx context.Context, rs secretPolicyRecordStore, identity string, active secretmatch.Policy, stateDir string) (secretmatch.Recorded, error) {
+	previous := secretmatch.Recorded{Identity: identity}
+	switch {
+	case identity == active.Identity():
+		return previous, nil
+	case identity == "":
+		if strings.TrimSpace(stateDir) == "" {
+			return previous, nil
+		}
+		prov, ok, err := config.PreviousSecretPolicy(stateDir)
+		if err != nil {
+			return previous, fmt.Errorf("secret policy: read the previous secret policy: %w", err)
+		}
+		if ok {
+			previous.Policy = secretmatch.Policy{Secret: prov.Secret, Allow: prov.Allow}
+			previous.Known = true
+		}
+		return previous, nil
 	}
-	s.secretMatcher = matcher
-	s.secretAllowList = allow
-	return nil
+	secret, secretKnown, err := rs.SecretPolicyPatterns(ctx)
+	if err != nil {
+		return previous, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
+	}
+	allow, allowKnown, err := rs.SecretPolicyAllowPatterns(ctx)
+	if err != nil {
+		return previous, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
+	}
+	previous.Policy = secretmatch.Policy{Secret: secret, Allow: allow}
+	previous.Known = secretKnown && allowKnown
+	return previous, nil
 }
 
 func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
@@ -2506,7 +2529,7 @@ func (s *Service) generateGroundedAnswer(
 	// citable (issue #890); see moments.go.
 	moments := groupMoments(hits)
 	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
-	prompt, usedIdx, contextSection := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	prompt, usedIdx, contextSection := s.buildScreenedRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
 	// Report a partial reasoning window. The citation list cannot show it: it
 	// reports provenance, not how much of the retrieved evidence the model read
 	// (issue #891). An aggregate answer built on a partial window is a sample,
@@ -4599,10 +4622,15 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 			// again here, so test it again at the prompt boundary: a chunk
 			// rewritten between the two reads never reaches the generator
 			// (spec 0.93.0).
-			if matcher.MatchString(task.Text) {
+			// Both the stored text and the trimmed text that the prompt takes
+			// are checked: a trim changes what an anchored allow pattern can
+			// cover, so the trimmed text can match where the stored one does
+			// not.
+			trimmed := strings.TrimSpace(task.Text)
+			if matcher.MatchString(task.Text) || matcher.MatchString(trimmed) {
 				continue
 			}
-			texts[member] = strings.TrimSpace(task.Text)
+			texts[member] = trimmed
 		}
 	}
 	return texts
@@ -4791,6 +4819,30 @@ func collapseSpaces(s string) string {
 // mandatory injection guard here, at the one place that also writes the
 // document fence, so the fence and the rule that explains it cannot separate
 // (issue #885).
+// buildScreenedRAGPrompt builds the prompt and checks the context section it
+// is about to send against the secret policy (SPEC §7.2, spec 0.93.0). Each
+// text was checked in contextTexts, but the prompt cuts or compresses a text
+// to its budget, and a cut can change what an allow pattern covers. When the
+// placed context matches, the prompt is built again from the snippets alone
+// (screenSecretHits checked each one); when that also matches, it is built
+// with no context. The generator never receives a context that matches.
+func (s *Service) buildScreenedRAGPrompt(question string, hits []model.SearchHit, moments []moment, texts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int, string) {
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	prompt, usedIdx, contextSection := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	if !matcher.MatchString(contextSection) {
+		return prompt, usedIdx, contextSection
+	}
+	s.logf("security: the ask context matched a secret pattern once it was cut to the budget; the prompt uses the snippets only")
+	prompt, usedIdx, contextSection = buildRAGPrompt(question, hits, moments, make([]string, len(texts)), systemPrompt, maxContextChars, compressor)
+	if !matcher.MatchString(contextSection) {
+		return prompt, usedIdx, contextSection
+	}
+	s.logf("security: the ask context from the snippets also matched a secret pattern; the prompt carries no context")
+	return buildRAGPrompt(question, nil, nil, nil, systemPrompt, maxContextChars, compressor)
+}
+
 func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int, string) {
 	systemPrompt = composeSystemPrompt(systemPrompt)
 	maxContextChars = normalizeMaxContextChars(maxContextChars)

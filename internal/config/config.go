@@ -2545,6 +2545,12 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 	if err := statefs.MkdirAllHardened(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("create snapshot directory: %w", err)
 	}
+	// Keep the secret lists of the snapshot this write replaces, once, as the
+	// provenance of the previous secret policy (SPEC §7.2). Without it, a
+	// corpus that an older release indexed has an unknown previous policy.
+	if err := captureSecretPolicyProvenance(cfg.StateDir); err != nil {
+		return "", fmt.Errorf("record the previous secret policy: %w", err)
+	}
 	if err := statefs.WriteFile(path, raw); err != nil {
 		return "", fmt.Errorf("write snapshot file %s: %w", path, err)
 	}

@@ -82,11 +82,11 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 	if recorded == active {
 		return nil
 	}
-	previous, err := recordedSecretPolicy(ctx, policyStore, recorded)
+	previous, err := recordedSecretPolicy(ctx, policyStore, recorded, s.cfg.StateDir)
 	if err != nil {
 		return err
 	}
-	reevaluateIndexed := secretmatch.NeedsIndexedReevaluation(previous, activePolicy, shippedDefaultPolicy())
+	reevaluateIndexed := secretmatch.NeedsIndexedReevaluation(previous, activePolicy)
 	cleared, err := policyStore.ResetForSecretPolicy(ctx, active, activePolicy.Secret, activePolicy.Allow, reevaluateIndexed)
 	if err != nil {
 		return fmt.Errorf("secret policy: reset documents for the changed secret policy: %w", err)
@@ -102,11 +102,22 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 }
 
 // recordedSecretPolicy reads the policy the corpus was last evaluated
-// against. secretmatch.NeedsIndexedReevaluation decides what a move from it
-// means, including for a corpus with no recorded identity.
-func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded string) (secretmatch.Recorded, error) {
+// against. When the store records none (a corpus that a release before spec
+// 0.93.0 indexed), it falls back to the provenance that the effective-config
+// snapshot kept (config.PreviousSecretPolicy). With neither, the previous
+// policy is unknown, and secretmatch.NeedsIndexedReevaluation reads every
+// indexed document again.
+func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded, stateDir string) (secretmatch.Recorded, error) {
 	out := secretmatch.Recorded{Identity: recorded}
 	if recorded == "" {
+		prov, ok, err := config.PreviousSecretPolicy(stateDir)
+		if err != nil {
+			return out, fmt.Errorf("secret policy: read the previous secret policy: %w", err)
+		}
+		if ok {
+			out.Policy = secretmatch.Policy{Secret: prov.Secret, Allow: prov.Allow}
+			out.Known = true
+		}
 		return out, nil
 	}
 	secret, secretKnown, err := policyStore.SecretPolicyPatterns(ctx)
@@ -122,34 +133,27 @@ func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, re
 	return out, nil
 }
 
-// shippedDefaultPolicy returns the policy of the shipped default lists. An
-// error cannot occur for the shipped defaults; on one, the zero policy makes
-// every custom-policy check count as broader, which fails closed.
-func shippedDefaultPolicy() secretmatch.Policy {
-	defaults := config.Default()
-	matcher, err := secretmatch.Compile(defaults.SecretPatterns, defaults.SecretAllowPatterns)
-	if err != nil {
-		return secretmatch.Policy{}
-	}
-	return matcher.Policy()
-}
-
-// retireNewlyWithheld retires the representations of a document that its raw
-// bytes now withhold while its stored row is still `ok`. That happens when the
-// pattern set became broader (SPEC §7.2): the raw-byte scan reaches the new
-// verdict on the read, but the document generates no new representations, so
-// without this its old chunks stay searchable under a `secret_excluded` row.
+// retireNewlyWithheld retires the representations of an existing document
+// that its raw bytes now withhold. That happens when the pattern set became
+// broader (SPEC §7.2): the raw-byte scan reaches the new verdict on the read,
+// but the document generates no new representations, so without this its old
+// chunks stay searchable under a `secret_excluded` row.
+//
+// It runs for every existing, live row, whatever its status. An `ok` row holds
+// live representations, and so can an `error` row (recognition keeps its
+// indexed annotations after an error is recorded, and a hard failure can leave
+// earlier representations live). A row that is already `secret_excluded` or
+// has nothing live costs one list query; retirement is idempotent.
 //
 // It runs BEFORE the caller upserts the new status, and a failure is returned so
-// the caller does not write that status: the row stays `ok` with its current
-// content hash, and the next read decides again. Writing `secret_excluded` over
-// live chunks would hide the document from this check for good, because the
-// check fires only on a row that is still `ok`.
+// the caller does not write that status: the row keeps its status and content
+// hash, and the next read decides again. Writing `secret_excluded` over live
+// chunks first would leave them searchable under a withheld row.
 func (s *Service) retireNewlyWithheld(ctx context.Context, existing, doc model.Document) error {
 	if doc.Status != string(model.DocumentStatusSecretExcluded) {
 		return nil
 	}
-	if existing.RelPath == "" || existing.Deleted || existing.Status != string(model.DocumentStatusOK) {
+	if existing.RelPath == "" || existing.Deleted {
 		return nil
 	}
 	if err := s.retireRepresentationsForPath(ctx, doc.RelPath, "secret policy"); err != nil {

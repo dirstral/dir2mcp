@@ -69,6 +69,7 @@ func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) 
 	requireStatus(t, st, "redirect.md", model.DocumentStatusSecretExcluded)
 	requireSearchable(t, st, "clean.md")
 	forgetSecretPolicyIdentity(t, st, dbPath)
+	keepOldBinarySnapshot(t, policyConfig(root, stateDir, config.Default().SecretPatterns), preSpec0930SecretPatterns)
 
 	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "redirect.md")
@@ -96,6 +97,31 @@ func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) 
 		t.Fatalf("a removed allow list did not re-read the indexed documents; log:\n%s", logs)
 	}
 	requireWithheldAndRetired(t, st, "redirect.md")
+	requireSearchable(t, st, "clean.md")
+	if n := pendingMarks(t, dbPath); n != 0 {
+		t.Fatalf("%d document(s) still wait for re-evaluation after the scan", n)
+	}
+}
+
+// TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed covers a
+// corpus that an older release indexed, with no recorded policy and no
+// snapshot provenance. The shipped defaults are active now, but that says
+// nothing about the list the corpus was indexed under (it may have left a
+// default rule out), so the first scan reads every indexed document again.
+func TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "clean.md"), "The quarterly report covers delivery and revenue.\n")
+	st, dbPath := newPolicyStore(t)
+
+	runPolicyScan(t, oldBinaryConfig(root, stateDir), st)
+	forgetSecretPolicyIdentity(t, st, dbPath)
+
+	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
+	if !strings.Contains(logs, scopeAll) {
+		t.Fatalf("an unrecorded policy with no provenance did not re-read the indexed documents; log:\n%s", logs)
+	}
 	requireSearchable(t, st, "clean.md")
 	if n := pendingMarks(t, dbPath); n != 0 {
 		t.Fatalf("%d document(s) still wait for re-evaluation after the scan", n)

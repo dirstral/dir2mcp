@@ -178,10 +178,16 @@ processed again on the next scan and stays hidden until then. If the clear
 itself fails, the scan fails and records nothing.
 
 A corpus with no recorded lists was indexed by a version before spec 0.93.0.
-If your config uses the default lists, dir2mcp takes the corpus to have used
-the earlier defaults, and reads only the withheld documents again. If your
-config sets its own lists, the earlier lists cannot be known, so dir2mcp
-reads every indexed document again.
+dir2mcp does not assume that it used the default lists: your config shows the
+lists of this run, not of the earlier one. Earlier versions wrote the lists
+into the effective-config snapshot (`<state>/.dir2mcp.yaml.snapshot`) on each
+start. Before the first 0.93.0 run replaces that snapshot, dir2mcp keeps its
+lists once in `<state>/secret-policy-previous.json`. When those lists show
+that the move can only match less (for example the earlier defaults to the
+new defaults), dir2mcp reads only the withheld documents again and hides
+nothing. With no such file, or when the move can match more, the earlier
+lists count as unknown or broader: dir2mcp reads every indexed document
+again, and withholds each one until the scan has decided it.
 
 ### What a support bundle discloses
 

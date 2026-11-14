@@ -123,39 +123,33 @@ func IsNarrower(previous, active Policy) bool {
 	return true
 }
 
-// Recorded is the secret policy a store recorded at the last transition. Known
-// is false when the recorded lists cannot be read back, and Identity is empty
-// for a corpus indexed before spec 0.93.0 recorded any policy.
+// Recorded is the previous secret policy: the one a store recorded at its last
+// transition, or, for a corpus that an older release indexed and that has no
+// record, the lists that the run before held in its effective-config snapshot
+// (config.PreviousSecretPolicy). Identity is empty when the store has no
+// record. Known is false when the previous lists cannot be established.
 type Recorded struct {
 	Identity string
 	Policy   Policy
 	Known    bool
 }
 
-// NeedsIndexedReevaluation reports whether a move from the recorded policy to
+// NeedsIndexedReevaluation reports whether a move from the previous policy to
 // the active one can match more, so that every indexed document must be read
 // again (and is withheld until then, SPEC §7.2). Ingest decides its reset with
 // it, and retrieval decides with it whether a transition that ingest has not
-// applied yet must hide the indexed documents. shippedDefault is the policy of
-// the shipped default lists.
+// applied yet must hide the indexed documents.
 //
-// A corpus with no recorded identity was indexed before spec 0.93.0. When the
-// active policy is the shipped default, that corpus used the pre-0.93.0
-// defaults, and the move from them is a declared narrowing. When the active
-// policy is custom, the old lists are unknown, so the move counts as broader.
-func NeedsIndexedReevaluation(recorded Recorded, active, shippedDefault Policy) bool {
-	activeIdentity := active.Identity()
-	if recorded.Identity == activeIdentity {
+// The active configuration says nothing about the previous one, so an
+// unknown previous policy counts as broader: a corpus indexed under a custom
+// list that left out a default rule must be read again. A move that the
+// previous lists prove narrower hides nothing.
+func NeedsIndexedReevaluation(previous Recorded, active Policy) bool {
+	if previous.Identity != "" && previous.Identity == active.Identity() {
 		return false
 	}
-	if recorded.Identity == "" {
-		if shippedDefault.Identity() == activeIdentity {
-			return !IsNarrower(PreSpec0930DefaultPolicy(), active)
-		}
+	if !previous.Known {
 		return true
 	}
-	if !recorded.Known {
-		return true
-	}
-	return !IsNarrower(recorded.Policy, active)
+	return !IsNarrower(previous.Policy, active)
 }
