@@ -253,3 +253,39 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 		t.Error("an undeclared stricter edit must count as broader")
 	}
 }
+
+// TestSecretPolicy_NeedsIndexedReevaluation pins the one decision that ingest
+// (its reset) and retrieval (its serve-time transition check) share.
+func TestSecretPolicy_NeedsIndexedReevaluation(t *testing.T) {
+	cfg := config.Default()
+	shipped, err := secretmatch.Compile(cfg.SecretPatterns, cfg.SecretAllowPatterns)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defaults := shipped.Policy()
+	custom := secretmatch.Policy{Secret: append(append([]string{}, defaults.Secret...), `BLUEHERON-[0-9]+`), Allow: defaults.Allow}
+	narrower := secretmatch.Policy{Secret: defaults.Secret, Allow: append(append([]string{}, defaults.Allow...), `feature_token=[a-z]+`)}
+	rec := func(p secretmatch.Policy) secretmatch.Recorded {
+		return secretmatch.Recorded{Identity: p.Identity(), Policy: p, Known: true}
+	}
+	cases := []struct {
+		name     string
+		recorded secretmatch.Recorded
+		active   secretmatch.Policy
+		want     bool
+	}{
+		{"same policy", rec(defaults), defaults, false},
+		{"added secret pattern", rec(defaults), custom, true},
+		{"removed secret pattern", rec(custom), defaults, false},
+		{"added allow pattern", rec(defaults), narrower, false},
+		{"removed allow pattern", rec(narrower), defaults, true},
+		{"unrecorded corpus, shipped defaults", secretmatch.Recorded{}, defaults, false},
+		{"unrecorded corpus, custom policy", secretmatch.Recorded{}, custom, true},
+		{"recorded lists unreadable", secretmatch.Recorded{Identity: "v2:other"}, defaults, true},
+	}
+	for _, tc := range cases {
+		if got := secretmatch.NeedsIndexedReevaluation(tc.recorded, tc.active, defaults); got != tc.want {
+			t.Errorf("%s: NeedsIndexedReevaluation = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

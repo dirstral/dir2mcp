@@ -82,11 +82,11 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 	if recorded == active {
 		return nil
 	}
-	previous, known, err := recordedSecretPolicy(ctx, policyStore, recorded, activePolicy)
+	previous, err := recordedSecretPolicy(ctx, policyStore, recorded)
 	if err != nil {
 		return err
 	}
-	reevaluateIndexed := !known || !secretmatch.IsNarrower(previous, activePolicy)
+	reevaluateIndexed := secretmatch.NeedsIndexedReevaluation(previous, activePolicy, shippedDefaultPolicy())
 	cleared, err := policyStore.ResetForSecretPolicy(ctx, active, activePolicy.Secret, activePolicy.Allow, reevaluateIndexed)
 	if err != nil {
 		return fmt.Errorf("secret policy: reset documents for the changed secret policy: %w", err)
@@ -101,44 +101,37 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 	return nil
 }
 
-// recordedSecretPolicy returns the policy the corpus was last evaluated
-// against. known is false when that policy cannot be proven, and then every
-// indexed document is read again.
-//
-// A corpus with no recorded identity was indexed by a release before spec
-// 0.93.0. Such a release recorded nothing, so the list it used is lost. When
-// the active policy is the shipped default, the corpus is taken to have used
-// the pre-0.93.0 defaults: the move from those defaults is a declared
-// narrowing, so only the withheld documents are read again. When the active
-// policy is a custom one, the old list may have lacked a rule that the active
-// list holds, so the previous policy is unknown.
-func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded string, active secretmatch.Policy) (secretmatch.Policy, bool, error) {
+// recordedSecretPolicy reads the policy the corpus was last evaluated
+// against. secretmatch.NeedsIndexedReevaluation decides what a move from it
+// means, including for a corpus with no recorded identity.
+func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded string) (secretmatch.Recorded, error) {
+	out := secretmatch.Recorded{Identity: recorded}
 	if recorded == "" {
-		if isShippedDefaultPolicy(active) {
-			return secretmatch.PreSpec0930DefaultPolicy(), true, nil
-		}
-		return secretmatch.Policy{}, false, nil
+		return out, nil
 	}
 	secret, secretKnown, err := policyStore.SecretPolicyPatterns(ctx)
 	if err != nil {
-		return secretmatch.Policy{}, false, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
+		return out, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
 	}
 	allow, allowKnown, err := policyStore.SecretPolicyAllowPatterns(ctx)
 	if err != nil {
-		return secretmatch.Policy{}, false, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
+		return out, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
 	}
-	return secretmatch.Policy{Secret: secret, Allow: allow}, secretKnown && allowKnown, nil
+	out.Policy = secretmatch.Policy{Secret: secret, Allow: allow}
+	out.Known = secretKnown && allowKnown
+	return out, nil
 }
 
-// isShippedDefaultPolicy reports whether the active policy is the shipped
-// default of both lists.
-func isShippedDefaultPolicy(active secretmatch.Policy) bool {
+// shippedDefaultPolicy returns the policy of the shipped default lists. An
+// error cannot occur for the shipped defaults; on one, the zero policy makes
+// every custom-policy check count as broader, which fails closed.
+func shippedDefaultPolicy() secretmatch.Policy {
 	defaults := config.Default()
 	matcher, err := secretmatch.Compile(defaults.SecretPatterns, defaults.SecretAllowPatterns)
 	if err != nil {
-		return false
+		return secretmatch.Policy{}
 	}
-	return matcher.Policy().Identity() == active.Identity()
+	return matcher.Policy()
 }
 
 // retireNewlyWithheld retires the representations of a document that its raw

@@ -122,3 +122,40 @@ func IsNarrower(previous, active Policy) bool {
 	}
 	return true
 }
+
+// Recorded is the secret policy a store recorded at the last transition. Known
+// is false when the recorded lists cannot be read back, and Identity is empty
+// for a corpus indexed before spec 0.93.0 recorded any policy.
+type Recorded struct {
+	Identity string
+	Policy   Policy
+	Known    bool
+}
+
+// NeedsIndexedReevaluation reports whether a move from the recorded policy to
+// the active one can match more, so that every indexed document must be read
+// again (and is withheld until then, SPEC §7.2). Ingest decides its reset with
+// it, and retrieval decides with it whether a transition that ingest has not
+// applied yet must hide the indexed documents. shippedDefault is the policy of
+// the shipped default lists.
+//
+// A corpus with no recorded identity was indexed before spec 0.93.0. When the
+// active policy is the shipped default, that corpus used the pre-0.93.0
+// defaults, and the move from them is a declared narrowing. When the active
+// policy is custom, the old lists are unknown, so the move counts as broader.
+func NeedsIndexedReevaluation(recorded Recorded, active, shippedDefault Policy) bool {
+	activeIdentity := active.Identity()
+	if recorded.Identity == activeIdentity {
+		return false
+	}
+	if recorded.Identity == "" {
+		if shippedDefault.Identity() == activeIdentity {
+			return !IsNarrower(PreSpec0930DefaultPolicy(), active)
+		}
+		return true
+	}
+	if !recorded.Known {
+		return true
+	}
+	return !IsNarrower(recorded.Policy, active)
+}

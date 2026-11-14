@@ -347,6 +347,13 @@ type Service struct {
 	secretMatcher     *secretmatch.Matcher
 	secretPatternList []string
 	secretAllowList   []string
+	// ingestPolicy is the policy ingest applies for the same configuration:
+	// the operator lists as configured, without the retrieval baseline. It is
+	// compared with the policy the store recorded (see
+	// secretPolicyTransitionPending). ingestPolicyKnown is false until
+	// SetSecretPolicy installs the configured lists.
+	ingestPolicy      secretmatch.Policy
+	ingestPolicyKnown bool
 	// hybridEnabled toggles BM25+vector RRF fusion in Search. Defaults to
 	// true; the engine can disable it via SetHybridEnabled when the operator
 	// sets retrieval.hybrid.enabled=false.
@@ -1259,12 +1266,80 @@ func (s *Service) SetSecretPolicy(patterns, allowPatterns []string) error {
 	if err != nil {
 		return err
 	}
+	ingestMatcher, err := secretmatch.Compile(patterns, allow)
+	if err != nil {
+		return err
+	}
 	s.metaMu.Lock()
 	s.secretMatcher = matcher
 	s.secretPatternList = merged
 	s.secretAllowList = allow
+	s.ingestPolicy = ingestMatcher.Policy()
+	s.ingestPolicyKnown = true
 	s.metaMu.Unlock()
 	return nil
+}
+
+// secretPolicyRecordStore is the optional store capability that reads the
+// secret policy the last ingest transition recorded.
+type secretPolicyRecordStore interface {
+	SecretPolicyIdentity(ctx context.Context) (string, error)
+	SecretPolicyPatterns(ctx context.Context) ([]string, bool, error)
+	SecretPolicyAllowPatterns(ctx context.Context) ([]string, bool, error)
+}
+
+// shippedDefaultSecretPolicy is the policy of the shipped default lists.
+var shippedDefaultSecretPolicy = func() secretmatch.Policy {
+	m, err := secretmatch.Compile(defaultSecretPatternLiterals, defaultSecretAllowPatternLiterals)
+	if err != nil {
+		return secretmatch.Policy{}
+	}
+	return m.Policy()
+}()
+
+// secretPolicyTransitionPending reports whether the configured policy can
+// match more than the policy the store recorded, and ingest has not applied
+// the move yet (SPEC §7.2). Ingest records the new policy and marks every
+// indexed document pending in one transaction at the start of its next scan.
+// Until then no document carries the mark, so this check withholds every
+// indexed document instead. It runs inside every serve path, so the order in
+// which a process starts its transport and its ingest worker, or a process
+// that serves without a scan (ask), cannot expose a document that the new
+// policy withholds. A change that can only match less hides nothing.
+//
+// A service without the configured lists (no SetSecretPolicy) or a store
+// without the record skips the check. A store error is returned: the result
+// cannot be proven safe.
+func (s *Service) secretPolicyTransitionPending(ctx context.Context) (bool, error) {
+	s.metaMu.RLock()
+	active, known := s.ingestPolicy, s.ingestPolicyKnown
+	st := s.store
+	s.metaMu.RUnlock()
+	if !known {
+		return false, nil
+	}
+	rs, ok := st.(secretPolicyRecordStore)
+	if !ok {
+		return false, nil
+	}
+	identity, err := rs.SecretPolicyIdentity(ctx)
+	if err != nil {
+		return false, fmt.Errorf("secret policy: read the recorded secret policy identity: %w", err)
+	}
+	recorded := secretmatch.Recorded{Identity: identity}
+	if identity != "" && identity != active.Identity() {
+		secret, secretKnown, err := rs.SecretPolicyPatterns(ctx)
+		if err != nil {
+			return false, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
+		}
+		allow, allowKnown, err := rs.SecretPolicyAllowPatterns(ctx)
+		if err != nil {
+			return false, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
+		}
+		recorded.Policy = secretmatch.Policy{Secret: secret, Allow: allow}
+		recorded.Known = secretKnown && allowKnown
+	}
+	return secretmatch.NeedsIndexedReevaluation(recorded, active, shippedDefaultSecretPolicy), nil
 }
 
 // SetSecretAllowPatterns installs security.secret_allow_patterns (SPEC §7.2).
@@ -3116,6 +3191,14 @@ func (s *Service) dropSecretReevalPending(ctx context.Context, hits []model.Sear
 	if len(hits) == 0 {
 		return hits, nil
 	}
+	transition, err := s.secretPolicyTransitionPending(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if transition {
+		s.logf("security: left out %d hit(s); the secret policy changed and the next scan has not applied it yet", len(hits))
+		return hits[:0], nil
+	}
 	s.metaMu.RLock()
 	store := s.store
 	s.metaMu.RUnlock()
@@ -3153,6 +3236,13 @@ func (s *Service) dropSecretReevalPending(ctx context.Context, hits []model.Sear
 // secretReevalPending reports whether one document waits for a secret-policy
 // re-evaluation against a broader set. open_file refuses such a document.
 func (s *Service) secretReevalPending(ctx context.Context, relPath string) (bool, error) {
+	transition, err := s.secretPolicyTransitionPending(ctx)
+	if err != nil {
+		return false, err
+	}
+	if transition {
+		return true, nil
+	}
 	s.metaMu.RLock()
 	store := s.store
 	s.metaMu.RUnlock()
