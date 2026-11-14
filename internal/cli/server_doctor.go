@@ -649,7 +649,8 @@ func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, e
 // legacy .doc. Formats no installable engine can read (e.g. .gif/.svg/.odp/.ods)
 // get a pre-conversion hint. `engines` reports which engines are already active,
 // so an already-active engine is never suggested. libreofficeHint is the
-// install hint that names the missing soffice and/or pandoc binary
+// remedy that names the missing soffice and/or pandoc binary, the TMPDIR step,
+// and the policy change when another engine is pinned
 // (ingest.LibreOfficeInstallHint); it is used only when a .doc is uncovered.
 func uncoveredExtractionRemedy(uncovered []string, engines ingest.ActiveEngines, libreofficeHint string) string {
 	// The §7.7 coverage report MUST, for each uncovered class, name the engine to
@@ -678,10 +679,10 @@ func uncoveredExtractionRemedy(uncovered []string, engines ingest.ActiveEngines,
 		fixes = append(fixes, "install pandoc (#393) for the born-digital OpenDocument/RTF/EPUB formats")
 	}
 	if libreofficeWouldCover {
+		// The hint names every step still necessary, the policy change
+		// included when another engine is pinned (ingest.LibreOfficeInstallHint).
 		hint := strings.TrimSpace(libreofficeHint)
 		if hint == "" {
-			// Both binaries are present yet the engine is not active: the
-			// policy pins another engine.
 			hint = "set ingest.extractor to auto or libreoffice for legacy .doc"
 		}
 		fixes = append(fixes, hint)

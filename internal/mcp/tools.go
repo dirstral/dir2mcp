@@ -3356,7 +3356,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if !ing.CanExtractSourceText(doc) {
 			return "", "", &toolExecutionError{
 				Code:      "CONFIG_INVALID",
-				Message:   "document extraction is not configured (install docling or pandoc, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)",
+				Message:   extractionNotConfiguredMessage(doc.RelPath),
 				Retryable: false,
 			}
 		}
@@ -5123,4 +5123,16 @@ func statsOutputSchema() map[string]interface{} {
 	schema["properties"].(map[string]interface{})["evidence"] = statsEvidenceSchema()
 	return schema
 
+}
+
+// extractionNotConfiguredMessage is the CONFIG_INVALID message when no active
+// engine reads relPath. A legacy .doc is read only by the libreoffice engine
+// (spec 0.93.0), so its message names LibreOffice (soffice), pandoc and the
+// ingest.extractor policy that permits the engine, not docling or Mistral OCR.
+func extractionNotConfiguredMessage(relPath string) string {
+	if strings.EqualFold(filepath.Ext(relPath), ".doc") {
+		return "legacy .doc extraction is not configured (install LibreOffice (soffice) and pandoc, " +
+			"and set ingest.extractor to auto or libreoffice)"
+	}
+	return "document extraction is not configured (install docling or pandoc, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)"
 }

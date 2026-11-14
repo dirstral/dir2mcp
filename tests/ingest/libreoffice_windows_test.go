@@ -1,10 +1,9 @@
 //go:build windows
 
-package ingest
+package tests
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
@@ -31,10 +31,9 @@ func TestLibreOfficeExtract_WindowsTimeoutKillsTree(t *testing.T) {
 	}
 	t.Setenv("CHILD_PID", pidFile)
 
-	_, err := NewLibreOfficeExtractor("", launcher, "", 8*time.Second).Extract(context.Background(), "slow.doc", []byte("x"))
-	var te *libreofficeTimeoutError
-	if !errors.As(err, &te) {
-		t.Fatalf("Extract error = %v, want a libreofficeTimeoutError", err)
+	_, err := ingest.NewLibreOfficeExtractor("", launcher, "", 8*time.Second).Extract(context.Background(), "slow.doc", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "libreoffice extraction timed out") {
+		t.Fatalf("Extract error = %v, want the libreoffice timeout", err)
 	}
 	raw, readErr := os.ReadFile(pidFile)
 	if readErr != nil {

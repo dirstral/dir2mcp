@@ -42,7 +42,7 @@ const (
 // directory and the pandoc input copy) lives under one os.MkdirTemp directory
 // (mode 0700) that it removes after the read step, on success, failure and
 // timeout alike. That directory is made in a base directory outside the corpus
-// root (libreofficeWorkBase, spec 0.93.0 §7.4.B).
+// root (libreofficeMakeWorkDir, spec 0.93.0 §7.4.B).
 type libreofficeExtractor struct {
 	// root is the corpus root. The work directory is never made inside it.
 	// Empty means no local corpus root (an object-store source), so there is
@@ -79,7 +79,7 @@ func NewLibreOfficeExtractor(root, sofficeCmd, pandocCmd string, timeout time.Du
 
 // defaultLibreOfficeTimeout mirrors config.DefaultLibreOfficeTimeoutSec for
 // callers that build the extractor without a config.
-const defaultLibreOfficeTimeout = 300 * time.Second
+const defaultLibreOfficeTimeout = config.DefaultLibreOfficeTimeoutSec * time.Second
 
 // libreofficeTimeoutError is the per-document error for an extraction that hit
 // ingest.libreoffice.timeout_sec. It names the limit so the operator knows
@@ -103,15 +103,9 @@ func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byt
 	if err != nil {
 		return "", err
 	}
-	base, err := libreofficeWorkBase(l.root)
+	work, err := libreofficeMakeWorkDir(l.root)
 	if err != nil {
 		return "", err
-	}
-	// os.MkdirTemp creates the directory with mode 0700, so only the owner of
-	// the dir2mcp process can read the converted text.
-	work, err := os.MkdirTemp(base, "dir2mcp-libreoffice-*")
-	if err != nil {
-		return "", fmt.Errorf("create libreoffice work dir: %w", err)
 	}
 	// Removed after the read step, and after a failure or a timeout in either
 	// step.
@@ -137,7 +131,7 @@ func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byt
 // errLibreOfficeNoWorkBase is the error when no temporary directory outside the
 // corpus root is usable. It names the remedy, not a path.
 var errLibreOfficeNoWorkBase = errors.New("libreoffice: no temporary directory outside the corpus root " +
-	"(the system temporary directory and the user cache directory are inside it or unusable); " +
+	"(the system temporary directory and the user cache directory are inside it or not writable); " +
 	"set TMPDIR to a directory outside the corpus root")
 
 // libreofficeCorpusRoot returns the corpus root the libreoffice engine must
@@ -150,34 +144,61 @@ func libreofficeCorpusRoot(cfg config.Config) string {
 	return cfg.RootDir
 }
 
-// libreofficeWorkBase returns the directory in which the engine makes its
-// per-conversion work directory. Spec 0.93.0 §7.4.B: the profile and output
-// directories MUST be outside the corpus root, and when the system temporary
-// directory is inside the root the implementation MUST use another location
-// or treat the engine as unavailable. The candidates, in order, are the system
-// temporary directory (os.TempDir, so TMPDIR on POSIX) and the user cache
-// directory (os.UserCacheDir). The first that exists and does not resolve to
-// the root or below it (symlinks resolved) wins. When none qualifies the error
-// is errLibreOfficeNoWorkBase, and the availability probe reports the engine
-// as unavailable.
-func libreofficeWorkBase(root string) (string, error) {
+// libreofficeWorkCandidates returns the base directories for the
+// per-conversion work directory, in order: the system temporary directory
+// (os.TempDir, so TMPDIR on POSIX) and the user cache directory
+// (os.UserCacheDir).
+func libreofficeWorkCandidates() []string {
 	candidates := []string{os.TempDir()}
 	if dir, err := os.UserCacheDir(); err == nil {
 		candidates = append(candidates, dir)
 	}
-	for _, dir := range candidates {
-		if strings.TrimSpace(dir) == "" {
+	return candidates
+}
+
+// libreofficeMakeWorkDir makes the private per-conversion work directory.
+// Spec 0.93.0 §7.4.B: the profile and output directories MUST be outside the
+// corpus root, and when the system temporary directory is inside the root the
+// implementation MUST use another location or treat the engine as
+// unavailable. It tries each libreofficeWorkCandidates base in order. It skips
+// a base that resolves to the root or below it (symlinks resolved), and a base
+// in which it cannot create a directory (missing or not writable), so the next
+// candidate gets a chance. os.MkdirTemp creates the directory with mode 0700,
+// so only the owner of the dir2mcp process can read the converted text. When
+// no base qualifies the error is errLibreOfficeNoWorkBase. The caller owns and
+// removes the returned directory.
+func libreofficeMakeWorkDir(root string) (string, error) {
+	for _, base := range libreofficeWorkCandidates() {
+		if strings.TrimSpace(base) == "" || config.PathInsideRoot(base, root) {
 			continue
 		}
-		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		work, err := os.MkdirTemp(base, "dir2mcp-libreoffice-*")
+		if err != nil {
 			continue
 		}
-		if config.PathInsideRoot(dir, root) {
+		// The new directory itself must also resolve outside the root (a
+		// base that is a symlink into the corpus is caught above, and this
+		// is the final check on the real path).
+		if config.PathInsideRoot(work, root) {
+			_ = os.RemoveAll(work)
 			continue
 		}
-		return dir, nil
+		return work, nil
 	}
 	return "", errLibreOfficeNoWorkBase
+}
+
+// libreofficeWorkDirUsable reports whether libreofficeMakeWorkDir can make a
+// work directory for root. It makes one and removes it at once. The
+// availability probe uses it, so an engine that could not make its work
+// directory is reported as unavailable, not as a per-document error.
+func libreofficeWorkDirUsable(root string) bool {
+	work, err := libreofficeMakeWorkDir(root)
+	if err != nil {
+		return false
+	}
+	_ = os.RemoveAll(work)
+	return true
 }
 
 // deadlineErr maps an error that happened because the per-document deadline

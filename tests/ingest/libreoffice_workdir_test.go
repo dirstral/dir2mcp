@@ -240,3 +240,41 @@ func assertTreeHolds(t *testing.T, dir string, want []string) {
 		t.Fatalf("unexpected entries below %s: %v", dir, extra)
 	}
 }
+
+// TestLibreOfficeEngine_UnwritableTempDirUsesCacheDir: TMPDIR is outside the
+// corpus root but cannot hold a new directory, so the engine tries the next
+// candidate (the user cache directory) instead of failing each document.
+func TestLibreOfficeEngine_UnwritableTempDirUsesCacheDir(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "")
+	root := testutil.TempDir(t)
+	stubs := loStubDir(t, map[string]string{"pandoc": loRecordingPandoc, "soffice": loRecordingSoffice})
+	cacheHome := testutil.TempDir(t)
+	_, logPath := loTempEnv(t, root, cacheHome)
+	// A read-only directory: it exists and is outside the root, but
+	// os.MkdirTemp fails in it. root ignores the mode, so the test skips there.
+	if os.Geteuid() == 0 {
+		t.Skip("skipping: root can write to a read-only directory")
+	}
+	readOnly := filepath.Join(testutil.TempDir(t), "read-only")
+	if err := os.Mkdir(readOnly, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readOnly, 0o700) })
+	t.Setenv("TMPDIR", readOnly)
+	t.Setenv("PATH", stubs)
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("UserCacheDir: %v", err)
+	}
+	cfg := config.Config{RootDir: root, IngestExtractor: "auto"}
+	if !ingest.LibreOfficeActive(cfg) {
+		t.Fatalf("engine inactive although the user cache directory is usable: %+v", ingest.DescribeLibreOfficeEngine(cfg))
+	}
+	if _, err := ingest.NewLibreOfficeExtractor(root, "", "", 30*time.Second).Extract(context.Background(), "a.doc", []byte("x")); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	log := loLog(t, logPath)
+	if len(log["work"]) != 1 || !config.PathInsideRoot(log["work"][0], cacheDir) {
+		t.Fatalf("work dir = %v, want one in the user cache directory %s", log["work"], cacheDir)
+	}
+}

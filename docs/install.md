@@ -240,8 +240,12 @@ Pick the row that matches how you run `dir2mcp`:
 
 dir2mcp finds these binaries on `PATH` and turns on the related extraction
 engine when the binary passes a short probe. You do not set a flag. When a
-binary is missing, the formats it reads are skipped as `unsupported_format`,
-and `dir2mcp status` and `dir2mcp doctor` tell you what to install.
+binary is missing, another active engine can still read some of its formats:
+for example, docling reads `.docx`, and `.html` always has a raw-text
+baseline. A format that no active engine reads is skipped as
+`unsupported_format` (or is a per-document `UNSUPPORTED_FORMAT` error under
+`ingest.on_unsupported: strict`), and `dir2mcp status` and `dir2mcp doctor`
+tell you what to install.
 
 | Binary | Engine | Formats | Install |
 |---|---|---|---|

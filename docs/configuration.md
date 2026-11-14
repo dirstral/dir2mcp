@@ -526,8 +526,10 @@ turned on by capability: it is active when a LibreOffice binary AND a `pandoc`
 binary resolve and both pass a short probe (`--version`). The LibreOffice binary
 is `ingest.libreoffice.command` when it is set, else `soffice` on `PATH`, else
 `libreoffice` on `PATH`. When
-either is missing, the engine is off and each `.doc` is a durable skip
-(`skip_reason=unsupported_format`), the same as a missing pandoc for `.odt`.
+either is missing, the engine is off and no engine reads `.doc`, the same as a
+missing pandoc for `.odt`. Each `.doc` is then a durable skip
+(`skip_reason=unsupported_format`) under `ingest.on_unsupported: lenient` (the
+default), or a per-document `UNSUPPORTED_FORMAT` error under `strict`.
 
 For each `.doc`, the engine:
 
@@ -549,9 +551,12 @@ For each `.doc`, the engine:
 The temporary folder is in the system temporary directory (`TMPDIR` on POSIX
 systems). When that directory is inside the corpus root, the engine uses the
 user cache directory (for example `~/.cache` on Linux or `~/Library/Caches` on
-macOS). When that directory is also inside the corpus root, the engine is
-unavailable, each `.doc` is an `unsupported_format` skip, and `dir2mcp doctor`
-tells you to set `TMPDIR` to a directory outside the corpus root.
+macOS). The engine also goes to the user cache directory when it cannot create
+a folder in the system temporary directory. When neither directory can be used,
+the engine is unavailable: each `.doc` is an `unsupported_format` skip (or an
+`UNSUPPORTED_FORMAT` error under `ingest.on_unsupported: strict`), and
+`dir2mcp doctor` tells you to set `TMPDIR` to a directory outside the corpus
+root.
 
 Under `ingest.extractor: auto` the engine runs beside the primary engine and
 reads only `.doc`. `ingest.extractor: libreoffice` pins it: only `.doc` is

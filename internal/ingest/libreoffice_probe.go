@@ -121,7 +121,7 @@ func libreofficeMissing(ctx context.Context, cfg config.Config) []string {
 
 // libreofficeAvailable reports whether BOTH binaries of the libreoffice engine
 // resolve and pass their functional checks AND a temporary directory outside
-// the corpus root is usable (libreofficeWorkBase, spec 0.93.0 §7.4.B).
+// the corpus root is usable (libreofficeMakeWorkDir, spec 0.93.0 §7.4.B).
 func libreofficeAvailable(cfg config.Config) bool {
 	return libreofficeUnavailableReason(context.Background(), cfg) == ""
 }
@@ -137,7 +137,7 @@ func libreofficeUnavailableReason(ctx context.Context, cfg config.Config) string
 	if missing := libreofficeMissing(ctx, cfg); len(missing) > 0 {
 		return strings.Join(missing, " and ") + " not found on PATH or failed its functional check"
 	}
-	if _, err := libreofficeWorkBase(libreofficeCorpusRoot(cfg)); err != nil {
+	if !libreofficeWorkDirUsable(libreofficeCorpusRoot(cfg)) {
 		return libreofficeNoWorkBaseReason
 	}
 	return ""
@@ -173,19 +173,29 @@ func LibreOfficeSupportsExt(ext string) bool {
 }
 
 // LibreOfficeInstallHint returns the coverage remedy for the libreoffice
-// engine: what to install so legacy .doc files are read. It names only the
-// binaries that are missing, so an operator with LibreOffice but no pandoc is
-// told to install pandoc, and the reverse. It is empty when both are present.
+// engine: what to do so legacy .doc files are read. It names every step that
+// is still necessary, in this order:
+//   - the binaries that are missing (an operator with LibreOffice but no
+//     pandoc is told to install pandoc, and the reverse);
+//   - else, when no temporary directory outside the corpus root is usable,
+//     set TMPDIR;
+//   - when the ingest.extractor policy pins another engine, set it to auto or
+//     libreoffice, because installing the binaries alone does not turn the
+//     engine on under such a pin.
 //
-// When both binaries are present but no temporary directory outside the corpus
-// root is usable, the remedy is to set TMPDIR instead.
+// It is empty when nothing is necessary.
 func LibreOfficeInstallHint(cfg config.Config) string {
-	missing := libreofficeMissing(context.Background(), cfg)
-	if len(missing) == 0 {
-		if _, err := libreofficeWorkBase(libreofficeCorpusRoot(cfg)); err != nil {
-			return "set TMPDIR to a directory outside the corpus root for legacy .doc"
-		}
+	var steps []string
+	if missing := libreofficeMissing(context.Background(), cfg); len(missing) > 0 {
+		steps = append(steps, "install "+strings.Join(missing, " and "))
+	} else if !libreofficeWorkDirUsable(libreofficeCorpusRoot(cfg)) {
+		steps = append(steps, "set TMPDIR to a directory outside the corpus root")
+	}
+	if !libreofficePolicyAllows(cfg.IngestExtractor) {
+		steps = append(steps, "set ingest.extractor to auto or libreoffice")
+	}
+	if len(steps) == 0 {
 		return ""
 	}
-	return "install " + strings.Join(missing, " and ") + " for legacy .doc"
+	return strings.Join(steps, " and ") + " for legacy .doc"
 }

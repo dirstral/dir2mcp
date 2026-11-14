@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -66,13 +67,22 @@ func (p *pandocExtractor) pandocBinary() string {
 // the subprocess is bounded by pandocExtractTimeout. On failure it returns a
 // wrapped error whose message never includes the user-supplied command literally.
 func (p *pandocExtractor) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
-	return p.extractIn(ctx, "", relPath, data)
+	tctx, cancel := context.WithTimeout(ctx, pandocExtractTimeout)
+	defer cancel()
+	md, err := p.extractIn(tctx, "", relPath, data)
+	if err != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		return "", fmt.Errorf("pandoc command timed out after %s", pandocExtractTimeout)
+	}
+	return md, err
 }
 
-// extractIn is Extract with the directory for the temp input file. An empty dir
-// is the system temporary directory. The libreoffice engine passes its private
-// work directory, which it has already checked is outside the corpus root, so
-// the converted document text is never written below the corpus.
+// extractIn is Extract with the directory for the temp input file and without
+// the pandocExtractTimeout limit: ctx alone bounds the pandoc process. An
+// empty dir is the system temporary directory. The libreoffice engine passes
+// its private work directory, which it has already checked is outside the
+// corpus root, so the converted document text is never written below the
+// corpus. It also passes its own deadline (ingest.libreoffice.timeout_sec),
+// which covers the conversion and this read together.
 func (p *pandocExtractor) extractIn(ctx context.Context, dir, relPath string, data []byte) (string, error) {
 	ext := filepath.Ext(relPath)
 	if ext == "" {
@@ -92,8 +102,6 @@ func (p *pandocExtractor) extractIn(ctx context.Context, dir, relPath string, da
 		return "", fmt.Errorf("close temp doc file: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, pandocExtractTimeout)
-	defer cancel()
 	// pandoc streams Markdown to stdout by default; `-t gfm` selects
 	// GitHub-Flavored Markdown as the output format.
 	cmd := exec.CommandContext(ctx, p.pandocBinary(), tmpPath, "-t", "gfm")
@@ -105,7 +113,7 @@ func (p *pandocExtractor) extractIn(ctx context.Context, dir, relPath string, da
 	cmd.Stderr = &limitedBuffer{buf: &stderr, limit: maxPandocStderrBytes}
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("pandoc command timed out after %s", pandocExtractTimeout)
+			return "", errors.New("pandoc command timed out")
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
