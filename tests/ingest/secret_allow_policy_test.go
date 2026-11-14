@@ -106,16 +106,22 @@ func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) 
 // TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed covers a
 // corpus that an older release indexed, with no recorded policy and no
 // snapshot provenance. The shipped defaults are active now, but that says
-// nothing about the list the corpus was indexed under (it may have left a
-// default rule out), so the first scan reads every indexed document again.
+// nothing about the list the corpus was indexed under: here it left the AWS
+// rule out. So the first scan reads every indexed document again and
+// withholds the unchanged key document.
 func TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed(t *testing.T) {
 	t.Parallel()
 	root := testutil.TempDir(t)
 	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clean.md"), "The quarterly report covers delivery and revenue.\n")
+	writeFile(t, filepath.Join(root, "keys.md"), "Deploy key AK"+"IA2ZZZZZZZZZZZZZZQ for the build.\n")
 	st, dbPath := newPolicyStore(t)
 
-	runPolicyScan(t, oldBinaryConfig(root, stateDir), st)
+	// The corpus was indexed under a custom list that left the AWS rule out.
+	old := policyConfig(root, stateDir, []string{`BLUEHERON-[0-9]{4}`})
+	old.SecretAllowPatterns = []string{}
+	runPolicyScan(t, old, st)
+	requireSearchable(t, st, "keys.md")
 	forgetSecretPolicyIdentity(t, st, dbPath)
 
 	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
@@ -123,6 +129,7 @@ func TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed(t *testing.T)
 		t.Fatalf("an unrecorded policy with no provenance did not re-read the indexed documents; log:\n%s", logs)
 	}
 	requireSearchable(t, st, "clean.md")
+	requireWithheldAndRetired(t, st, "keys.md")
 	if n := pendingMarks(t, dbPath); n != 0 {
 		t.Fatalf("%d document(s) still wait for re-evaluation after the scan", n)
 	}
@@ -136,12 +143,15 @@ func TestSecretAllow_UnrecordedCustomPolicyReadsIndexed(t *testing.T) {
 	root := testutil.TempDir(t)
 	stateDir := testutil.TempDir(t)
 	writeFile(t, filepath.Join(root, "clean.md"), "The quarterly report covers delivery and revenue.\n")
+	writeFile(t, filepath.Join(root, "keys.md"), "Deploy key AK"+"IA2ZZZZZZZZZZZZZZQ for the build.\n")
 	st, dbPath := newPolicyStore(t)
 
 	custom := []string{`BLUEHERON-[0-9]{4}`}
 	old := policyConfig(root, stateDir, custom)
 	old.SecretAllowPatterns = []string{}
 	runPolicyScan(t, old, st)
+	// The old list has no AWS rule, so it indexed the key document.
+	requireSearchable(t, st, "keys.md")
 	forgetSecretPolicyIdentity(t, st, dbPath)
 
 	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, append(custom, `AKIA[0-9A-Z]{16}`)), st)
@@ -149,6 +159,8 @@ func TestSecretAllow_UnrecordedCustomPolicyReadsIndexed(t *testing.T) {
 		t.Fatalf("an unrecorded custom policy did not re-read the indexed documents; log:\n%s", logs)
 	}
 	requireSearchable(t, st, "clean.md")
+	// The unchanged key document was read again and withheld.
+	requireWithheldAndRetired(t, st, "keys.md")
 }
 
 // TestSecretAllow_AppliesToDerivedText pins the allow list on derived text: a
