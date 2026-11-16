@@ -14,7 +14,7 @@ import (
 )
 
 // TestSecretScreen_RefillsAfterTheScreen pins that the secret screen runs
-// before the final cut to k (SPEC §7.2, spec 0.95.0). With k=1, the best
+// before the final cut to k (SPEC §7.2, spec 0.96.0). With k=1, the best
 // candidate holds a credential and the second one is clean: the caller gets
 // the clean one, not an empty result.
 func TestSecretScreen_RefillsAfterTheScreen(t *testing.T) {

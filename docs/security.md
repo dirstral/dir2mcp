@@ -32,7 +32,7 @@ document. Its status is `secret_excluded`, and `search`, `ask` and
 `open_file` do not return it. For ingest, a list in your config replaces the
 defaults.
 
-The defaults (SPEC §7.2, spec 0.95.0):
+The defaults (SPEC §7.2, spec 0.96.0):
 
 | Rule | Pattern |
 | --- | --- |
@@ -168,7 +168,7 @@ need to run `dir2mcp reindex`.
   Only three changes count: a removed secret pattern, an added allow pattern,
   and the shipped narrowings of the `sk-`, `sk_` and `api_` rules. Any other
   edit counts as a change that can match more, also one that is stricter in
-  fact. The spec 0.95.0 defaults can only match less than the earlier
+  fact. The spec 0.96.0 defaults can only match less than the earlier
   defaults, so an upgrade with the default lists reads only the withheld
   documents again.
 
@@ -202,11 +202,11 @@ again, so a document that fails, or that a stopped scan did not reach, is
 processed again on the next scan and stays hidden until then. If the clear
 itself fails, the scan fails and records nothing.
 
-A corpus with no recorded lists was indexed by a version before spec 0.95.0.
+A corpus with no recorded lists was indexed by a version before spec 0.96.0.
 dir2mcp does not assume that it used the default lists: your config shows the
 lists of this run, not of the earlier one. Earlier versions wrote the lists
 into the effective-config snapshot (`<state>/.dir2mcp.yaml.snapshot`) on each
-start. Before the first 0.95.0 run replaces that snapshot, dir2mcp keeps its
+start. Before the first 0.96.0 run replaces that snapshot, dir2mcp keeps its
 lists once in `<state>/secret-policy-previous.json`. When those lists show
 that the move can only match less (for example the earlier defaults to the
 new defaults), dir2mcp reads only the withheld documents again and hides

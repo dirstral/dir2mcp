@@ -14,7 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Spec 0.95.0 re-evaluation: the cases a check over stored chunks misses, and
+// Spec 0.96.0 re-evaluation: the cases a check over stored chunks misses, and
 // the partial failures that must leave a retryable state (SPEC §7.2).
 
 // execStateDB runs one statement against the state database at dbPath. The

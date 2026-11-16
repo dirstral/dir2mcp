@@ -15,7 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.95.0): after a configuration change that can match more,
+// SPEC §7.2 (spec 0.96.0): after a configuration change that can match more,
 // the next ingest scan marks every indexed document pending. A process can
 // serve before that scan starts (up starts its transport before its ingest
 // worker; ask serves with no scan at all). Retrieval therefore compares the
@@ -126,7 +126,7 @@ func TestSecretPolicyTransition_UnrecordedCorpus(t *testing.T) {
 	t.Run("provenance of the old defaults", func(t *testing.T) {
 		f := newPendingFixture(t)
 		stateDir := testutil.TempDir(t)
-		old := secretmatch.PreSpec0950DefaultPolicy()
+		old := secretmatch.PreSpec0960DefaultPolicy()
 		raw, err := json.Marshal(config.SecretPolicyProvenance{Secret: old.Secret, Allow: []string{}, Source: config.EffectiveConfigSnapshotFile})
 		if err != nil {
 			t.Fatal(err)

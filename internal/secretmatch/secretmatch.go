@@ -1,5 +1,5 @@
 // Package secretmatch holds the one matcher that every secret screen uses
-// (SPEC §7.2, spec 0.95.0): the raw-byte scan and the derived-text screen in
+// (SPEC §7.2, spec 0.96.0): the raw-byte scan and the derived-text screen in
 // ingest, the open_file reads and the serve-time screen in retrieval, and the
 // annotate/transcribe gate in the MCP server.
 //
@@ -156,7 +156,7 @@ func (m *Matcher) Match(text []byte) bool {
 }
 
 // uncoveredAtAnyStart reports whether rx has a match, at ANY start position in
-// text, that no allow span covers (SPEC §7.2, spec 0.95.0). A search for
+// text, that no allow span covers (SPEC §7.2, spec 0.96.0). A search for
 // non-overlapping matches resumes after a match, so a match that starts inside
 // a cancelled match would never be judged: in `redir_token=<20 chars>GITHUB_TOKEN=<20 chars>`
 // the first match (`token=<20 chars>GITHUB_TOKEN`) is cancelled, and the second
@@ -191,7 +191,7 @@ func (m *Matcher) cancellable(rx *regexp.Regexp) bool {
 }
 
 // allowSpans returns the cover of every match of every allow pattern in text
-// (SPEC §7.2, spec 0.95.0). The cover of a match is the text of the first
+// (SPEC §7.2, spec 0.96.0). The cover of a match is the text of the first
 // capture group of the pattern when it has one, and the whole match when it
 // has none. The rest of the match is context: it must be present, but it
 // cancels nothing. A match whose first group took no part in it (an optional

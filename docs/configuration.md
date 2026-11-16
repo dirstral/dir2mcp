@@ -430,7 +430,7 @@ security:
     - '(?i)(?:^|[\s"''<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"'']*&)*?(redir_token=[^\s&#;?=:<>"'']*)'
 ```
 
-These are the spec 0.95.0 defaults. The generic token rule is broad on
+These are the spec 0.96.0 defaults. The generic token rule is broad on
 purpose: it matches any key that ends in `token`, so it catches the
 credential keys of every provider (`GITHUB_TOKEN`, `VERCEL_TOKEN`,
 `DISCORD_TOKEN`, `id_token`). The `sk-`, `sk_` and `api_` rules require the key

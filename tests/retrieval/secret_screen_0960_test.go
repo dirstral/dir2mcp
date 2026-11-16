@@ -15,7 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Serve-time secret screen (spec 0.95.0, SPEC §7.2). When the effective secret
+// Serve-time secret screen (spec 0.96.0, SPEC §7.2). When the effective secret
 // pattern set changes, a background pass retires the indexed chunks that the
 // new set matches. Until the pass reaches a document, its chunks stay in the
 // index, so every tool that returns indexed text screens that text against the
@@ -181,7 +181,7 @@ func TestSecretScreen_OpenFileRefusesTheSameText(t *testing.T) {
 
 // TestSecretScreen_DefaultAllowStopsAtASingleQuote pins the single quote in
 // both character classes of the default allow pattern (SPEC §7.2, spec
-// 0.95.0), on the screen every tool uses. Without it, the parameters of a
+// 0.96.0), on the screen every tool uses. Without it, the parameters of a
 // single-quoted link ran through the closing quote, and an assignment after
 // the quoted link was cancelled.
 func TestSecretScreen_DefaultAllowStopsAtASingleQuote(t *testing.T) {

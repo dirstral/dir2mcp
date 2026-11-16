@@ -11,7 +11,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.95.0): the effective-config snapshot of the previous run
+// SPEC §7.2 (spec 0.96.0): the effective-config snapshot of the previous run
 // is the provenance of the previous secret policy for a corpus that an older
 // release indexed. SaveEffectiveSnapshot keeps its lists once, before it
 // replaces the snapshot.

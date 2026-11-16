@@ -11,11 +11,11 @@ import (
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
-// Secret-policy re-evaluation (SPEC §7.2, spec 0.95.0).
+// Secret-policy re-evaluation (SPEC §7.2, spec 0.96.0).
 //
 // A `secret_excluded` verdict, and equally an `ok` verdict, is reached under one
 // secret policy: security.secret_patterns and security.secret_allow_patterns.
-// The policy changes when a release changes a default (0.95.0 narrowed two
+// The policy changes when a release changes a default (0.96.0 narrowed two
 // rules and added the allow list) or when an operator edits a list. The
 // incremental scan does not ask again on its own for an unchanged document:
 //
@@ -103,7 +103,7 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 
 // recordedSecretPolicy reads the policy the corpus was last evaluated
 // against. When the store records none (a corpus that a release before spec
-// 0.95.0 indexed), it falls back to the provenance that the effective-config
+// 0.96.0 indexed), it falls back to the provenance that the effective-config
 // snapshot kept (config.PreviousSecretPolicy). With neither, the previous
 // policy is unknown, and secretmatch.NeedsIndexedReevaluation reads every
 // indexed document again.

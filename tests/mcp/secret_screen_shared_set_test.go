@@ -11,7 +11,7 @@ import (
 
 // TestMCPAnnotate_UsesTheRetrieverSecretSet pins that annotate gates its text
 // on the same compiled set that open_file, search, ask and related use (spec
-// 0.95.0). The pattern is set on the retrieval service only, not in
+// 0.96.0). The pattern is set on the retrieval service only, not in
 // cfg.SecretPatterns, so a FORBIDDEN result can come only from the shared set.
 func TestMCPAnnotate_UsesTheRetrieverSecretSet(t *testing.T) {
 	const credential = "shared-set-credential-7731"

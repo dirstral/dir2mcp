@@ -8,7 +8,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
-// SPEC §7.2 (spec 0.95.0): the generic bearer-token rule stays broad, and
+// SPEC §7.2 (spec 0.96.0): the generic bearer-token rule stays broad, and
 // security.secret_allow_patterns releases known benign keys. An allow match
 // cancels only a generic token match that it covers; a match of any other rule
 // is never cancelled.
@@ -157,7 +157,7 @@ func TestSecretAllow_CancelsOnlyTheGenericTokenRule(t *testing.T) {
 }
 
 // TestSecretAllow_FirstCaptureGroupIsTheCover pins the cover rule (SPEC §7.2,
-// spec 0.95.0): with a capture group, only the first group cancels and the
+// spec 0.96.0): with a capture group, only the first group cancels and the
 // rest of the match is required context; with no group, the whole match
 // cancels; (?:...) groups do not narrow the cover; a first group that took no
 // part in the match cancels nothing.
@@ -247,7 +247,7 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	defaults := shipped.Policy()
-	old := secretmatch.PreSpec0950DefaultPolicy()
+	old := secretmatch.PreSpec0960DefaultPolicy()
 
 	inDefaults := map[string]bool{}
 	for _, p := range defaults.Secret {
@@ -262,7 +262,7 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 			t.Errorf("narrowing %q is not a shipped default", narrowed)
 		}
 		if !inOld[previous] {
-			t.Errorf("narrowed pattern %q is not a pre-0.95.0 default", previous)
+			t.Errorf("narrowed pattern %q is not a pre-0.96.0 default", previous)
 		}
 	}
 	if !inDefaults[secretmatch.GenericTokenPattern] {
@@ -270,7 +270,7 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 	}
 
 	if !secretmatch.IsNarrower(old, defaults) {
-		t.Error("the spec 0.95.0 defaults must count as narrower than the pre-0.95.0 defaults")
+		t.Error("the spec 0.96.0 defaults must count as narrower than the pre-0.96.0 defaults")
 	}
 	with := func(p secretmatch.Policy, secret, allow []string) secretmatch.Policy {
 		return secretmatch.Policy{
@@ -327,7 +327,7 @@ func TestSecretPolicy_NeedsIndexedReevaluation(t *testing.T) {
 		{"removed allow pattern", rec(narrower), defaults, true},
 		{"unrecorded corpus, no provenance, shipped defaults", secretmatch.Recorded{}, defaults, true},
 		{"unrecorded corpus, no provenance, custom policy", secretmatch.Recorded{}, custom, true},
-		{"unrecorded corpus, provenance of the old defaults", secretmatch.Recorded{Policy: secretmatch.PreSpec0950DefaultPolicy(), Known: true}, defaults, false},
+		{"unrecorded corpus, provenance of the old defaults", secretmatch.Recorded{Policy: secretmatch.PreSpec0960DefaultPolicy(), Known: true}, defaults, false},
 		{"unrecorded corpus, provenance of a custom list", secretmatch.Recorded{Policy: secretmatch.Policy{Secret: []string{`BLUEHERON-[0-9]+`}}, Known: true}, defaults, true},
 		{"recorded lists unreadable", secretmatch.Recorded{Identity: "v2:other"}, defaults, true},
 	}

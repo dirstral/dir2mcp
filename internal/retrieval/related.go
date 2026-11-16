@@ -37,19 +37,19 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 		return model.RelatedResult{}, err
 	}
 	// A seed document that waits for re-evaluation against a broader secret
-	// policy is withheld whole (SPEC §7.2, spec 0.95.0). Its text must not
+	// policy is withheld whole (SPEC §7.2, spec 0.96.0). Its text must not
 	// reach the embedder, so the check runs before relatedNeighbors embeds it.
 	if err := s.rejectPendingSeed(ctx, seed); err != nil {
 		return model.RelatedResult{}, err
 	}
 	// Retrieve more than k, so the secret screen below can leave hits out and
-	// the next neighbours take their places (spec 0.95.0). The cut to k runs
+	// the next neighbours take their places (spec 0.96.0). The cut to k runs
 	// after the screen.
 	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, 2*k+relatedExcludeMargin)
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
-	// The same secret screen search applies (spec 0.95.0).
+	// The same secret screen search applies (spec 0.96.0).
 	hits, err = s.screenServedHits(ctx, hits)
 	if err != nil {
 		return model.RelatedResult{}, err
@@ -220,7 +220,7 @@ func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, se
 	searched := make([]string, 0, 2)
 	for _, ax := range activeAxes(seed.axis) {
 		// Seed text that matches the secret policy is not sent to the
-		// embedder (spec 0.95.0); an axis with no text left is skipped.
+		// embedder (spec 0.96.0); an axis with no text left is skipped.
 		texts := s.seedTextsNotSecret(seed.textsByAxis[ax])
 		if len(texts) == 0 {
 			continue
