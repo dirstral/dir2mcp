@@ -421,7 +421,9 @@ After an upgrade that changes a classification, the next scan re-reads the
 affected files. For example, a video in one of the containers above that an
 older version stored as a binary skip, or a `.ts` transport stream that it
 stored as code with an error, is indexed as video on the next incremental scan.
-No reindex is necessary. This also holds for a camcorder `.mod` on an S3
+No reindex is necessary. That scan also retires the representations and chunks
+that the old type indexed, so a file that is now video keeps no searchable code
+chunk. This also holds for a camcorder `.mod` on an S3
 corpus: a `.mod` object stored as binary is never skipped by the ETag fast
 path, because only its first bytes can show a program stream. The cost is that
 a `.mod` that is not video (a tracker music module, for example) is read again

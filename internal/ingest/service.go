@@ -2561,6 +2561,74 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	return false
 }
 
+// upsertScannedDocument stores the row a scan built for a document. A changed
+// classification first retires what the old type indexed (SPEC §7.6). The
+// retirement runs before the upsert, so a refused retirement leaves the stored
+// doc_type as it was and the next scan tries again.
+func (s *Service) upsertScannedDocument(ctx context.Context, existingDoc, doc model.Document) error {
+	if err := s.retireOldTypeRepresentations(ctx, existingDoc, doc); err != nil {
+		return err
+	}
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("upsert document: %w", err)
+	}
+	return nil
+}
+
+// retireOldTypeRepresentations retires what a document's OLD type indexed when
+// the classification changed (SPEC §7.6): a .ts stored as code that the content
+// now decides is video must keep no searchable code chunk. The scan processes
+// such a document again (resolveNeedsProcessing), but the new type writes only
+// its own representation types, so without this step the rows of the old type
+// stay live beside them.
+//
+// Every active representation is retired, with one exception: a raw_text
+// representation stays when the new type also writes raw_text this scan (text
+// to code, for example). That row is the same output under a new label, and
+// the generation step updates it in place.
+//
+// A retirement that the store refuses is returned as an error, so the caller
+// fails the document before it stores the new doc_type and the next scan tries
+// again. A store without the capability, a new document and a tombstoned row
+// have nothing to retire.
+func (s *Service) retireOldTypeRepresentations(ctx context.Context, existingDoc, doc model.Document) error {
+	if existingDoc.DocType == "" || existingDoc.DocType == doc.DocType {
+		return nil
+	}
+	lister, listOK := s.store.(activeRepresentationLister)
+	retirer, retireOK := s.store.(representationRetirer)
+	if !listOK || !retireOK {
+		return nil
+	}
+	reps, err := lister.ActiveRepresentations(ctx, doc.RelPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("type change %s to %s: list representations for %s: %w", existingDoc.DocType, doc.DocType, doc.RelPath, err)
+	}
+	keepRawText := doc.Status == string(model.DocumentStatusOK) &&
+		ShouldGenerateRawText(doc.DocType) &&
+		(doc.DocType != "html" || !s.htmlRoutesToStructured(doc.RelPath))
+	ids := make([]int64, 0, len(reps))
+	for _, rep := range reps {
+		if keepRawText && rep.RepType == RepTypeRawText {
+			continue
+		}
+		ids = append(ids, rep.RepID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	retired, err := retirer.SoftDeleteRepresentations(ctx, doc.RelPath, ids)
+	if err != nil {
+		return fmt.Errorf("type change %s to %s: retire representations for %s: %w", existingDoc.DocType, doc.DocType, doc.RelPath, err)
+	}
+	s.getLogger().Printf("type change: retired %d representation(s) of %s, stored as %s and now %s (SPEC §7.6)",
+		retired, doc.RelPath, existingDoc.DocType, doc.DocType)
+	return nil
+}
+
 // refreshDocID re-reads the persisted document after an upsert to obtain the
 // store-assigned DocID needed for downstream representation creation
 // (UpsertDocument returns only an error). A not-found result is ignored — it
@@ -2655,8 +2723,8 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// finalize (withholdContentHash captured it before this blank).
 	withholdArchiveContentHash(&doc, needsProcessing)
 
-	if err := s.store.UpsertDocument(ctx, doc); err != nil {
-		return fmt.Errorf("upsert document: %w", err)
+	if err := s.upsertScannedDocument(ctx, existingDoc, doc); err != nil {
+		return err
 	}
 	s.observeDocumentTransition(existingDoc, doc)
 	// Report the hash the row now holds (#691). It is blank while the #402 done
@@ -3578,8 +3646,8 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// chunks that is never reprocessed (#402; see withholdContentHash).
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
 
-	if err := s.store.UpsertDocument(ctx, doc); err != nil {
-		return fmt.Errorf("upsert document: %w", err)
+	if err := s.upsertScannedDocument(ctx, existingDoc, doc); err != nil {
+		return err
 	}
 	s.observeDocumentTransition(existingDoc, doc)
 	// Same live-dedup report as processDocument, for an archive member (#691).

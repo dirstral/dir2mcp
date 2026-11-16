@@ -12,6 +12,25 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 )
 
+// assertSegmentHasAudio checks that an extracted segment keeps its audio. A
+// muxer that drops it (some ffmpeg builds map .m4v to raw MPEG-4 video) gives
+// a silent clip. The segment is written under the source name, so ffmpeg reads
+// it as it reads a clip of that container.
+func assertSegmentHasAudio(t *testing.T, name string, seg []byte) {
+	t.Helper()
+	segPath := filepath.Join(t.TempDir(), "seg-"+name)
+	if err := os.WriteFile(segPath, seg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audio, err := avutil.ExtractAudioTrack(context.Background(), segPath)
+	if err != nil {
+		t.Fatalf("ExtractAudioTrack(segment): %v", err)
+	}
+	if len(audio) == 0 {
+		t.Fatal("the extracted segment has no audio track")
+	}
+}
+
 // TestVideoContainers_Integration encodes a short clip into each container
 // that ingest classifies as video and runs the media path on it: the content
 // classification, Duration, a stream-copied segment and the audio track for
@@ -73,6 +92,7 @@ func TestVideoContainers_Integration(t *testing.T) {
 			if len(seg) == 0 {
 				t.Fatal("ExtractSegment returned no bytes")
 			}
+			assertSegmentHasAudio(t, tc.name, seg)
 			audio, err := avutil.ExtractAudioTrack(ctx, src)
 			if err != nil {
 				t.Fatalf("ExtractAudioTrack: %v", err)
