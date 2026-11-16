@@ -403,8 +403,12 @@ content decides:
 - `.ts` and `.mts` are video when the file is an MPEG transport stream: the
   sync byte `0x47` starts each of the first five packets (three in a shorter
   file), with packets of 188 bytes, 192 bytes from offset 4 (the BDAV/M2TS
-  variant) or 204 bytes (the variant with an error-correction trailer). Any
-  other `.ts` or `.mts` file is TypeScript code.
+  variant) or 204 bytes (the variant with an error-correction trailer). The
+  sync byte is the letter `G`, so the checked packets must also hold a byte
+  that text never holds: a NUL byte, or a sequence that is not valid UTF-8.
+  This check covers the whole of each checked packet, header and payload (a
+  packet header alone can be plain ASCII). Any other `.ts` or `.mts` file is
+  TypeScript code.
 - `.mod` is video when the file starts with an MPEG program stream pack header
   (`00 00 01 BA`), as camcorder files do. Any other `.mod` file is sniffed like an
   unknown extension. `go.mod` is always data.

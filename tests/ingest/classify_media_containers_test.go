@@ -94,6 +94,24 @@ func textWithSyncLetters() []byte {
 	return b
 }
 
+// asciiHeaderTSBytes returns n transport-stream packets whose 4-byte header is
+// plain ASCII (47 01 41 10 is "G", SOH, "A", DLE) and whose payload is the
+// letter "x". binaryPayloadAt names the 0-based packets that hold one byte
+// that is not valid UTF-8 as the last byte of their payload.
+func asciiHeaderTSBytes(n int, binaryPayloadAt ...int) []byte {
+	var b bytes.Buffer
+	for i := 0; i < n; i++ {
+		pkt := bytes.Repeat([]byte("x"), 188)
+		copy(pkt, []byte{0x47, 0x01, 0x41, 0x10})
+		b.Write(pkt)
+	}
+	out := b.Bytes()
+	for _, i := range binaryPayloadAt {
+		out[i*188+187] = 0xFF
+	}
+	return out
+}
+
 func TestClassifyDocType_VideoContainers(t *testing.T) {
 	for _, tc := range []struct {
 		path, want string
@@ -147,6 +165,13 @@ func TestSniffMediaDocType(t *testing.T) {
 		{"ts 204-byte variant", "dvb.ts", fecBytes(6), "video"},
 		{"ts five packets checked when the prefix holds them", "app.ts", brokenFifthSync(), "code"},
 		{"ts three packets accepted from a short file", "clip.ts", mpegTSBytes(3), "video"},
+		// SPEC §7.3: the binary-byte check covers the whole of each checked
+		// packet, header and payload. A packet header alone can be plain ASCII.
+		{"ts ASCII-only headers, binary payload in each packet", "news.ts", asciiHeaderTSBytes(5, 0, 1, 2, 3, 4), "video"},
+		{"ts ASCII-only headers, binary byte only at the end of the last checked packet", "news.ts", asciiHeaderTSBytes(5, 4), "video"},
+		{"ts ASCII-only headers, binary byte only in the third packet of a short file", "clip.ts", asciiHeaderTSBytes(3, 2), "video"},
+		{"ts ASCII-only headers and payloads are code", "app.ts", asciiHeaderTSBytes(5), "code"},
+		{"ts binary byte only after the checked packets is code", "app.ts", asciiHeaderTSBytes(6, 5), "code"},
 		{"mts transport stream", "cam.mts", mpegTSBytes(4), "video"},
 		{"mts BDAV variant", "cam.mts", bdavBytes(4), "video"},
 		{"mts TypeScript module", "lib.mts", []byte(typeScriptSource), "code"},

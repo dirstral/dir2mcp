@@ -148,9 +148,9 @@ func trimIncompleteRune(sample []byte) []byte {
 	return sample
 }
 
-// mediaSniffPrefixBytes is how much of a file SniffMediaDocType needs: the
-// sync bytes of five packets fit in it for every transport-stream layout (the
-// largest is five 204-byte packets). The ingest service reads this prefix
+// mediaSniffPrefixBytes is how much of a file SniffMediaDocType needs: five
+// whole packets fit in it for every transport-stream layout (the largest is
+// five 204-byte packets, 1020 bytes). The ingest service reads this prefix
 // before it decides how to read the rest of the file.
 const mediaSniffPrefixBytes = 1024
 
@@ -203,9 +203,11 @@ func needsMediaSniff(relPath, pathType string) bool {
 //     header (00 00 01 BA), as camcorder .mod files do.
 //
 // The sync byte is the ASCII letter "G", so a transport stream must also hold
-// a byte that text never holds (a NUL, or invalid UTF-8) in the sampled window.
-// Real transport streams always do; a TypeScript file never does. Every other
-// classification is returned unchanged.
+// a byte that text never holds (a NUL, or invalid UTF-8). The check covers the
+// whole of each checked packet, header and payload: a packet header alone can
+// be plain ASCII (47 01 41 10). A file whose checked packets hold only valid
+// UTF-8 with no NUL byte is code. Every other classification is returned
+// unchanged.
 func SniffMediaDocType(docType, relPath string, prefix []byte) string {
 	if !needsMediaSniff(relPath, docType) {
 		return docType
@@ -238,7 +240,12 @@ func isMPEGTransportStream(prefix []byte) bool {
 		if n < mpegTSMinPackets {
 			continue
 		}
-		end := l.offset + (n-1)*l.stride + 1
+		// The binary-byte check below covers the whole of each checked
+		// packet, header and payload, as far as the prefix holds it.
+		end := l.offset + n*l.stride
+		if end > len(prefix) {
+			end = len(prefix)
+		}
 		synced := true
 		for i := 0; i < n; i++ {
 			if prefix[l.offset+i*l.stride] != mpegTSSyncByte {
