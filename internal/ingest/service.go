@@ -2438,6 +2438,16 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	if strings.TrimSpace(existing.ContentHash) == "" {
 		return false, nil
 	}
+	// An engine became active for a format stored as an unsupported_format
+	// skip (SPEC §7.4 "An engine that becomes available", §7.6): the document
+	// MUST be extracted on this scan also when its bytes are unchanged, so the
+	// cheap signal must not hide it. resolveNeedsProcessing has the same
+	// trigger for the read/hash path.
+	if existing.Status == string(model.DocumentStatusSkipped) &&
+		existing.SkipReason == model.SkipReasonUnsupportedFormat &&
+		s.extractorCanReadExt(f.RelPath) {
+		return false, nil
+	}
 	// A media object's own ETag does not reflect changes to an adjacent subtitle
 	// sidecar (.srt/.vtt/.ttml): buildDocumentWithContent folds the sidecar
 	// fingerprint into ContentHash, but the ETag fast-path runs before that

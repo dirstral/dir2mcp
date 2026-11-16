@@ -141,6 +141,18 @@ func TestLibreOfficeEngine_UpgradePicksUpSkippedDoc(t *testing.T) {
 // gate alone would treat it as done; the engine-activation trigger must still
 // reprocess it.
 func TestLibreOfficeEngine_UpgradeWithHashedSkipRow(t *testing.T) {
+	for _, tc := range []struct{ name, etag string }{
+		{"local file", ""},
+		// An object-store row also has an ETag. The unchanged ETag and size
+		// must not hide the document from the engine that became available.
+		{"unchanged etag", "etag-notes-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { upgradeWithHashedSkipRow(t, tc.etag) })
+	}
+}
+
+func upgradeWithHashedSkipRow(t *testing.T, etag string) {
+	t.Helper()
 	t.Setenv("MISTRAL_API_KEY", "")
 	const rel = "old/notes.doc"
 	const body = "legacy word bytes"
@@ -153,6 +165,7 @@ func TestLibreOfficeEngine_UpgradeWithHashedSkipRow(t *testing.T) {
 		DocType:     ingest.ClassifyDocType(rel),
 		SizeBytes:   int64(len(body)),
 		ContentHash: ingest.ComputeContentHash([]byte(body)),
+		ETag:        etag,
 		Status:      string(model.DocumentStatusSkipped),
 		SkipReason:  model.SkipReasonUnsupportedFormat,
 	}); err != nil {
@@ -160,7 +173,7 @@ func TestLibreOfficeEngine_UpgradeWithHashedSkipRow(t *testing.T) {
 	}
 
 	t.Setenv("PATH", loStubDir(t, map[string]string{"pandoc": loFakePandoc, "soffice": loFakeSoffice}))
-	f := ingest.DiscoveredFile{RelPath: rel, SizeBytes: int64(len(body)), MTimeUnix: time.Now().Unix()}
+	f := ingest.DiscoveredFile{RelPath: rel, SizeBytes: int64(len(body)), MTimeUnix: time.Now().Unix(), ETag: etag}
 	if err := wiredService(t, cfg, st).ProcessDocument(context.Background(), f, nil, false); err != nil {
 		t.Fatalf("ProcessDocument: %v", err)
 	}
