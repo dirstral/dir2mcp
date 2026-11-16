@@ -185,7 +185,10 @@ effect when it answers:
 - `ask` does not place a matching chunk in the prompt, and does not cite it.
 - `open_file` checks the whole source before it returns any part of it, and
   returns `FORBIDDEN` when the source matches. This is the same check ingest
-  makes on the same bytes. The read is bounded by `ingest.max_file_mb`. A
+  makes on the same bytes. It reads the source once for each call, so the
+  part it returns comes from the bytes that it checked; a file that changes
+  during the call cannot add content that no check covered. The read is
+  bounded by `ingest.max_file_mb`. A
   source over that cap returns `FILE_TOO_LARGE`: ingest never checked or
   indexed it.
 - `annotate` and `transcribe` return `FORBIDDEN` for matching text.

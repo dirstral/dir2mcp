@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -181,5 +182,64 @@ func TestOpenFile_SourceAboveTheCapIsFileTooLarge(t *testing.T) {
 	fs.bytesRead = 0
 	if _, err := svc.OpenFile(context.Background(), "docs/at-cap.md", model.Span{}, 20000); err != nil {
 		t.Fatalf("OpenFile at the cap: %v", err)
+	}
+}
+
+// changingCorpusFS serves a clean document on the first Open and a document
+// with a credential on every later Open. It stands in for a source that
+// changes between two reads of one request.
+type changingCorpusFS struct {
+	first, later []byte
+	opens        int
+}
+
+func (f *changingCorpusFS) Open(ctx context.Context, _ string) (io.ReadSeekCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.opens++
+	data := f.later
+	if f.opens == 1 {
+		data = f.first
+	}
+	read := 0
+	return &cappedReader{data: data, cap: len(data) + 1, read: &read}, nil
+}
+
+func (f *changingCorpusFS) Walk(context.Context, string, corpusfs.Options) ([]corpusfs.DiscoveredFile, error) {
+	return nil, errors.New("changingCorpusFS: Walk not implemented")
+}
+
+func (f *changingCorpusFS) Localize(context.Context, string) (string, func(), error) {
+	return "", func() {}, errors.New("changingCorpusFS: Localize not implemented")
+}
+
+// TestOpenFile_SliceComesFromTheCheckedBytes pins SPEC §15.4 (spec 0.96.0):
+// the slice that open_file returns comes from the same bytes that the secret
+// check covered. The source is read once per call, for every span kind of a
+// text source. A source that changes after that read cannot put unchecked
+// content into the answer: a second read would return the credential here.
+func TestOpenFile_SliceComesFromTheCheckedBytes(t *testing.T) {
+	clean := "line one\nline two\nline three\n"
+	changed := "line one\nGITHUB_" + "TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv\nline three\n"
+	spans := map[string]model.Span{
+		"default text": {},
+		"line range":   {Kind: "lines", StartLine: 2, EndLine: 2},
+		"page":         {Kind: "page", Page: 1},
+	}
+	for name, span := range spans {
+		fs := &changingCorpusFS{first: []byte(clean), later: []byte(changed)}
+		svc := newBoundedService(testutil.TempDir(t))
+		svc.SetCorpusFS(fs)
+		out, err := svc.OpenFile(context.Background(), "docs/notes.txt", span, 2000)
+		if err != nil {
+			t.Fatalf("%s: OpenFile: %v", name, err)
+		}
+		if fs.opens != 1 {
+			t.Errorf("%s: the source was opened %d times, want 1 (check and slice use one read)", name, fs.opens)
+		}
+		if strings.Contains(out, "Xy7Zq9Wv") || !strings.Contains(out, "line two") {
+			t.Errorf("%s: answer = %q, want text from the checked read only", name, out)
+		}
 	}
 }
