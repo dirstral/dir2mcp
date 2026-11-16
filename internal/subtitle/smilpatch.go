@@ -81,6 +81,20 @@ type smilStream struct {
 	ts         TextStream
 }
 
+// SMILTextStreamSources lists the src of every <textstream> in the SMIL's
+// <switch>, without a leading "mp4:", in document order.
+func SMILTextStreamSources(doc []byte) ([]string, error) {
+	sw, err := parseSMILSwitch(doc)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(sw.streams))
+	for _, s := range sw.streams {
+		out = append(out, NormalizeSMILSrc(s.ts.Src))
+	}
+	return out, nil
+}
+
 // InspectSMIL validates that doc is a SMIL whose body has a <switch> holding at
 // least one <video>, and reports its top rendition.
 func InspectSMIL(doc []byte) (SMILInfo, error) {
