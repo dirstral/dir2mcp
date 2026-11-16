@@ -335,8 +335,18 @@ func TTMLTextLanguages(doc string) []string {
 type ttmlLangWalk struct {
 	stack  []string
 	inBody int
+	inMeta int
 	seen   map[string]bool
 	out    []string
+}
+
+// ttmlMetadataNS is the TTML metadata namespace (ttm:desc, ttm:title, ...).
+const ttmlMetadataNS = "http://www.w3.org/ns/ttml#metadata"
+
+// isTTMLMetadata reports whether an element holds metadata, not caption text:
+// a <metadata> element or anything in the ttm namespace.
+func isTTMLMetadata(name xml.Name) bool {
+	return name.Local == "metadata" || name.Space == ttmlMetadataNS
 }
 
 func (w *ttmlLangWalk) current() string {
@@ -355,6 +365,9 @@ func (w *ttmlLangWalk) start(t xml.StartElement) {
 	if t.Name.Local == "body" || w.inBody > 0 {
 		w.inBody++
 	}
+	if w.inMeta > 0 || isTTMLMetadata(t.Name) {
+		w.inMeta++
+	}
 }
 
 func (w *ttmlLangWalk) end() {
@@ -364,10 +377,13 @@ func (w *ttmlLangWalk) end() {
 	if w.inBody > 0 {
 		w.inBody--
 	}
+	if w.inMeta > 0 {
+		w.inMeta--
+	}
 }
 
 func (w *ttmlLangWalk) text(t xml.CharData) {
-	if w.inBody == 0 || strings.TrimSpace(string(t)) == "" {
+	if w.inBody == 0 || w.inMeta > 0 || strings.TrimSpace(string(t)) == "" {
 		return
 	}
 	lang := w.current()
@@ -381,13 +397,12 @@ func (w *ttmlLangWalk) text(t xml.CharData) {
 	w.out = append(w.out, lang)
 }
 
-// xmlLangAttr is an element's own xml:lang, when it has a non-empty one.
+// xmlLangAttr is an element's own xml:lang, when it has one. An empty value is
+// returned as present: in XML it clears the inherited language.
 func xmlLangAttr(attrs []xml.Attr) (string, bool) {
 	for _, a := range attrs {
 		if a.Name.Local == "lang" && a.Name.Space == "http://www.w3.org/XML/1998/namespace" {
-			if v := strings.TrimSpace(a.Value); v != "" {
-				return v, true
-			}
+			return strings.TrimSpace(a.Value), true
 		}
 	}
 	return "", false
