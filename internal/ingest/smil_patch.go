@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -123,6 +125,18 @@ func (s *Service) patchSMIL(plan emitPlan) {
 	}
 	want := s.smilWantedTextStreams(plan, mode)
 	managed := managedCaptionMatcher(plan)
+	// An entry that already references a caption file dir2mcp did not write (for
+	// example livevtt's TTML) is that file's author's: it is kept exactly as it
+	// is, never rewritten or removed (SPEC §8.6.14). Recomputing its languages
+	// from dir2mcp's transcripts narrowed thousands of livevtt entries whose own
+	// VTTs were empty, dropping caption tracks that had text.
+	want, kept := s.keepForeignEntries(plan, want)
+	if len(kept) > 0 {
+		isManaged := managed
+		managed = func(src string) bool {
+			return isManaged(src) && !kept[smilEntryName(src)]
+		}
+	}
 	if len(want) == 0 {
 		// Nothing to link: never drop a working entry, only dangling ones.
 		dir := filepath.Dir(plan.smil.abs)
@@ -174,13 +188,7 @@ func (s *Service) smilWantedTextStreams(plan emitPlan, mode string) []subtitle.T
 		if !exists(name) {
 			return nil
 		}
-		langs := []string{}
-		for _, l := range []string{plan.primary, plan.secondary} {
-			if strings.TrimSpace(l) != "" {
-				langs = append(langs, s.smilLanguageCode(l))
-			}
-		}
-		want = append(want, subtitle.TextStream{Src: name, Lang: strings.Join(langs, ","), Params: params})
+		want = append(want, subtitle.TextStream{Src: name, Lang: s.smilTTMLLanguages(plan, filepath.Join(dir, name)), Params: params})
 	case "vtt":
 		for _, lang := range plan.langs {
 			name := plan.stem + "." + lang + ".vtt"
@@ -323,4 +331,84 @@ func backupSMIL(t smilTarget) error {
 		return nil
 	}
 	return errors.New("no free backup name")
+}
+
+// smilEntryName is a <textstream> src as a bare name beside the SMIL.
+func smilEntryName(src string) string {
+	return strings.TrimPrefix(path.Clean(subtitle.NormalizeSMILSrc(src)), "./")
+}
+
+// keepForeignEntries drops from want every entry whose caption file dir2mcp did
+// not write and that the SMIL already references, and returns those names: the
+// existing entries stay as their author left them. A foreign file the SMIL does
+// not reference yet keeps its wanted entry, so it is linked once.
+func (s *Service) keepForeignEntries(plan emitPlan, want []subtitle.TextStream) ([]subtitle.TextStream, map[string]bool) {
+	if len(want) == 0 {
+		return want, nil
+	}
+	srcs, err := subtitle.SMILTextStreamSources(plan.smil.data)
+	if err != nil {
+		return want, nil
+	}
+	referenced := make(map[string]bool, len(srcs))
+	for _, src := range srcs {
+		referenced[smilEntryName(src)] = true
+	}
+	smilDir := path.Dir(plan.smil.relPath)
+	var kept map[string]bool
+	out := want[:0:0]
+	for _, ts := range want {
+		name := smilEntryName(ts.Src)
+		if referenced[name] && !s.smilEntryOwned(plan, path.Join(smilDir, name)) {
+			if kept == nil {
+				kept = map[string]bool{}
+			}
+			kept[name] = true
+			continue
+		}
+		out = append(out, ts)
+	}
+	return out, kept
+}
+
+// smilEntryOwned reports whether write-back wrote the caption file relPath for
+// this document (an ownership record, §8.6.14).
+func (s *Service) smilEntryOwned(plan emitPlan, relPath string) bool {
+	_, owned := s.ownedForDoc(context.Background(), plan.doc.DocID, relPath)
+	return owned
+}
+
+// smilTTMLLanguages is the system-language of a TTML entry: the languages the
+// file itself carries (its xml:lang values), in the SMIL's code form, primary
+// first. A file with no language tags falls back to the document's transcript
+// languages.
+func (s *Service) smilTTMLLanguages(plan emitPlan, abs string) string {
+	var langs []string
+	if data, err := os.ReadFile(abs); err == nil {
+		for _, l := range subtitle.TTMLLanguages(string(data)) {
+			langs = append(langs, s.smilLanguageCode(l))
+		}
+	}
+	if len(langs) == 0 {
+		for _, l := range []string{plan.primary, plan.secondary} {
+			if strings.TrimSpace(l) != "" {
+				langs = append(langs, s.smilLanguageCode(l))
+			}
+		}
+	}
+	primary := s.smilLanguageCode(plan.primary)
+	sort.SliceStable(langs, func(i, j int) bool { return langs[i] == primary && langs[j] != primary })
+	return strings.Join(dedupeStrings(langs), ",")
+}
+
+func dedupeStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := in[:0:0]
+	for _, v := range in {
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }

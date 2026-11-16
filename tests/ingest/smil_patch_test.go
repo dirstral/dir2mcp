@@ -368,3 +368,58 @@ func TestSMILPatch_LeavesASMILChangedSinceRead(t *testing.T) {
 		t.Fatalf("want one backup holding the rewritten SMIL, got %v", backups)
 	}
 }
+
+// livevttBilingualTTML is a TTML livevtt wrote: one div per language, each with
+// text.
+const livevttBilingualTTML = `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div xml:lang="eng"><p begin="00:00:00.000" end="00:00:02.000">report</p></div><div xml:lang="rus"><p begin="00:00:00.000" end="00:00:02.000">репортаж</p></div></body></tt>
+`
+
+// TestSMILPatch_KeepsAForeignEntryWhenALanguageIsMissing pins the archive
+// regression of 2026-11-16: a video livevtt wired to its own bilingual TTML,
+// whose English VTT livevtt left empty, has only a Russian transcript in
+// dir2mcp. The patch used to recompute the entry from that and narrow
+// "rus,eng" to "rus", dropping an English track that had text (2,702 SMILs).
+// An entry that references a caption file dir2mcp did not write stays as it is.
+func TestSMILPatch_KeepsAForeignEntryWhenALanguageIsMissing(t *testing.T) {
+	t.Parallel()
+	wired := strings.Replace(archiveSMIL, "    </switch>\n", wiredTextStream+"    </switch>\n", 1)
+	root := smilCorpus(t, wired)
+	mustWriteFile(t, filepath.Join(root, "v", "abc.en.vtt"), []byte("WEBVTT\n"))
+	mustWriteFile(t, filepath.Join(root, "v", "abc_1080p.ttml"), []byte(livevttBilingualTTML))
+	runSMILCorpusWith(t, root, nil, testutil.TempDir(t), func(svc *ingest.Service) {
+		svc.SetTranslator(failingTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
+	})
+
+	if got := readFile(t, filepath.Join(root, "v", "abc.smil")); got != wired {
+		t.Fatalf("a livevtt-wired entry must be kept as it is:\n%s", got)
+	}
+	if n := len(smilBackups(t, root)); n != 0 {
+		t.Fatalf("no change means no backup, got %d", n)
+	}
+	if readFile(t, filepath.Join(root, "v", "abc_1080p.ttml")) != livevttBilingualTTML {
+		t.Fatalf("livevtt's TTML must never be overwritten")
+	}
+}
+
+// TestSMILPatch_NewEntryListsTheFilesOwnLanguages pins that a caption file the
+// SMIL does not reference yet is linked with the languages the file itself
+// carries, not the document's transcript languages: livevtt's TTML here holds
+// Russian only, so the entry lists "rus" although dir2mcp has both transcripts.
+func TestSMILPatch_NewEntryListsTheFilesOwnLanguages(t *testing.T) {
+	t.Parallel()
+	root := smilCorpus(t, archiveSMIL)
+	russianOnly := `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div xml:lang="rus"><p begin="00:00:00.000" end="00:00:02.000">репортаж</p></div></body></tt>
+`
+	mustWriteFile(t, filepath.Join(root, "v", "abc_1080p.ttml"), []byte(russianOnly))
+	runSMILCorpus(t, root, nil, testutil.TempDir(t))
+
+	got := readFile(t, filepath.Join(root, "v", "abc.smil"))
+	if !strings.Contains(got, `<textstream src="abc_1080p.ttml" system-language="rus">`) {
+		t.Fatalf("the new entry must list only the file's language (rus):\n%s", got)
+	}
+	if readFile(t, filepath.Join(root, "v", "abc_1080p.ttml")) != russianOnly {
+		t.Fatalf("the foreign TTML must never be overwritten")
+	}
+}
