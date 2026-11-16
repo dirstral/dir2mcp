@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §8.6.13 (0.93.0): a window that the quality gate refused counts as a
+// SPEC §8.6.13 (0.95.0): a window that the quality gate refused counts as a
 // failed window next to no-speech windows. When every window is a no-speech
 // result or a quality-gate refusal, and at least one is a refusal, the outcome
 // is the TRANSCRIBE_FAILED error and the recording is retried. With a
@@ -126,6 +126,85 @@ func TestNoSpeech_LanguageRefusalBesideNoSpeechIsALanguageSkip(t *testing.T) {
 func TestNoSpeech_BothRefusalsBesideNoSpeechAreALanguageSkip(t *testing.T) {
 	t.Parallel()
 	svc, st, _, f := refusalBesideNoSpeechService(t, map[int]model.TranscriptResult{1: uncoveredWindow(), 3: loopWindow()})
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument hard-failed: %v", err)
+	}
+	doc := mustGetDoc(t, st, "talk.mp3")
+	if doc.Status != "skipped" || doc.SkipReason != model.SkipReasonLanguageUncovered {
+		t.Fatalf("talk.mp3: status=%q skip_reason=%q error=%q, want skipped/%s", doc.Status, doc.SkipReason, doc.ErrorMessage, model.SkipReasonLanguageUncovered)
+	}
+}
+
+// windowProviderFailure is a provider failure of one decode window.
+var windowProviderFailure = &model.ProviderError{Code: "WHISPER_FAILED", Message: "upstream 502", Retryable: false}
+
+// assertFailedWindowWins checks the SPEC 0.95.0 §8.6.13 precedence rule: the
+// document is a transcription failure (the class that the run manifest reports
+// as TRANSCRIBE_FAILED), not a declared skip.
+func assertFailedWindowWins(t *testing.T, st *store.SQLiteStore) {
+	t.Helper()
+	doc := mustGetDoc(t, st, "talk.mp3")
+	if doc.Status != "error" || !strings.Contains(doc.ErrorMessage, "transcript provider failure") {
+		t.Fatalf("talk.mp3: status=%q skip_reason=%q error=%q, want status=error with a transcript provider failure (a failed window takes precedence)", doc.Status, doc.SkipReason, doc.ErrorMessage)
+	}
+	if doc.SkipReason != "" {
+		t.Errorf("skip_reason = %q, want none on an error", doc.SkipReason)
+	}
+}
+
+// TestNoSpeech_FailedWindowWinsOverLanguageRefusalAndNoSpeech: one window is
+// refused for its language, one window fails at the provider, and the other
+// windows hold no speech. No window decoded to text. The failed window can
+// hold speech in a covered language, so the document is an error and the next
+// run decodes it again. It is not the language_uncovered skip.
+//
+// Mutant killed: judging the refusals first, which records a skip that hides
+// the failure and is never retried as an error.
+func TestNoSpeech_FailedWindowWinsOverLanguageRefusalAndNoSpeech(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	svc, st, tr, f := refusalBesideNoSpeechService(t, map[int]model.TranscriptResult{1: uncoveredWindow()})
+	tr.errAt = map[int]error{2: windowProviderFailure}
+	_ = svc.ProcessDocument(ctx, f, nil, false)
+	assertFailedWindowWins(t, st)
+
+	// The error is retried with a real decode: the failed decode is not cached.
+	tr.mu.Lock()
+	before := tr.calls
+	tr.errAt = nil
+	tr.replies = map[int]model.TranscriptResult{}
+	tr.def = model.TranscriptResult{Text: ruText, Language: "ru", LanguageConfidence: 0.9}
+	tr.mu.Unlock()
+	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("retry run: %v", err)
+	}
+	if tr.calls == before {
+		t.Fatalf("the retry run sent no decode request: the failed decode must not be served from the cache")
+	}
+	if doc := mustGetDoc(t, st, "talk.mp3"); doc.Status != "ok" {
+		t.Fatalf("after the retry: status=%q error=%q, want ok", doc.Status, doc.ErrorMessage)
+	}
+}
+
+// TestNoSpeech_FailedWindowWinsOverLanguageRefusals: every window that did not
+// fail is refused for its language (no window decoded at all). The failed
+// window still takes precedence: error, not the language_uncovered skip.
+func TestNoSpeech_FailedWindowWinsOverLanguageRefusals(t *testing.T) {
+	t.Parallel()
+	svc, st, tr, f := refusalBesideNoSpeechService(t, nil)
+	tr.def = uncoveredWindow()
+	tr.errAt = map[int]error{3: windowProviderFailure}
+	_ = svc.ProcessDocument(context.Background(), f, nil, false)
+	assertFailedWindowWins(t, st)
+}
+
+// TestNoSpeech_AllRefusedWithNoFailedWindowIsUnchanged pins the other side of
+// the precedence rule: with no failed window, every window refused for its
+// language is still the language_uncovered skip.
+func TestNoSpeech_AllRefusedWithNoFailedWindowIsUnchanged(t *testing.T) {
+	t.Parallel()
+	svc, st, tr, f := refusalBesideNoSpeechService(t, nil)
+	tr.def = uncoveredWindow()
 	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
 		t.Fatalf("ProcessDocument hard-failed: %v", err)
 	}

@@ -52,6 +52,11 @@ type TranscriptCoverage struct {
 	// nothing was refused. A window that failed for a provider or transport
 	// reason is a failed window, counted in WindowsAttempted, not a refused one.
 	Refused []RefusedRange `json:"refused,omitempty"`
+	// WindowsFailed is how many windows failed: a transport or provider
+	// failure, or a window that could not be cut. A refused window is not a
+	// failed window. Transient: it decides the outcome of the decode that
+	// produced it (§8.6.13) and is not part of the persisted coverage object.
+	WindowsFailed int `json:"-"`
 	// Identity is the §8.6.7 "provider/model" that produced this transcript. It
 	// is NOT part of the persisted coverage object; a reader fills it from the
 	// sibling fields of the same meta_json so a §7.7 report can name what
@@ -69,7 +74,7 @@ type TranscriptCoverage struct {
 	// so text cached while gates were off still gets every check.
 	ScreenedPerWindow bool `json:"-"`
 	// NoSpeechMS is the summed length of the windows whose decode was a
-	// no-speech result (SPEC 0.93.0), coalesced. Those windows are decoded and
+	// no-speech result (SPEC 0.95.0), coalesced. Those windows are decoded and
 	// sit inside Ranges; this says how much of that decoded audio held no
 	// speech, so the §8.6.6 low-density check can leave it out of the duration.
 	// Not part of the persisted coverage object; the transcript cache keeps it.

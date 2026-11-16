@@ -25,7 +25,7 @@ func whisperServer(t *testing.T, body string) *httptest.Server {
 	return srv
 }
 
-// TestTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.93.0 (§8.2): a
+// TestTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.95.0 (§8.2): a
 // well-formed response with empty text and no segment that holds text is a
 // successful decode that found no speech. It is not WHISPER_FAILED.
 func TestTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
@@ -101,6 +101,8 @@ func TestTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 		"segment str":  `{"segments":["x"]}`,
 		"segment text": `{"segments":[{"start":0,"end":1,"text":7}]}`,
 		"other object": `{"task":"transcribe","language":"en","duration":12.0}`,
+		// A segment with a time range but no text key (SPEC 0.95.0 §8.2).
+		"timed segment, no text": `{"text":"","segments":[{"start":0,"end":1}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newClient(whisperServer(t, body).URL, "")
@@ -113,5 +115,17 @@ func TestTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 				t.Fatalf("want non-retryable WHISPER_FAILED, got %+v", pe)
 			}
 		})
+	}
+}
+
+// TestTranscribe_TimedSegmentWithEmptyTextIsNoSpeech: a segment that has a
+// start, an end and an empty text is well-formed, so the response is a
+// no-speech result (SPEC 0.95.0 §8.2). Only a timed segment with no text key
+// is malformed.
+func TestTranscribe_TimedSegmentWithEmptyTextIsNoSpeech(t *testing.T) {
+	c := newClient(whisperServer(t, `{"text":"","segments":[{"start":0,"end":1,"text":""}]}`).URL, "")
+	res, err := c.TranscribeStructured(context.Background(), "x.m4a", []byte("audio"))
+	if err != nil || res.Text != "" {
+		t.Fatalf("want an empty result and no error, got (%q, %v)", res.Text, err)
 	}
 }

@@ -5,7 +5,7 @@ import (
 )
 
 // WellFormedEmptySTT reports whether raw is a well-formed speech-to-text
-// response, the shape a no-speech result needs (SPEC 0.93.0, §8.2). The caller
+// response, the shape a no-speech result needs (SPEC 0.95.0, §8.2). The caller
 // has already found that the response holds no text; this answers whether that
 // emptiness is a successful decode or a malformed body.
 //
@@ -14,7 +14,10 @@ import (
 //   - it has at least one of textFields or segmentsField;
 //   - every text field it has is a string;
 //   - its segments field, when present, is an array of objects, and the text of
-//     each segment, when present, is a string.
+//     each segment, when present, is a string;
+//   - no segment has a start or an end but no text: such a segment reports a
+//     timed range of speech that the text does not hold. A segment with an
+//     empty text ("text":"") is well-formed.
 //
 // An OpenAI-compatible server answers music or silence with
 // `{"text":"","segments":[]}`: well-formed, and a no-speech result. A body that
@@ -47,7 +50,8 @@ func WellFormedEmptySTT(raw []byte, textFields []string, segmentsField string) b
 }
 
 // segmentsWellFormed reports whether v is an array of objects whose text,
-// when present, is a string.
+// when present, is a string, and in which no segment has a start or an end
+// with no text key.
 func segmentsWellFormed(v json.RawMessage) bool {
 	var segs []map[string]json.RawMessage
 	if err := json.Unmarshal(v, &segs); err != nil || segs == nil {
@@ -57,14 +61,26 @@ func segmentsWellFormed(v json.RawMessage) bool {
 		if seg == nil {
 			return false
 		}
-		if t, ok := seg["text"]; ok {
-			var s string
-			if !isJSONString(t, &s) {
+		t, ok := seg["text"]
+		if !ok {
+			if segmentIsTimed(seg) {
 				return false
 			}
+			continue
+		}
+		var s string
+		if !isJSONString(t, &s) {
+			return false
 		}
 	}
 	return true
+}
+
+// segmentIsTimed reports whether a segment names a start or an end.
+func segmentIsTimed(seg map[string]json.RawMessage) bool {
+	_, start := seg["start"]
+	_, end := seg["end"]
+	return start || end
 }
 
 // isJSONString reports whether v is a JSON string. A JSON null is not one:

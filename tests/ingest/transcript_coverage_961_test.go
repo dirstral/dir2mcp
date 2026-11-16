@@ -573,7 +573,7 @@ func (w *silentWindowTranscriber) TranscribeStructured(_ context.Context, _ stri
 // empty, and recording that as ordinary silent media asserts the recording had
 // nothing to say, over audio no window ever decoded.
 //
-// Spec 0.93.0 (§8.6.13) makes the outcome sharper than the floor: the quiet
+// Spec 0.95.0 (§8.6.13) makes the outcome sharper than the floor: the quiet
 // window is a no-speech result, and when at least one window failed and every
 // other window holds no speech, the recording is a transcription error that is
 // retried, because a failed window can hold speech. It is neither silence nor
@@ -599,7 +599,7 @@ func TestPartialTranscriptFloor_EmptyTranscriptFromAPartialDecodeIsNotSilence(t 
 
 	doc := mustGetDoc(t, st, "quiet.mp3")
 	if doc.Status != "error" || doc.SkipReason != "" {
-		t.Fatalf("quiet.mp3: status = %q, skip_reason = %q, want status error: an empty transcript from a 1-of-4 decode is not silence, and the failed windows are retried (spec 0.93.0)",
+		t.Fatalf("quiet.mp3: status = %q, skip_reason = %q, want status error: an empty transcript from a 1-of-4 decode is not silence, and the failed windows are retried (spec 0.95.0)",
 			doc.Status, doc.SkipReason)
 	}
 }

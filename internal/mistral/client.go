@@ -866,7 +866,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
-		// SPEC 0.93.0: Voxtral answers audio with nothing said with a
+		// SPEC 0.95.0: Voxtral answers audio with nothing said with a
 		// well-formed `{"text":"","segments":[]}`. That is a successful decode
 		// that found no speech, not a provider failure. A body that names
 		// neither field, or has one of the wrong type, is malformed.

@@ -59,7 +59,7 @@ func MergeTranscriptWindows(windows []TranscriptWindow, stepMS int) (string, []m
 	if stepMS <= 0 {
 		stepMS = 1
 	}
-	// A window whose decode found no speech (SPEC 0.93.0) is decoded audio for
+	// A window whose decode found no speech (SPEC 0.95.0) is decoded audio for
 	// coverage, but it gives the merge no text. It must not end the preceding
 	// window's core: that would drop the preceding window's overlap tail with
 	// nothing to replace it. So the merge sees only windows with text.
@@ -645,7 +645,10 @@ type windowSchedule struct {
 type windowStats struct {
 	attempted int
 	decoded   int
-	ranges    []CoverageRange
+	// failed counts the windows that failed: a cut failure, or a window with
+	// no decoded piece and no refusal (a transport or provider failure).
+	failed int
+	ranges []CoverageRange
 	// languages and refused are the §8.2.2 per-window records, populated only
 	// under media.stt.language_scope: window (a nil state leaves them empty).
 	languages []model.CoverageLanguage
@@ -657,7 +660,7 @@ type windowStats struct {
 	// item scope, in schedule order, for the §8.6.13 low-confidence rule.
 	reports []windowReport
 	// noSpeech are the cores of the windows whose decode was a no-speech result
-	// (SPEC 0.93.0), for the §8.6.6 low-density duration.
+	// (SPEC 0.95.0), for the §8.6.6 low-density duration.
 	noSpeech []CoverageRange
 }
 
@@ -696,6 +699,7 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 			if firstCutErr == nil {
 				firstCutErr = cutErr
 			}
+			stats.failed++
 			continue
 		}
 		stats.languages = append(stats.languages, wd.languages...)
@@ -707,6 +711,9 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 			firstDecodeErr = wd.err
 		}
 		if len(wd.decoded) == 0 {
+			if len(wd.refused) == 0 {
+				stats.failed++
+			}
 			continue
 		}
 		if wd.noSpeech != nil {
@@ -778,7 +785,7 @@ func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath st
 	wd := windowDecode{decoded: decoded, covered: covered, err: decodeErr,
 		report: windowReport{span: CoverageRange{StartMS: start, EndMS: end}}}
 	if decodeErr == nil && noSpeechResults(results) {
-		// SPEC 0.93.0: a no-speech window reports no language, so the
+		// SPEC 0.95.0: a no-speech window reports no language, so the
 		// low-confidence re-decode rule does not read it.
 		wd.noSpeech = &core
 		return wd, nil

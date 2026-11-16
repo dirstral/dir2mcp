@@ -602,7 +602,8 @@ type geminiGenerateRequest struct {
 
 type geminiGenerateResponse struct {
 	Candidates []struct {
-		Content geminiContent `json:"content"`
+		Content      geminiContent `json:"content"`
+		FinishReason string        `json:"finishReason"`
 	} `json:"candidates"`
 }
 
@@ -661,11 +662,27 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
-	text := strings.TrimSpace(firstCandidateText(parsed))
-	if text == "" {
-		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription response had no text", Retryable: false, StatusCode: resp.StatusCode}
+	// SPEC 0.95.0 §8.2: the generated text is the text field of the normalized
+	// response. A response with no candidate has no text field, so it is
+	// malformed. A candidate that the model did not finish (a safety block, a
+	// token limit) is not a decode result either.
+	if len(parsed.Candidates) == 0 {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "malformed transcription response: no candidate", Retryable: false, StatusCode: resp.StatusCode}
 	}
+	text := strings.TrimSpace(firstCandidateText(parsed))
+	if text == "" && !generationFinished(parsed.Candidates[0].FinishReason) {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription generation did not finish: " + parsed.Candidates[0].FinishReason, Retryable: false, StatusCode: resp.StatusCode}
+	}
+	// Empty or whitespace-only generated text is a no-speech result: the
+	// decode succeeded and found nothing said. It is not a provider error.
 	return text, nil
+}
+
+// generationFinished reports whether a candidate ended normally. An absent
+// finish reason counts as normal.
+func generationFinished(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return reason == "" || strings.EqualFold(reason, "STOP")
 }
 
 // firstCandidateText concatenates the text parts of the first candidate.

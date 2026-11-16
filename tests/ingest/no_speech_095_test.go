@@ -25,7 +25,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC 0.93.0. On a live archive, 28 of the first 1,500 videos failed with
+// SPEC 0.95.0. On a live archive, 28 of the first 1,500 videos failed with
 // "WHISPER_FAILED: transcription response had no text content". Their audio is
 // real but holds only music or ambient sound, and both STT servers answered with
 // a well-formed {"text":"","segments":[]}. These tests pin the no-speech outcome:

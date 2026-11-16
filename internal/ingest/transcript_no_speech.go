@@ -13,7 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// This file implements the SPEC 0.93.0 no-speech outcome. A speech-to-text
+// This file implements the SPEC 0.95.0 no-speech outcome. A speech-to-text
 // provider that answers a recording of music, ambient sound or silence with a
 // well-formed response holding empty text and no segments has decoded the audio
 // successfully and found nothing said (a no-speech result, SPEC §8.2). The
@@ -122,7 +122,7 @@ func noSpeechResults(results []pieceResult) bool {
 }
 
 // recordNoSpeechWindow settles a window-scoped decode window whose pieces all
-// came back with no speech (SPEC 0.93.0, §8.2.2). There is nothing to identify,
+// came back with no speech (SPEC 0.95.0, §8.2.2). There is nothing to identify,
 // route or screen: the decoder's language report on music is noise, and the
 // identifier would be asked about audio with nothing said. The window is
 // recorded as decoded, so it counts toward coverage, with the unknown language
@@ -130,7 +130,7 @@ func noSpeechResults(results []pieceResult) bool {
 // the next window with speech inherits the language of the last window that
 // had some, not the silence.
 func (s *Service) recordNoSpeechWindow(relPath string, plan windowSchedule, core CoverageRange, results []pieceResult, cur routedSTT, fallbackFrom string, st *windowLanguageState) windowDecode {
-	s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s holds no speech; it counts as decoded (SPEC 0.93.0)",
+	s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s holds no speech; it counts as decoded (SPEC 0.95.0)",
 		plan.label, core.StartMS, core.EndMS, relPath)
 	var out windowDecode
 	out.decoded, out.covered, out.languages = recordWindow(results, core, "", "", nil, cur, true, fallbackFrom)
@@ -185,22 +185,35 @@ func cachedNoSpeech(text, markerPath string) bool {
 }
 
 // failedBesideNoSpeech is the §8.6.13 verdict on a windowed decode that
-// produced no text because some windows failed and every other window is a
-// no-speech result. It is an error, not a no-speech recording: a failed window
-// can hold speech, so the document is recorded as an error and retried. It
-// returns nil for every other decode, including one with refused windows,
-// which the §8.2.2 terminal-status rules judge (allWindowsRefusedReason): a
-// quality-gate refusal next to no-speech windows is TRANSCRIBE_FAILED there,
-// and a language refusal is the language skip.
+// produced no text and in which at least one window failed. It is an error,
+// not a no-speech recording and not a declared skip: a failed window can hold
+// speech (in a covered language too), so the document is recorded as an error
+// and retried. A failed window takes precedence over the §8.2.2 rules, so
+// this holds also when other windows are language_uncovered refusals or
+// no-speech results (SPEC 0.95.0). It returns nil for every other decode. A
+// decode with refused windows and no failed window goes to the §8.2.2
+// terminal-status rules (allWindowsRefusedReason): a quality-gate refusal next
+// to no-speech windows is TRANSCRIBE_FAILED there, and a language refusal is
+// the language skip.
 func failedBesideNoSpeech(relPath, text string, coverage *TranscriptCoverage) error {
-	if coverage == nil || len(coverage.Refused) > 0 || strings.TrimSpace(stripSegmentMarkers(text)) != "" {
+	if coverage == nil || strings.TrimSpace(stripSegmentMarkers(text)) != "" {
 		return nil
 	}
-	if coverage.WindowsDecoded == 0 || coverage.WindowsDecoded >= coverage.WindowsAttempted {
+	failed := coverage.WindowsFailed
+	if failed == 0 && len(coverage.Refused) == 0 {
+		// A coverage record without the count (item scope): every window that
+		// did not decode failed.
+		failed = coverage.WindowsAttempted - coverage.WindowsDecoded
+	}
+	if failed <= 0 {
 		return nil
+	}
+	if len(coverage.Refused) > 0 {
+		return fmt.Errorf("windowed transcription %s: %d of %d windows failed and no window decoded to text (the other windows were refused or hold no speech); a failed window can hold speech, so the recording is retried (SPEC §8.6.13)",
+			relPath, failed, coverage.WindowsAttempted)
 	}
 	return fmt.Errorf("windowed transcription %s: %d of %d windows failed and every other window holds no speech; a failed window can hold speech, so the recording is retried (SPEC §8.6.13)",
-		relPath, coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted)
+		relPath, failed, coverage.WindowsAttempted)
 }
 
 // withNoSpeech records on a coverage record how much of the recording the
@@ -223,7 +236,7 @@ func withNoSpeech(cov *TranscriptCoverage, spans []CoverageRange, totalMS int) *
 }
 
 // speechDuration is the duration the §8.6.6 low-density check compares the
-// transcript with: the recording minus its no-speech windows (SPEC 0.93.0). A
+// transcript with: the recording minus its no-speech windows (SPEC 0.95.0). A
 // recording with one window of speech and long windows of music is not
 // degenerate output. A result at or below zero disables the duration floor, as
 // an unknown duration does.

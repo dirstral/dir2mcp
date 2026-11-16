@@ -18,7 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Edge cases of the SPEC 0.93.0 no-speech outcome that a review of #1169 found.
+// Edge cases of the SPEC 0.95.0 no-speech outcome that a review of #1169 found.
 
 // replyTranscriber answers each call (1-based) with replies[n], else def. A
 // reply with empty text is a no-speech result.
@@ -28,6 +28,8 @@ type replyTranscriber struct {
 	replies map[int]model.TranscriptResult
 	def     model.TranscriptResult
 	err     error
+	// errAt fails the 1-based calls it names.
+	errAt map[int]error
 }
 
 func (r *replyTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -41,6 +43,9 @@ func (r *replyTranscriber) TranscribeStructured(context.Context, string, []byte)
 	r.calls++
 	if r.err != nil {
 		return model.TranscriptResult{}, r.err
+	}
+	if err := r.errAt[r.calls]; err != nil {
+		return model.TranscriptResult{}, err
 	}
 	if res, ok := r.replies[r.calls]; ok {
 		return res, nil

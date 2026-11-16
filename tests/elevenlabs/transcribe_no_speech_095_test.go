@@ -26,7 +26,7 @@ func elevenLabsSTTClient(body string) *elevenlabs.Client {
 	return client
 }
 
-// TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.93.0: a
+// TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.95.0: a
 // well-formed response whose text fields are empty is a decode that found no
 // speech, so Transcribe returns ("", nil) instead of ELEVENLABS_FAILED.
 func TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {

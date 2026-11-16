@@ -23,7 +23,7 @@ func voxtralClient(t *testing.T, body string) *mistral.Client {
 	return c
 }
 
-// TestTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.93.0 for Voxtral: a
+// TestTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.95.0 for Voxtral: a
 // well-formed response with empty text and no segments is a decode that found
 // no speech, so Transcribe returns ("", nil) instead of MISTRAL_FAILED.
 func TestTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
