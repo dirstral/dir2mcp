@@ -423,3 +423,51 @@ func TestSMILPatch_NewEntryListsTheFilesOwnLanguages(t *testing.T) {
 		t.Fatalf("the foreign TTML must never be overwritten")
 	}
 }
+
+// TestSMILPatch_KeepsAForeignEntryUnderAnotherName pins that a referenced
+// caption file dir2mcp did not write is kept also when the patch would write a
+// different name: livevtt's abc.ttml stays wired as it was, beside the entry
+// for the top-rendition TTML dir2mcp writes (abc_1080p.ttml).
+func TestSMILPatch_KeepsAForeignEntryUnderAnotherName(t *testing.T) {
+	t.Parallel()
+	foreignEntry := `      <textstream src="abc.ttml" system-language="rus">
+        <param name="isWowzaCaptionStream" value="true" valuetype="data" />
+      </textstream>
+`
+	wired := strings.Replace(archiveSMIL, "    </switch>\n", foreignEntry+"    </switch>\n", 1)
+	root := smilCorpus(t, wired)
+	foreignTTML := `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru"><body><div><p begin="00:00:00.000" end="00:00:02.000">репортаж</p></div></body></tt>
+`
+	mustWriteFile(t, filepath.Join(root, "v", "abc.ttml"), []byte(foreignTTML))
+	runSMILCorpus(t, root, nil, testutil.TempDir(t))
+
+	got := readFile(t, filepath.Join(root, "v", "abc.smil"))
+	if !strings.Contains(got, foreignEntry) {
+		t.Fatalf("the entry for livevtt's abc.ttml must be kept as it was:\n%s", got)
+	}
+	if !strings.Contains(got, `<textstream src="abc_1080p.ttml"`) {
+		t.Fatalf("the TTML dir2mcp wrote must be linked too:\n%s", got)
+	}
+	if readFile(t, filepath.Join(root, "v", "abc.ttml")) != foreignTTML {
+		t.Fatalf("the foreign TTML must never be overwritten")
+	}
+}
+
+// TestSMILPatch_NewEntryReadsTheRootLanguage pins that a caption file tagged
+// only on its root lists that language: its untagged text inherits it, so the
+// entry is "rus" although dir2mcp has Russian and English transcripts.
+func TestSMILPatch_NewEntryReadsTheRootLanguage(t *testing.T) {
+	t.Parallel()
+	root := smilCorpus(t, archiveSMIL)
+	rootTagged := `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru"><body><div><p begin="00:00:00.000" end="00:00:02.000"><span>репортаж</span></p></div></body></tt>
+`
+	mustWriteFile(t, filepath.Join(root, "v", "abc_1080p.ttml"), []byte(rootTagged))
+	runSMILCorpus(t, root, nil, testutil.TempDir(t))
+
+	got := readFile(t, filepath.Join(root, "v", "abc.smil"))
+	if !strings.Contains(got, `<textstream src="abc_1080p.ttml" system-language="rus">`) {
+		t.Fatalf("the new entry must list the root language only (rus):\n%s", got)
+	}
+}

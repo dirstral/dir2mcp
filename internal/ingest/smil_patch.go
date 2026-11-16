@@ -130,7 +130,7 @@ func (s *Service) patchSMIL(plan emitPlan) {
 	// is, never rewritten or removed (SPEC §8.6.14). Recomputing its languages
 	// from dir2mcp's transcripts narrowed thousands of livevtt entries whose own
 	// VTTs were empty, dropping caption tracks that had text.
-	want, kept := s.keepForeignEntries(plan, want)
+	want, kept := s.keepForeignEntries(plan, want, managed)
 	if len(kept) > 0 {
 		isManaged := managed
 		managed = func(src string) bool {
@@ -338,35 +338,40 @@ func smilEntryName(src string) string {
 	return strings.TrimPrefix(path.Clean(subtitle.NormalizeSMILSrc(src)), "./")
 }
 
-// keepForeignEntries drops from want every entry whose caption file dir2mcp did
-// not write and that the SMIL already references, and returns those names: the
-// existing entries stay as their author left them. A foreign file the SMIL does
-// not reference yet keeps its wanted entry, so it is linked once.
-func (s *Service) keepForeignEntries(plan emitPlan, want []subtitle.TextStream) ([]subtitle.TextStream, map[string]bool) {
-	if len(want) == 0 {
-		return want, nil
-	}
+// keepForeignEntries finds every caption entry the SMIL references whose file
+// exists and was not written by dir2mcp, and returns those names: the existing
+// entries stay as their author left them, also one under a name the patch would not write
+// (e.g. abc.ttml when ttml_name selects abc_1080p.ttml). A wanted entry for
+// such a name is dropped. A foreign file the SMIL does not reference yet keeps
+// its wanted entry, so it is linked once. An entry whose file is missing is no
+// one's captions: the patch still replaces or removes it.
+func (s *Service) keepForeignEntries(plan emitPlan, want []subtitle.TextStream, managed func(string) bool) ([]subtitle.TextStream, map[string]bool) {
 	srcs, err := subtitle.SMILTextStreamSources(plan.smil.data)
 	if err != nil {
 		return want, nil
 	}
-	referenced := make(map[string]bool, len(srcs))
-	for _, src := range srcs {
-		referenced[smilEntryName(src)] = true
-	}
 	smilDir := path.Dir(plan.smil.relPath)
+	fileDir := filepath.Dir(plan.smil.abs)
 	var kept map[string]bool
-	out := want[:0:0]
-	for _, ts := range want {
-		name := smilEntryName(ts.Src)
-		if referenced[name] && !s.smilEntryOwned(plan, path.Join(smilDir, name)) {
-			if kept == nil {
-				kept = map[string]bool{}
-			}
-			kept[name] = true
+	for _, src := range srcs {
+		name := smilEntryName(src)
+		if !managed(src) || kept[name] || !smilSiblingExists(fileDir, subtitle.NormalizeSMILSrc(src)) ||
+			s.smilEntryOwned(plan, path.Join(smilDir, name)) {
 			continue
 		}
-		out = append(out, ts)
+		if kept == nil {
+			kept = map[string]bool{}
+		}
+		kept[name] = true
+	}
+	if len(kept) == 0 {
+		return want, nil
+	}
+	out := want[:0:0]
+	for _, ts := range want {
+		if !kept[smilEntryName(ts.Src)] {
+			out = append(out, ts)
+		}
 	}
 	return out, kept
 }
@@ -378,14 +383,15 @@ func (s *Service) smilEntryOwned(plan emitPlan, relPath string) bool {
 	return owned
 }
 
-// smilTTMLLanguages is the system-language of a TTML entry: the languages the
-// file itself carries (its xml:lang values), in the SMIL's code form, primary
-// first. A file with no language tags falls back to the document's transcript
-// languages.
+// smilTTMLLanguages is the system-language of a TTML entry: the languages of
+// the file's own caption text (the xml:lang in effect for it, inherited from
+// the document root when the blocks carry none), in the SMIL's code form,
+// primary first. A file with no language tags falls back to the document's
+// transcript languages.
 func (s *Service) smilTTMLLanguages(plan emitPlan, abs string) string {
 	var langs []string
 	if data, err := os.ReadFile(abs); err == nil {
-		for _, l := range subtitle.TTMLLanguages(string(data)) {
+		for _, l := range subtitle.TTMLTextLanguages(string(data)) {
 			langs = append(langs, s.smilLanguageCode(l))
 		}
 	}

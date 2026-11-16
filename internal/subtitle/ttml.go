@@ -304,3 +304,91 @@ func TTMLLanguages(doc string) []string {
 		}
 	}
 }
+
+// TTMLTextLanguages lists the languages of a TTML document's caption text,
+// unique and in document order. Each run of text in <body> counts in the
+// xml:lang in effect where it appears: its own element's, or the nearest
+// ancestor's, the document root included. So a document tagged only on its
+// root lists that language, and one with language-tagged blocks lists theirs.
+// A document that does not parse yields what was read before the error.
+func TTMLTextLanguages(doc string) []string {
+	dec := xml.NewDecoder(strings.NewReader(doc))
+	var w ttmlLangWalk
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return w.out
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			w.start(t)
+		case xml.EndElement:
+			w.end()
+		case xml.CharData:
+			w.text(t)
+		}
+	}
+}
+
+// ttmlLangWalk tracks the xml:lang in effect while TTMLTextLanguages reads a
+// document, and collects the languages of the body text it meets.
+type ttmlLangWalk struct {
+	stack  []string
+	inBody int
+	seen   map[string]bool
+	out    []string
+}
+
+func (w *ttmlLangWalk) current() string {
+	if len(w.stack) == 0 {
+		return ""
+	}
+	return w.stack[len(w.stack)-1]
+}
+
+func (w *ttmlLangWalk) start(t xml.StartElement) {
+	lang := w.current()
+	if own, ok := xmlLangAttr(t.Attr); ok {
+		lang = own
+	}
+	w.stack = append(w.stack, lang)
+	if t.Name.Local == "body" || w.inBody > 0 {
+		w.inBody++
+	}
+}
+
+func (w *ttmlLangWalk) end() {
+	if len(w.stack) > 0 {
+		w.stack = w.stack[:len(w.stack)-1]
+	}
+	if w.inBody > 0 {
+		w.inBody--
+	}
+}
+
+func (w *ttmlLangWalk) text(t xml.CharData) {
+	if w.inBody == 0 || strings.TrimSpace(string(t)) == "" {
+		return
+	}
+	lang := w.current()
+	if lang == "" || w.seen[lang] {
+		return
+	}
+	if w.seen == nil {
+		w.seen = map[string]bool{}
+	}
+	w.seen[lang] = true
+	w.out = append(w.out, lang)
+}
+
+// xmlLangAttr is an element's own xml:lang, when it has a non-empty one.
+func xmlLangAttr(attrs []xml.Attr) (string, bool) {
+	for _, a := range attrs {
+		if a.Name.Local == "lang" && a.Name.Space == "http://www.w3.org/XML/1998/namespace" {
+			if v := strings.TrimSpace(a.Value); v != "" {
+				return v, true
+			}
+		}
+	}
+	return "", false
+}
