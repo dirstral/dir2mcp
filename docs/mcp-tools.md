@@ -16,6 +16,23 @@
 | `dir2mcp_list_files` | List indexed files with metadata |
 | `dir2mcp_stats` | Corpus statistics, including the extraction engine actually in use and the `evidence` thresholds in effect with their null baseline (see [configuration](configuration.md#relevance-floor-and-insufficient-evidence-abstention)) |
 
+### `dir2mcp_open_file` on media with no text
+
+`dir2mcp_open_file` returns text only. Two cases have no text to return, and
+both answer the non-retryable `MEDIA_NO_TEXT`:
+
+- a media document that is embedded directly and has no text representation
+  (`model.embed.multimodal: replace`);
+- a recording that the scan skipped as `no_speech` (`status=skipped`,
+  `skip_reason=no_speech`): the speech-to-text decode found no speech in the
+  selected audio tracks, so there is no transcript. This holds for audio and
+  video, and for each span kind (no span, lines, page, time). The tool does
+  not return the retryable `OCR_NOT_READY` here, and it does not return empty
+  content. A no-speech track in a document that stays `ok` is not this case.
+
+A client must not retry on `MEDIA_NO_TEXT`. `OCR_NOT_READY` is the retryable
+answer: the text does not exist yet, and a later call can succeed.
+
 ### What a citation carries
 
 A `time` span (recognition and media content) carries more than its bounds, and a

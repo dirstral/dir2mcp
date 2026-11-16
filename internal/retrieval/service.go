@@ -2518,6 +2518,16 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, err
 	}
 
+	// SPEC §8.6.13, §15.4: a document that the scan skipped as no_speech has no
+	// transcript and no other text. The answer is the non-retryable
+	// MEDIA_NO_TEXT for every span kind. The document row decides, not the
+	// file extension, so it holds for audio and for every video container. It
+	// runs before every read: the transcript cache holds an empty entry for
+	// such a recording, and that entry must not be served as empty content.
+	if s.isNoSpeechSkippedDoc(ctx, normalizedRel) {
+		return "", false, model.ErrMediaNoSpeech
+	}
+
 	// A replace-mode media-only document (SPEC 8.1.7) has direct media chunks
 	// but no text representation — a permanent condition. open_file returns the
 	// non-retryable MEDIA_NO_TEXT (§15.4), never raw bytes and never the
@@ -2607,6 +2617,30 @@ func (s *Service) isSkippedDoc(ctx context.Context, relPath string) bool {
 		return false
 	}
 	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped))
+}
+
+// isNoSpeechSkippedDoc reports whether the store recorded relPath as
+// status="skipped" with skip_reason="no_speech" (SPEC §8.6.13). A no-speech
+// track in a document that stays ok is not this case. It is conservative: a
+// nil store, a missing row or a lookup error returns false, so open_file keeps
+// its other behavior.
+func (s *Service) isNoSpeechSkippedDoc(ctx context.Context, relPath string) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	if store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			s.logf("open_file: no-speech lookup for %q failed: %v", relPath, err)
+		}
+		return false
+	}
+	return !doc.Deleted &&
+		strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped)) &&
+		strings.TrimSpace(doc.SkipReason) == model.SkipReasonNoSpeech
 }
 
 // chunkModalityChecker is the optional store capability used to classify a

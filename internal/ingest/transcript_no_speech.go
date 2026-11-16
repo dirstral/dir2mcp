@@ -34,8 +34,8 @@ import (
 //     the next run decode it again when the track is still selected, also
 //     when the document is ok (§7.6);
 //   - a failed track is not covered by that guard. When no selected track
-//     produced a transcript the document is an error and is processed again
-//     on the next run. A failed track in a document that stays ok is decoded
+//     produced a transcript and at least one selected track failed, the
+//     document is an error and is processed again on the next run. A failed track in a document that stays ok is decoded
 //     again only when the document is processed again (a content change, a
 //     re-index, an identity change).
 
@@ -96,9 +96,16 @@ func windowsWithText(windows []TranscriptWindow) []TranscriptWindow {
 // profile produced because the selected route failed (§8.2.4,
 // on_route_error=default). The default heard nothing, but the route that
 // failed can hold the speech the default missed, and a route-fallback result
-// is provisional. It is not settled as no_speech: it is an error that is
-// retried on the next run, exactly as a failed window beside no-speech
-// windows is (§8.6.13). It returns nil for a decode that used no fallback.
+// is provisional. A whole-recording no-speech result of a fallback decode is
+// therefore not a no-speech result: the outcome is an error
+// (TRANSCRIBE_FAILED), exactly as a failed window beside no-speech windows is
+// (§8.6.13). No no-speech outcome and no fallback record are stored (the
+// error returns before the transcript cache is written), so the next run
+// tries the route again, and media.stt.route_retry_after does not delay it.
+// A fallback window with no speech in a recording that has transcript text
+// is a different case: it keeps its fallback_from entry in the coverage
+// record and follows the window retry. It returns nil for a decode that used
+// no fallback.
 func fallbackNoSpeech(relPath string, coverage *TranscriptCoverage, route *itemRoute) error {
 	from := ""
 	if route != nil {

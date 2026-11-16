@@ -2904,6 +2904,10 @@ func mapOpenFileError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
 		return &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+	case errors.Is(err, model.ErrMediaNoSpeech):
+		// Checked before ErrMediaNoText, which it wraps: the same code, with a
+		// message that names the real cause.
+		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "the recording holds no speech in its selected audio tracks, so it has no transcript; no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrMediaNoText):
 		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "media embedded directly with no text representation (multimodal replace mode); no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrOCRNotReady):
