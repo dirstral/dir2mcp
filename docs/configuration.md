@@ -880,6 +880,12 @@ What happens to `<stem>.smil` beside the video:
   `smil: vtt` adds one per VTT. An entry is added only for a file that exists.
   When no caption file exists (for example, the write failed), entries whose
   file is present are kept and only entries pointing at a missing file go.
+- **Entries for caption files dir2mcp did not write are kept as they are.** When
+  the SMIL already lists a caption file that another tool wrote (livevtt's TTML,
+  for example), that entry is never rewritten or removed, even if dir2mcp has
+  fewer transcript languages for the video than the entry lists. A new entry
+  names the languages the caption file itself carries (its `xml:lang` values),
+  primary first, not the video's transcript languages.
 - **Only the caption lines are edited.** Every other byte of the SMIL stays as it
   was, and a SMIL whose entries are already right is not touched, so re-scans
   cause no churn.
