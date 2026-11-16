@@ -66,7 +66,7 @@ type Service struct {
 	// (docling/docling-serve/mistral/off) or when no functional pandoc resolves.
 	pandocExtractor *pandocExtractor
 	// libreofficeExtractor is the capability-activated libreoffice engine (T2,
-	// spec 0.95.0) for legacy .doc. Under `auto` it runs beside the primary;
+	// spec 0.96.0) for legacy .doc. Under `auto` it runs beside the primary;
 	// under the `libreoffice` pin it is also the primary. It is nil under any
 	// other pin or when soffice or pandoc is missing.
 	libreofficeExtractor *libreofficeExtractor
@@ -729,7 +729,7 @@ func (s *Service) activeExtractionAvailability() extractionAvailability {
 }
 
 // ActivateLibreOfficeEngine wires the capability-activated libreoffice engine
-// (T2, spec 0.95.0) when cfg permits it (ingest.extractor auto or the
+// (T2, spec 0.96.0) when cfg permits it (ingest.extractor auto or the
 // libreoffice pin) AND both soffice and pandoc are functional. Under the
 // `libreoffice` pin the primary IS this engine, so the same instance is reused.
 // Like ActivatePandocEngine it is called by the CLI and MCP wiring after the
@@ -2580,7 +2580,7 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	}
 	// An engine became active for a format that an earlier run stored as an
 	// unsupported_format skip (for example a legacy .doc once soffice and pandoc
-	// are installed, spec 0.95.0). The lenient skip row normally carries no
+	// are installed, spec 0.96.0). The lenient skip row normally carries no
 	// content_hash, so the gate above already reprocesses it; this trigger also
 	// covers a skip row that does carry one, so the upgrade never depends on
 	// how an older binary wrote the row.
@@ -5429,7 +5429,7 @@ func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc mod
 }
 
 // flatEngine is a capability-activated T2 engine that turns a born-digital
-// document into flat Markdown: pandoc (#393) or libreoffice (spec 0.95.0). name
+// document into flat Markdown: pandoc (#393) or libreoffice (spec 0.96.0). name
 // is the provider recorded in meta_json and the cache directory under
 // <state>/cache.
 type flatEngine struct {
@@ -5456,7 +5456,7 @@ func (s *Service) flatEngineForExt(ext string) (flatEngine, bool) {
 
 // generateFlatEngineMarkdownRepresentation produces the extracted_markdown
 // representation for a born-digital document via a T2 engine (pandoc, #393, or
-// libreoffice, spec 0.95.0). It mirrors the flat branch of
+// libreoffice, spec 0.96.0). It mirrors the flat branch of
 // generateOCRMarkdownRepresentation but records the engine as provider and,
 // because these engines emit no pages, chunks the Markdown by lines WITHOUT
 // fabricating page/bbox provenance.
@@ -5526,7 +5526,7 @@ func (s *Service) generateFlatEngineMarkdownRepresentation(ctx context.Context, 
 // readOrComputeOCR.
 func (s *Service) readOrComputeFlatEngine(ctx context.Context, doc model.Document, content []byte, eng flatEngine) (string, error) {
 	// The cache holds document text, so the directory is owner-only (0700)
-	// and each file is 0600 (statefs.WriteFile). Spec 0.95.0 §7.4.B requires
+	// and each file is 0600 (statefs.WriteFile). Spec 0.96.0 §7.4.B requires
 	// this for a cached copy of the libreoffice conversion. The hardened call
 	// also tightens a directory that already exists with a wider mode.
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", eng.name)

@@ -295,7 +295,7 @@ func (s *Service) activeOCRIdentityForPath(relPath string) string {
 		// "pandoc", no model/version) so recorded == active for an unchanged doc.
 		return derivationIdentity(string(provider.CapOCR), "pandoc", "", "", "")
 	case routeLibreOffice:
-		// Same shape for the libreoffice engine (spec 0.95.0): provider-only.
+		// Same shape for the libreoffice engine (spec 0.96.0): provider-only.
 		return derivationIdentity(string(provider.CapOCR), "libreoffice", "", "", "")
 	case routeStructured, routeFlatOCR:
 		// The primary extractor is the structured/flat engine for these routes, so

@@ -399,7 +399,7 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 			// under the `pandoc` pin it reuses the primary instance. Kept out of
 			// NewService so it stays free of ambient-PATH probing.
 			svc.ActivatePandocEngine(cfg)
-			// The libreoffice engine (T2, spec 0.95.0) for legacy .doc is
+			// The libreoffice engine (T2, spec 0.96.0) for legacy .doc is
 			// activated the same way: beside the primary under `auto`, reusing
 			// the primary under its pin.
 			svc.ActivateLibreOfficeEngine(cfg)

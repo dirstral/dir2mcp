@@ -135,7 +135,7 @@ func pandocCacheEntries(t *testing.T, stateDir string) []string {
 }
 
 // TestMCPToolsCallAnnotate_DocWithoutLibreOfficeNamesIt: a legacy .doc is
-// read only by the libreoffice engine (spec 0.95.0). With no soffice on PATH,
+// read only by the libreoffice engine (spec 0.96.0). With no soffice on PATH,
 // the CONFIG_INVALID message names LibreOffice (soffice), pandoc and the
 // ingest.extractor policy, not docling or Mistral OCR, which cannot read .doc.
 func TestMCPToolsCallAnnotate_DocWithoutLibreOfficeNamesIt(t *testing.T) {

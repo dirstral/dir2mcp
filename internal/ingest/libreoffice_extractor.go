@@ -30,7 +30,7 @@ const (
 	maxLibreOfficeLogBytes = 64 * 1024
 )
 
-// libreofficeExtractor is the libreoffice extraction engine (T2, spec 0.95.0).
+// libreofficeExtractor is the libreoffice extraction engine (T2, spec 0.96.0).
 // It converts a legacy binary Word document (.doc) to .docx with headless
 // LibreOffice in a private temp directory, then reads that .docx with the
 // existing pandoc docx path. The output is therefore the same flat Markdown,
@@ -42,7 +42,7 @@ const (
 // directory and the pandoc input copy) lives under one os.MkdirTemp directory
 // (mode 0700) that it removes after the read step, on success, failure and
 // timeout alike. That directory is made in a base directory outside the corpus
-// root (libreofficeMakeWorkDir, spec 0.95.0 §7.4.B).
+// root (libreofficeMakeWorkDir, spec 0.96.0 §7.4.B).
 type libreofficeExtractor struct {
 	// root is the corpus root. The work directory is never made inside it.
 	// Empty means no local corpus root (an object-store source), so there is
@@ -160,7 +160,7 @@ func libreofficeWorkCandidates() []string {
 }
 
 // libreofficeMakeWorkDir makes the private per-conversion work directory.
-// Spec 0.95.0 §7.4.B: the profile and output directories MUST be outside the
+// Spec 0.96.0 §7.4.B: the profile and output directories MUST be outside the
 // corpus root, and when the system temporary directory is inside the root the
 // implementation MUST use another location or treat the engine as
 // unavailable. It tries each libreofficeWorkCandidates base in order. It skips

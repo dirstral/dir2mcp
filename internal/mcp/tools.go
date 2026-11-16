@@ -3351,7 +3351,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 			ing.SetDocumentExtractor(extractor)
 		}
 		ing.ActivatePandocEngine(s.cfg)
-		// The libreoffice engine (T2, spec 0.95.0) reads legacy .doc the same way.
+		// The libreoffice engine (T2, spec 0.96.0) reads legacy .doc the same way.
 		ing.ActivateLibreOfficeEngine(s.cfg)
 		if !ing.CanExtractSourceText(doc) {
 			return "", "", &toolExecutionError{
@@ -5127,7 +5127,7 @@ func statsOutputSchema() map[string]interface{} {
 
 // extractionNotConfiguredMessage is the CONFIG_INVALID message when no active
 // engine reads relPath. A legacy .doc is read only by the libreoffice engine
-// (spec 0.95.0), so its message names LibreOffice (soffice), pandoc and the
+// (spec 0.96.0), so its message names LibreOffice (soffice), pandoc and the
 // ingest.extractor policy that permits the engine, not docling or Mistral OCR.
 func extractionNotConfiguredMessage(relPath string) string {
 	if strings.EqualFold(filepath.Ext(relPath), ".doc") {

@@ -144,7 +144,7 @@ const DefaultDoclingTimeoutSec = 3600
 
 // DefaultLibreOfficeTimeoutSec is the shipped time limit, in seconds, for one
 // headless LibreOffice conversion of one legacy .doc file to .docx (the
-// libreoffice extraction engine, spec 0.95.0, ingest.libreoffice.timeout_sec).
+// libreoffice extraction engine, spec 0.96.0, ingest.libreoffice.timeout_sec).
 // A conversion starts a fresh LibreOffice profile, which costs a few seconds,
 // and a large .doc converts in well under a minute, so five minutes is ample
 // headroom while a hung conversion still stops.
@@ -343,13 +343,13 @@ type Config struct {
 	// IngestLibreOfficeTimeoutSec is the time limit, in seconds, for one
 	// headless LibreOffice conversion of one legacy .doc file (config
 	// `ingest.libreoffice.timeout_sec`, env DIR2MCP_LIBREOFFICE_TIMEOUT_SEC,
-	// spec 0.95.0). It must be greater than 0. When the limit expires the whole
+	// spec 0.96.0). It must be greater than 0. When the limit expires the whole
 	// LibreOffice process group is killed and the document gets a per-document
 	// error.
 	IngestLibreOfficeTimeoutSec int
 	// IngestLibreOfficeCommand optionally overrides the LibreOffice binary of
 	// the libreoffice extraction engine (config `ingest.libreoffice.command`,
-	// spec 0.95.0). The whole value is one path (spaces allowed), not a command
+	// spec 0.96.0). The whole value is one path (spaces allowed), not a command
 	// template. Empty resolves `soffice`,
 	// then `libreoffice`, from PATH.
 	IngestLibreOfficeCommand string
@@ -2150,7 +2150,7 @@ func Default() Config {
 		IngestWatchDebounce:   500 * time.Millisecond,
 		// One docling CLI call on one document (SPEC 7.4.B, #1105).
 		IngestDoclingTimeoutSec: DefaultDoclingTimeoutSec,
-		// One LibreOffice .doc conversion (spec 0.95.0).
+		// One LibreOffice .doc conversion (spec 0.96.0).
 		IngestLibreOfficeTimeoutSec: DefaultLibreOfficeTimeoutSec,
 		// "auto", not "mistral" (SPEC §8.2, §8.1.3): transcription is an optional
 		// capability selected by precedence among eligible profiles, and it stays
@@ -6289,7 +6289,7 @@ func emitDirInsideCorpus(dir, root string) bool {
 // the same rules as the media.subtitles.emit.dir check (emitDirInsideCorpus):
 // the paths as written and the paths with symlinks resolved are both checked.
 // A blank root is never a match. The libreoffice engine uses it to keep its
-// temporary directories outside the corpus root (spec 0.95.0 §7.4.B).
+// temporary directories outside the corpus root (spec 0.96.0 §7.4.B).
 func PathInsideRoot(dir, root string) bool {
 	return emitDirInsideCorpus(dir, root)
 }
@@ -6908,7 +6908,7 @@ func (c *Config) validateDoclingTimeout() error {
 }
 
 // validateLibreOfficeTimeout checks ingest.libreoffice.timeout_sec (spec
-// 0.95.0) with the same bounds as ingest.docling.timeout_sec: greater than 0,
+// 0.96.0) with the same bounds as ingest.docling.timeout_sec: greater than 0,
 // and small enough to convert to a time.Duration without overflow.
 func (c *Config) validateLibreOfficeTimeout() error {
 	if c.IngestLibreOfficeTimeoutSec <= 0 {

@@ -15,7 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Spec 0.95.0 §7.4.B: the LibreOffice profile and output directories MUST be
+// Spec 0.96.0 §7.4.B: the LibreOffice profile and output directories MUST be
 // outside the corpus root. When the system temporary directory is inside the
 // root, the engine MUST use another location or be unavailable. Both
 // directories MUST be owner-only (0700 on POSIX).
