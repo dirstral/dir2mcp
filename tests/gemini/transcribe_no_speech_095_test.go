@@ -52,6 +52,10 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 		"prompt blocked":   `{"promptFeedback":{"blockReason":"SAFETY"}}`,
 		"safety stop":      `{"candidates":[{"finishReason":"SAFETY"}]}`,
 		"token limit":      `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"MAX_TOKENS"}]}`,
+		// Only whitespace and not finished: the model did not complete the
+		// transcription. The same text with STOP is a no-speech result (above).
+		"whitespace, token limit": `{"candidates":[{"content":{"parts":[{"text":" \n\t "}]},"finishReason":"MAX_TOKENS"}]}`,
+		"whitespace, safety":      `{"candidates":[{"content":{"parts":[{"text":"  "}]},"finishReason":"SAFETY"}]}`,
 		// A candidate with no content object holds no generated text.
 		"empty candidate":  `{"candidates":[{}]}`,
 		"no content, STOP": `{"candidates":[{"finishReason":"STOP"}]}`,

@@ -677,6 +677,8 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if parsed.Candidates[0].Content == nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "malformed transcription response: the candidate has no content", Retryable: false, StatusCode: resp.StatusCode}
 	}
+	// The text is trimmed first, so a candidate with only whitespace that did
+	// not finish is an error too, as a candidate with no text is.
 	text := strings.TrimSpace(firstCandidateText(parsed))
 	if text == "" && !generationFinished(parsed.Candidates[0].FinishReason) {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription generation did not finish: " + parsed.Candidates[0].FinishReason, Retryable: false, StatusCode: resp.StatusCode}

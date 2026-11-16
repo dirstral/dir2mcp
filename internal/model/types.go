@@ -101,13 +101,14 @@ const (
 	// "no" for the audio no window decoded.
 	SkipReasonTranscriptPartial = "transcript_partial"
 	// SkipReasonNoSpeech (SPEC 0.95.0, §15.2): media whose STT decode found no
-	// speech in the whole recording (§8.2, §8.6.13): every decode returned a
+	// speech in any selected audio track (media.stt.tracks; a track that is
+	// not selected is not decoded) (§8.2, §8.6.13): every decode returned a
 	// well-formed response with empty text and no segment that holds text, for
 	// example a recording that holds only music or ambient sound, and the
 	// document has no other searchable representation. It is not an error, and
-	// the recording is not decoded again while both its content_hash and the
-	// STT derivation identity are unchanged; a change of either makes the next
-	// run decode it again.
+	// a track whose decode was a no-speech result is not decoded again while
+	// both the content_hash and the STT derivation identity are unchanged; a
+	// change of either makes the next run decode it again.
 	SkipReasonNoSpeech = "no_speech"
 )
 
