@@ -60,7 +60,7 @@ func computeExtractionCoverage(ctx context.Context, counter extractableExtension
 	// pandoc (T2, #393) can be a second active engine under `auto` (and is the
 	// primary under its pin); fold its availability in so a format it covers is
 	// never reported as a gap.
-	// The libreoffice engine (T2, spec 0.93.0) is the same kind of secondary
+	// The libreoffice engine (T2, spec 0.95.0) is the same kind of secondary
 	// engine, for legacy .doc.
 	engines := ingest.ActiveEngines{
 		Structured:  structured,

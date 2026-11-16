@@ -17,7 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Tests for the libreoffice extraction engine (spec 0.93.0): legacy .doc is
+// Tests for the libreoffice extraction engine (spec 0.95.0): legacy .doc is
 // converted to .docx by headless LibreOffice and read by the pandoc docx path.
 
 const loStubPath = "PATH=/usr/bin:/bin\nexport PATH\n"
@@ -226,5 +226,67 @@ func TestLibreOfficeEngine_SecretInOutputPurgesCache(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("the withheld text stayed in %s: %d file(s)", cacheDir, len(entries))
+	}
+}
+
+// TestLibreOfficeEngine_FailedConversionIsRetriedOnNextScan pins spec 0.95.0
+// §7.4.B.1 ("A conversion that failed") and §7.7: a .doc at status=error after
+// a conversion failure is processed again on the next scan, also when its
+// content_hash is unchanged. Scan 1 fails (status=error). Scan 2 has the same
+// bytes, no --force, and a working engine: the document is extracted.
+//
+// The error row that scan 1 writes carries no content_hash, so the content
+// gate alone already processes it again. The "hashed row" case sets the hash
+// on the error row first, so the retry must come from the status=error
+// trigger and not from a hash difference.
+func TestLibreOfficeEngine_FailedConversionIsRetriedOnNextScan(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setHash bool
+	}{
+		{"row as written", false},
+		{"hashed row", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MISTRAL_API_KEY", "")
+			const rel = "archive/retry.doc"
+			const body = "legacy word bytes"
+			root := testutil.TempDir(t)
+			writeFile(t, filepath.Join(root, rel), body)
+			cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off", IngestExtractor: "auto", IngestLibreOfficeTimeoutSec: 30}
+			st := newRealStore(t)
+			f := ingest.DiscoveredFile{RelPath: rel, SizeBytes: int64(len(body)), MTimeUnix: time.Now().Unix()}
+
+			// Scan 1: the conversion fails.
+			failing := loStubPath + "case \"$1\" in --version) exit 0;; esac\necho 'Error: source file could not be loaded' >&2\nexit 1"
+			t.Setenv("PATH", loStubDir(t, map[string]string{"pandoc": loFakePandoc, "soffice": failing}))
+			if err := wiredService(t, cfg, st).ProcessDocument(context.Background(), f, nil, false); err == nil {
+				t.Fatal("scan 1: ProcessDocument must return the conversion error")
+			}
+			first := documentByPath(t, st, rel)
+			if first.Status != string(model.DocumentStatusError) {
+				t.Fatalf("scan 1: status = %q, want error", first.Status)
+			}
+			if tc.setHash {
+				first.ContentHash = ingest.ComputeContentHash([]byte(body))
+				if err := st.UpsertDocument(context.Background(), first); err != nil {
+					t.Fatalf("set content_hash on the error row: %v", err)
+				}
+			}
+
+			// Scan 2: same bytes, same size and mtime, incremental, working engine.
+			t.Setenv("PATH", loStubDir(t, map[string]string{"pandoc": loFakePandoc, "soffice": loFakeSoffice}))
+			if err := wiredService(t, cfg, st).ProcessDocument(context.Background(), f, nil, false); err != nil {
+				t.Fatalf("scan 2: %v", err)
+			}
+			second := documentByPath(t, st, rel)
+			if second.Status != string(model.DocumentStatusOK) || second.ErrorMessage != "" {
+				t.Fatalf("scan 2: status=%q error=%q, want ok with no error", second.Status, second.ErrorMessage)
+			}
+			prov, text := extractedMarkdown(t, st, rel)
+			if prov != "libreoffice" || !strings.Contains(text, "Архивная запись") {
+				t.Fatalf("scan 2: provider=%q text=%q, want the libreoffice text", prov, text)
+			}
+		})
 	}
 }

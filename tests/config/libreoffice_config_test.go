@@ -9,7 +9,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// The libreoffice extraction engine (spec 0.93.0) adds the ingest.extractor
+// The libreoffice extraction engine (spec 0.95.0) adds the ingest.extractor
 // value `libreoffice` and the knob ingest.libreoffice.timeout_sec (env
 // DIR2MCP_LIBREOFFICE_TIMEOUT_SEC): the time limit for one headless LibreOffice
 // conversion of one legacy .doc file. Default 300 seconds; it must be greater

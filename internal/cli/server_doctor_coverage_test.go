@@ -93,7 +93,7 @@ func TestUncoveredExtractableExtensions_PandocEngine(t *testing.T) {
 		t.Errorf("pandoc-only uncovered docs = %d, want 3", docs2)
 	}
 
-	// docling + pandoc + libreoffice (spec 0.93.0): the legacy .doc is covered
+	// docling + pandoc + libreoffice (spec 0.95.0): the legacy .doc is covered
 	// too, so nothing remains uncovered.
 	all := ingest.ActiveEngines{Structured: true, Pandoc: true, LibreOffice: true}
 	if exts3, docs3 := uncoveredExtractableExtensions(corpus, "auto", all); len(exts3) != 0 || docs3 != 0 {
@@ -153,7 +153,7 @@ func TestUncoveredExtractionRemedy_TailoredToEngine(t *testing.T) {
 }
 
 // TestUncoveredExtractionRemedy_LegacyDocNamesMissingBinary checks that an
-// uncovered legacy .doc gets the libreoffice install hint (spec 0.93.0) that
+// uncovered legacy .doc gets the libreoffice install hint (spec 0.95.0) that
 // names the missing binary, that an active libreoffice engine is never
 // re-suggested, and that a pin which excludes the engine names the knob.
 func TestUncoveredExtractionRemedy_LegacyDocNamesMissingBinary(t *testing.T) {
@@ -176,7 +176,7 @@ func TestUncoveredExtractionRemedy_LegacyDocNamesMissingBinary(t *testing.T) {
 
 // TestLibreOfficeRow_ListsMissingBinaries checks the startup/doctor engine list
 // (SPEC §7.7): under `auto` with neither soffice nor pandoc on PATH, the
-// libreoffice engine (spec 0.93.0) gets its own "unavailable" row that names
+// libreoffice engine (spec 0.95.0) gets its own "unavailable" row that names
 // both missing binaries; a pin that excludes the engine shows no row.
 func TestLibreOfficeRow_ListsMissingBinaries(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())

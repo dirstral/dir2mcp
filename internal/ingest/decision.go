@@ -245,7 +245,7 @@ func describePandocEngine(ctx context.Context, cfg config.Config) ExtractorDecis
 	}
 }
 
-// describeExplicitLibreOffice resolves the libreoffice engine (T2, spec 0.93.0)
+// describeExplicitLibreOffice resolves the libreoffice engine (T2, spec 0.95.0)
 // for ingest.extractor=libreoffice. The engine is available only when BOTH a
 // functional soffice and a functional pandoc resolve and a temporary directory
 // outside the corpus root is usable; otherwise extraction is disabled with the
@@ -262,7 +262,7 @@ func describeExplicitLibreOffice(ctx context.Context, cfg config.Config) Extract
 }
 
 // DescribeLibreOfficeEngine describes the capability-activated libreoffice
-// engine (T2, spec 0.93.0) for the SPEC §7.7 startup engine list, mirroring
+// engine (T2, spec 0.95.0) for the SPEC §7.7 startup engine list, mirroring
 // DescribePandocEngine:
 //
 //   - `auto`: an additive engine for legacy .doc. Name="libreoffice"/

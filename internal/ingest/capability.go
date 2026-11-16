@@ -46,7 +46,7 @@ const (
 	// It reads NO pdf/raster input and produces NO page/bbox provenance.
 	enginePandoc
 	// engineLibreOffice is the capability-activated libreoffice engine (spec
-	// 0.93.0): a second T2 engine. It converts legacy binary Word (.doc) to .docx
+	// 0.95.0): a second T2 engine. It converts legacy binary Word (.doc) to .docx
 	// with headless LibreOffice and reads that .docx with the pandoc docx path, so
 	// it needs BOTH a functional soffice and a functional pandoc. It reads exactly
 	// libreofficeReadableExt and, like pandoc, produces NO page/bbox provenance.
@@ -90,7 +90,7 @@ var structuredUnreadableExt = map[string]struct{}{
 // (pandoc has no PowerPoint/Excel reader — .pptx is writer-only, .xlsx has no
 // reader) and legacy binary .doc (pandoc reads OOXML .docx, not the old .doc).
 // Those stay with docling (T1) where supported, legacy .doc goes to the
-// libreoffice engine (T2, spec 0.93.0) when it is active, or they degrade
+// libreoffice engine (T2, spec 0.95.0) when it is active, or they degrade
 // (§7.4.B.2). pandoc
 // reads NO pdf/raster input, so none of flatOCRReadableExt appears here.
 var pandocReadableExt = map[string]struct{}{
@@ -104,7 +104,7 @@ var pandocReadableExt = map[string]struct{}{
 }
 
 // libreofficeReadableExt is the format set of the libreoffice engine (T2, spec
-// 0.93.0): legacy binary Word only. Every other format LibreOffice could open
+// 0.95.0): legacy binary Word only. Every other format LibreOffice could open
 // already has a higher-fidelity or equal-tier engine in the §7.4.B.1 matrix, so
 // the engine deliberately claims nothing else.
 var libreofficeReadableExt = map[string]struct{}{
@@ -219,7 +219,7 @@ const (
 	// no pages), so no region spans. Ordered by fidelity between the structured
 	// (T1) and flat-OCR (T3) tiers.
 	routePandoc
-	// routeLibreOffice: the libreoffice engine (T2, spec 0.93.0): legacy .doc
+	// routeLibreOffice: the libreoffice engine (T2, spec 0.95.0): legacy .doc
 	// converted to .docx by headless LibreOffice, then read by the pandoc docx
 	// path. Flat extracted_markdown with the same provenance as routePandoc.
 	routeLibreOffice
@@ -246,7 +246,7 @@ type extractionAvailability struct {
 	// active — a functional pandoc resolved and the policy permits it.
 	pandoc bool
 	// libreoffice is true when the capability-activated libreoffice engine (T2,
-	// spec 0.93.0) is active: a functional soffice AND a functional pandoc
+	// spec 0.95.0) is active: a functional soffice AND a functional pandoc
 	// resolved and the policy permits it.
 	libreoffice bool
 }
@@ -314,7 +314,7 @@ func selectExtractionRoute(policy string, avail extractionAvailability, ext stri
 	if eligible.pandoc && avail.pandoc && engineSupportsExt(enginePandoc, ext) {
 		return routePandoc
 	}
-	// T2 libreoffice (spec 0.93.0): legacy .doc, which no other engine reads. The
+	// T2 libreoffice (spec 0.95.0): legacy .doc, which no other engine reads. The
 	// two T2 engines claim disjoint formats, so their relative order is not
 	// observable; it sits after pandoc only for readability.
 	if eligible.libreoffice && avail.libreoffice && engineSupportsExt(engineLibreOffice, ext) {
@@ -344,7 +344,7 @@ type ActiveEngines struct {
 	// Pandoc is the capability-activated pandoc engine (T2, #393).
 	Pandoc bool
 	// LibreOffice is the capability-activated libreoffice engine (T2, spec
-	// 0.93.0) for legacy .doc.
+	// 0.95.0) for legacy .doc.
 	LibreOffice bool
 }
 
