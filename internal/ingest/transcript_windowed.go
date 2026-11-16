@@ -649,8 +649,10 @@ type windowStats struct {
 	attempted int
 	decoded   int
 	// failed counts the windows that failed: a cut failure, a window with no
-	// decoded piece and no refusal (a transport or provider failure), or a
-	// decoded window that lost a piece (it also counts in decoded).
+	// decoded piece and no refusal (a transport or provider failure), a
+	// decoded window that lost a piece, or a no-speech window that the
+	// default profile decoded after the window's route failed (the last two
+	// also count in decoded).
 	failed int
 	ranges []CoverageRange
 	// languages and refused are the §8.2.2 per-window records, populated only
@@ -723,7 +725,7 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		if wd.noSpeech != nil {
 			stats.noSpeech = append(stats.noSpeech, *wd.noSpeech)
 		}
-		if wd.piecesFailed {
+		if wd.piecesFailed || wd.fallbackNoSpeech {
 			stats.failed++
 		}
 		stats.decoded++

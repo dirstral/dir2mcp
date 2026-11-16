@@ -178,6 +178,10 @@ type windowDecode struct {
 	// and that has no result for at least one piece. The window keeps the
 	// pieces that decoded, and the decode counts one failed window for it.
 	piecesFailed bool
+	// fallbackNoSpeech is true for a no-speech window that the default
+	// profile decoded because the window's route failed (§8.2.4). The decode
+	// counts one failed window for it (§8.6.13).
+	fallbackNoSpeech bool
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.

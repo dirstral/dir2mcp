@@ -148,12 +148,20 @@ func noSpeechResults(results []pieceResult) bool {
 // and on the route that decoded it. The continuity state does not advance, so
 // the next window with speech inherits the language of the last window that
 // had some, not the silence.
+//
+// A window whose route failed and whose fallback decode found no speech
+// (fallbackFrom is set) also counts as a failed window (§8.6.13): the route
+// that failed can hold the speech that the default profile missed. The count
+// decides the outcome only when no window produced transcript text. With
+// text, the window keeps its fallback_from entry and follows the window
+// retry.
 func (s *Service) recordNoSpeechWindow(relPath string, plan windowSchedule, core CoverageRange, results []pieceResult, cur routedSTT, fallbackFrom string, st *windowLanguageState) windowDecode {
 	s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s holds no speech; it counts as decoded (SPEC 0.96.0)",
 		plan.label, core.StartMS, core.EndMS, relPath)
 	var out windowDecode
 	out.decoded, out.covered, out.languages = recordWindow(results, core, "", "", nil, cur, true, fallbackFrom)
 	out.noSpeech = &core
+	out.fallbackNoSpeech = fallbackFrom != ""
 	st.recordDecoded(out.covered, out.languages)
 	return out
 }
@@ -215,7 +223,9 @@ func cachedNoSpeech(text, markerPath string) bool {
 // speech (in a covered language too), so the document is recorded as an error
 // and retried. A failed window takes precedence over the §8.2.2 rules, so
 // this holds also when other windows are language_uncovered refusals or
-// no-speech results (SPEC 0.96.0). It returns nil for every other decode. A
+// no-speech results (SPEC 0.96.0). A window whose route failed and whose
+// fallback decode is a no-speech result is one of the failed windows. It
+// returns nil for every other decode. A
 // decode with refused windows and no failed window goes to the §8.2.2
 // terminal-status rules (allWindowsRefusedReason): a quality-gate refusal next
 // to no-speech windows is TRANSCRIBE_FAILED there, and a language refusal is
@@ -234,7 +244,7 @@ func failedBesideNoSpeech(relPath, text string, coverage *TranscriptCoverage) er
 		return nil
 	}
 	if len(coverage.Refused) > 0 {
-		return fmt.Errorf("windowed transcription %s: %d of %d windows failed and no window decoded to text (the other windows were refused or hold no speech); a failed window can hold speech, so the recording is retried (SPEC §8.6.13)",
+		return fmt.Errorf("windowed transcription %s: %d of %d windows failed (a window whose route failed and whose fallback decode found no speech counts as failed) and no window decoded to text (the other windows were refused or hold no speech); a failed window can hold speech, so the recording is retried (SPEC §8.6.13)",
 			relPath, failed, coverage.WindowsAttempted)
 	}
 	return fmt.Errorf("windowed transcription %s: %d of %d windows failed and every other window holds no speech; a failed window can hold speech, so the recording is retried (SPEC §8.6.13)",

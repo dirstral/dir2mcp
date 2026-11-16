@@ -26,6 +26,8 @@ func TestWellFormedEmptySTT(t *testing.T) {
 		{`{"segments":[{"start":0,"end":1,"text":""}]}`, true},
 		{`{"text":"","segments":[{"start":0,"end":1,"text":""}]}`, true},
 		{`{"segments":[{}]}`, true},
+		// No time field and no text: well-formed, so a no-speech result.
+		{`{"segments":[{"id":0}]}`, true},
 		{`{"segments":[{"start":0,"end":1}]}`, false},
 		{`{"segments":[{"start":0}]}`, false},
 		{`{"segments":[{"end":1}]}`, false},

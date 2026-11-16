@@ -109,7 +109,9 @@ const (
 	// a track whose decode was a no-speech result is not decoded again while
 	// both the content_hash and the STT derivation identity are unchanged; a
 	// change of either makes the next run decode it again when the track is
-	// still selected.
+	// still selected. A no-speech result of a route fallback decode with no
+	// transcript text in the recording is not this skip: it is an error and
+	// the recording is retried (§8.6.13).
 	SkipReasonNoSpeech = "no_speech"
 )
 
