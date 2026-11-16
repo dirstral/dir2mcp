@@ -76,11 +76,19 @@ func segmentsWellFormed(v json.RawMessage) bool {
 	return true
 }
 
+// segmentTimeKeys are the keys under which an adapter reads the start or the
+// end of a segment: seconds (start, end) and the millisecond form that the
+// ElevenLabs parser also reads (start_ms, end_ms).
+var segmentTimeKeys = []string{"start", "end", "start_ms", "end_ms"}
+
 // segmentIsTimed reports whether a segment names a start or an end.
 func segmentIsTimed(seg map[string]json.RawMessage) bool {
-	_, start := seg["start"]
-	_, end := seg["end"]
-	return start || end
+	for _, k := range segmentTimeKeys {
+		if _, ok := seg[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // isJSONString reports whether v is a JSON string. A JSON null is not one:

@@ -52,6 +52,10 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 		"prompt blocked":   `{"promptFeedback":{"blockReason":"SAFETY"}}`,
 		"safety stop":      `{"candidates":[{"finishReason":"SAFETY"}]}`,
 		"token limit":      `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"MAX_TOKENS"}]}`,
+		// A candidate with no content object holds no generated text.
+		"empty candidate":  `{"candidates":[{}]}`,
+		"no content, STOP": `{"candidates":[{"finishReason":"STOP"}]}`,
+		"null content":     `{"candidates":[{"content":null,"finishReason":"STOP"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := newClient(geminiSTTServer(t, body).URL).Transcribe(context.Background(), "music.mp3", []byte("audio"))
@@ -60,5 +64,16 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 				t.Fatalf("want a non-retryable GEMINI_FAILED, got %v", err)
 			}
 		})
+	}
+}
+
+// TestTranscribe_TextWithNonStopFinishReasonIsUnchanged: the 0.95.0 rule covers
+// only a candidate with no text. A candidate that holds text and did not
+// finish normally is returned as before.
+func TestTranscribe_TextWithNonStopFinishReasonIsUnchanged(t *testing.T) {
+	body := `{"candidates":[{"content":{"parts":[{"text":"first words of a long talk"}]},"finishReason":"MAX_TOKENS"}]}`
+	text, err := newClient(geminiSTTServer(t, body).URL).Transcribe(context.Background(), "talk.mp3", []byte("audio"))
+	if err != nil || text != "first words of a long talk" {
+		t.Fatalf("want the generated text and no error, got (%q, %v)", text, err)
 	}
 }

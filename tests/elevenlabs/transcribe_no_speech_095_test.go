@@ -47,7 +47,12 @@ func TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 // TestElevenLabsTranscribe_MalformedResponseStaysAnError: a body that names no
 // text-bearing field stays a non-retryable ELEVENLABS_FAILED.
 func TestElevenLabsTranscribe_MalformedResponseStaysAnError(t *testing.T) {
-	for _, body := range []string{`{"language_code":"eng"}`, `{"text":null}`, `{"text":"","transcript":null}`} {
+	for _, body := range []string{
+		`{"language_code":"eng"}`, `{"text":null}`, `{"text":"","transcript":null}`,
+		// A timed segment with no text key (SPEC 0.95.0 §8.2), in seconds and
+		// in the millisecond form this adapter reads.
+		`{"segments":[{"start":1.0}]}`, `{"segments":[{"start_ms":1000}]}`,
+	} {
 		_, err := elevenLabsSTTClient(body).Transcribe(context.Background(), "x.mp3", []byte("audio"))
 		var pe *model.ProviderError
 		if !errors.As(err, &pe) || pe.Code != "ELEVENLABS_FAILED" || pe.Retryable {

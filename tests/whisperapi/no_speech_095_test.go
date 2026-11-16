@@ -75,6 +75,8 @@ func TestTranscribe_WordsWithoutTextStayAnError(t *testing.T) {
 	for name, body := range map[string]string{
 		"top-level words": `{"text":"","segments":[],"words":[{"word":"hello","start":0,"end":1}]}`,
 		"segment words":   `{"text":"","segments":[{"start":0,"end":1,"text":"","words":[{"word":"hi","start":0,"end":1}]}]}`,
+		// Blank segment words must not hide a spoken top-level word.
+		"blank segment words, spoken top-level word": `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":"hello","start":0,"end":1}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newClient(whisperServer(t, body).URL, "")
@@ -124,6 +126,17 @@ func TestTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 // is malformed.
 func TestTranscribe_TimedSegmentWithEmptyTextIsNoSpeech(t *testing.T) {
 	c := newClient(whisperServer(t, `{"text":"","segments":[{"start":0,"end":1,"text":""}]}`).URL, "")
+	res, err := c.TranscribeStructured(context.Background(), "x.m4a", []byte("audio"))
+	if err != nil || res.Text != "" {
+		t.Fatalf("want an empty result and no error, got (%q, %v)", res.Text, err)
+	}
+}
+
+// TestTranscribe_BlankWordsAreNoSpeech: word arrays that hold only blank words
+// report no speech, so the response is a no-speech result.
+func TestTranscribe_BlankWordsAreNoSpeech(t *testing.T) {
+	body := `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":""}]}`
+	c := newClient(whisperServer(t, body).URL, "")
 	res, err := c.TranscribeStructured(context.Background(), "x.m4a", []byte("audio"))
 	if err != nil || res.Text != "" {
 		t.Fatalf("want an empty result and no error, got (%q, %v)", res.Text, err)

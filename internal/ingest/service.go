@@ -3108,11 +3108,14 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
 	tc.noFallbackRetry = true
 	transcriptText, words, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
+	// SPEC 0.95.0: a track with no speech has no transcript to translate. It
+	// is a successful decode, not a translation failure.
+	noSpeech, err := splitNoSpeech(err)
 	if err != nil {
 		return err
 	}
 	transcriptText = strings.TrimSpace(transcriptText)
-	if transcriptText == "" {
+	if noSpeech || transcriptText == "" {
 		return nil
 	}
 	return s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, words, duration, trimOffsetMS, tc.audioIndex)

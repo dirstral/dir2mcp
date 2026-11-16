@@ -174,6 +174,10 @@ type windowDecode struct {
 	// noSpeech is the window's core when its decode was a no-speech result
 	// (SPEC 0.95.0), nil otherwise.
 	noSpeech *CoverageRange
+	// piecesFailed is true for a decoded window that the payload cap split
+	// and that has no result for at least one piece. The window keeps the
+	// pieces that decoded, and the decode counts one failed window for it.
+	piecesFailed bool
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.
@@ -207,7 +211,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if len(results) == 0 {
 		return out
 	}
-	if decodedWithoutSpeech(results, err) {
+	if decodedWithoutSpeech(pieces, results, err) {
 		// SPEC 0.95.0: nothing said in this window, so there is no language to
 		// identify, no route to move to and no text to screen.
 		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
@@ -228,7 +232,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			v = s.judgeWindow(results, cur, lang, core)
 		}
 	}
-	if decodedWithoutSpeech(results, ferr) {
+	if decodedWithoutSpeech(pieces, results, ferr) {
 		// SPEC 0.95.0: a later candidate or the default profile found no speech
 		// in the window. It is a decoded window with no language, never a
 		// refusal for the language the first decode resolved.
@@ -267,6 +271,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 	}
 	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, v.covered, fallbackFrom)
+	out.piecesFailed = len(results) < len(pieces)
 	st.recordDecoded(out.covered, out.languages)
 	st.advance(lang, source, conf, cur)
 	return out

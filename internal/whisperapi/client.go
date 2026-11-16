@@ -577,7 +577,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		// Timed words with no text is a contradiction, not silence: the server
 		// heard something it did not write out. It stays an error, so the audio
 		// is decoded again rather than recorded as no speech.
-		if len(parsed.timedWords()) > 0 {
+		if parsed.hasSpokenWord() {
 			return model.TranscriptResult{}, &model.ProviderError{
 				Code:      "WHISPER_FAILED",
 				Message:   "contradictory transcription response: timed words but no text",
@@ -703,6 +703,26 @@ func (r transcribeResponse) timedWords() []model.TimedWord {
 		return nil
 	}
 	return out
+}
+
+// hasSpokenWord reports whether the response holds a word that is not blank
+// in the segment words or in the top-level words. It reads both arrays:
+// timedWords prefers the segment words, so blank segment words would hide a
+// spoken top-level word from the no-speech test.
+func (r transcribeResponse) hasSpokenWord() bool {
+	for _, seg := range r.Segments {
+		for _, w := range seg.Words {
+			if strings.TrimSpace(w.Word) != "" {
+				return true
+			}
+		}
+	}
+	for _, w := range r.Words {
+		if strings.TrimSpace(w.Word) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // secondsToMS converts fractional seconds to whole milliseconds, clamping

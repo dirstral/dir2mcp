@@ -602,8 +602,9 @@ type geminiGenerateRequest struct {
 
 type geminiGenerateResponse struct {
 	Candidates []struct {
-		Content      geminiContent `json:"content"`
-		FinishReason string        `json:"finishReason"`
+		// Content is nil when the candidate names no content object.
+		Content      *geminiContent `json:"content"`
+		FinishReason string         `json:"finishReason"`
 	} `json:"candidates"`
 }
 
@@ -669,6 +670,13 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if len(parsed.Candidates) == 0 {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "malformed transcription response: no candidate", Retryable: false, StatusCode: resp.StatusCode}
 	}
+	// A candidate with no content object holds no generated text at all, so
+	// the response has no text field: malformed, never a no-speech result.
+	// Gemini answers audio with nothing said with a content object that has
+	// no parts, or with an empty text part.
+	if parsed.Candidates[0].Content == nil {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "malformed transcription response: the candidate has no content", Retryable: false, StatusCode: resp.StatusCode}
+	}
 	text := strings.TrimSpace(firstCandidateText(parsed))
 	if text == "" && !generationFinished(parsed.Candidates[0].FinishReason) {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription generation did not finish: " + parsed.Candidates[0].FinishReason, Retryable: false, StatusCode: resp.StatusCode}
@@ -688,6 +696,9 @@ func generationFinished(reason string) bool {
 // firstCandidateText concatenates the text parts of the first candidate.
 func firstCandidateText(r geminiGenerateResponse) string {
 	if len(r.Candidates) == 0 {
+		return ""
+	}
+	if r.Candidates[0].Content == nil {
 		return ""
 	}
 	var b strings.Builder
@@ -764,6 +775,9 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 func firstAudioPart(r geminiGenerateResponse) ([]byte, int, error) {
 	if len(r.Candidates) == 0 {
 		return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no candidates", Retryable: false}
+	}
+	if r.Candidates[0].Content == nil {
+		return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no audio content", Retryable: false}
 	}
 	for _, p := range r.Candidates[0].Content.Parts {
 		if p.InlineData == nil || p.InlineData.Data == "" {

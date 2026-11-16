@@ -75,7 +75,7 @@ func uncoveredWindow() model.TranscriptResult {
 func TestNoSpeech_QualityRefusalBesideNoSpeechIsTranscribeFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	svc, st, _, f := refusalBesideNoSpeechService(t, map[int]model.TranscriptResult{1: loopWindow()})
+	svc, st, tr, f := refusalBesideNoSpeechService(t, map[int]model.TranscriptResult{1: loopWindow()})
 	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
 		t.Fatalf("ProcessDocument hard-failed: %v", err)
 	}
@@ -91,13 +91,28 @@ func TestNoSpeech_QualityRefusalBesideNoSpeechIsTranscribeFailed(t *testing.T) {
 	}
 
 	// The outcome is not settled as no speech: no no-speech record is stored,
-	// so no guard stops a later run, and the next incremental run processes the
-	// errored document again and reaches the same verdict.
+	// so no guard stops a later run.
 	if rec, err := st.GetSetting(ctx, store.NoSpeechIdentitySettingKey("talk.mp3")); err == nil && rec != "" {
 		t.Errorf("a no-speech record %q was stored for a recording with a refused window", rec)
 	}
+
+	// The next incremental run processes the errored document again. It reads
+	// the cached decode (the refused windows are a decode result, and a decode
+	// result is cached), so it sends no new request and reaches the same
+	// verdict. The scripted replies would give speech on a new request, so a
+	// run that decoded again would end as ok.
+	tr.mu.Lock()
+	before := tr.calls
+	tr.def = model.TranscriptResult{Text: ruText, Language: "ru", LanguageConfidence: 0.9}
+	tr.mu.Unlock()
 	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
 		t.Fatalf("second run: %v", err)
+	}
+	tr.mu.Lock()
+	after := tr.calls
+	tr.mu.Unlock()
+	if after != before {
+		t.Errorf("the second run sent %d decode request(s), want 0: the refused decode is read from the transcript cache", after-before)
 	}
 	doc = mustGetDoc(t, st, "talk.mp3")
 	if doc.Status != "error" || !strings.Contains(doc.ErrorMessage, "TRANSCRIBE_FAILED") {

@@ -622,6 +622,9 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	}
 	text, words := MergeTranscriptWindows(windows, stepMS)
 	coverage := withNoSpeech(withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS), stats.noSpeech, totalMS)
+	if coverage != nil {
+		coverage.WindowsFailed = stats.failed
+	}
 	rd.stamp(coverage)
 	return text, words, coverage, nil
 }
@@ -645,8 +648,9 @@ type windowSchedule struct {
 type windowStats struct {
 	attempted int
 	decoded   int
-	// failed counts the windows that failed: a cut failure, or a window with
-	// no decoded piece and no refusal (a transport or provider failure).
+	// failed counts the windows that failed: a cut failure, a window with no
+	// decoded piece and no refusal (a transport or provider failure), or a
+	// decoded window that lost a piece (it also counts in decoded).
 	failed int
 	ranges []CoverageRange
 	// languages and refused are the §8.2.2 per-window records, populated only
@@ -719,6 +723,9 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		if wd.noSpeech != nil {
 			stats.noSpeech = append(stats.noSpeech, *wd.noSpeech)
 		}
+		if wd.piecesFailed {
+			stats.failed++
+		}
 		stats.decoded++
 		stats.ranges = append(stats.ranges, wd.covered...)
 		wd.report.first, wd.report.count = len(windows), len(wd.decoded)
@@ -783,8 +790,9 @@ func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath st
 	}
 	decoded, covered, results, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
 	wd := windowDecode{decoded: decoded, covered: covered, err: decodeErr,
-		report: windowReport{span: CoverageRange{StartMS: start, EndMS: end}}}
-	if decodeErr == nil && noSpeechResults(results) {
+		report:       windowReport{span: CoverageRange{StartMS: start, EndMS: end}},
+		piecesFailed: len(results) > 0 && len(results) < len(pieces)}
+	if decodedWithoutSpeech(pieces, results, decodeErr) {
 		// SPEC 0.95.0: a no-speech window reports no language, so the
 		// low-confidence re-decode rule does not read it.
 		wd.noSpeech = &core

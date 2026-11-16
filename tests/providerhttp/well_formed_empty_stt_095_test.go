@@ -29,6 +29,10 @@ func TestWellFormedEmptySTT(t *testing.T) {
 		{`{"segments":[{"start":0,"end":1}]}`, false},
 		{`{"segments":[{"start":0}]}`, false},
 		{`{"segments":[{"end":1}]}`, false},
+		// The millisecond keys that the ElevenLabs parser reads.
+		{`{"segments":[{"start_ms":1000}]}`, false},
+		{`{"segments":[{"end_ms":2000}]}`, false},
+		{`{"segments":[{"start_ms":1000,"text":""}]}`, true},
 		{`{"text":"","segments":[{"start":0,"end":1,"text":""},{"start":1,"end":2}]}`, false},
 		{`{}`, false},
 		{`null`, false},

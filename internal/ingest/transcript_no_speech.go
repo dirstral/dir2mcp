@@ -49,6 +49,8 @@ const noSpeechMarkerSuffix = ".nospeech"
 // coverage record) or a windowed decode in which every window decoded and none
 // was refused. A windowed decode with a failed or refused window is not this
 // outcome: the failure or the refusal is the story, and it keeps its own path.
+// A window that the payload cap split, and that lost one of its pieces, is a
+// failed window here: the lost piece can hold speech.
 func decodedNoSpeech(text string, coverage *TranscriptCoverage) bool {
 	if strings.TrimSpace(stripSegmentMarkers(text)) != "" {
 		return false
@@ -58,6 +60,7 @@ func decodedNoSpeech(text string, coverage *TranscriptCoverage) bool {
 	}
 	return coverage.WindowsAttempted > 0 &&
 		coverage.WindowsDecoded == coverage.WindowsAttempted &&
+		coverage.WindowsFailed == 0 &&
 		len(coverage.Refused) == 0
 }
 
@@ -109,10 +112,12 @@ func fallbackNoSpeech(relPath string, coverage *TranscriptCoverage, route *itemR
 		relPath, from)
 }
 
-// decodedWithoutSpeech reports whether a window's decode succeeded (err is nil)
-// and every piece of it is a no-speech result.
-func decodedWithoutSpeech(results []pieceResult, err error) bool {
-	return err == nil && noSpeechResults(results)
+// decodedWithoutSpeech reports whether a window's decode succeeded (err is nil),
+// every piece of the window has a result, and every result is a no-speech
+// result. A window with a piece that has no result is not a no-speech window,
+// also when a later step returned no error: the missing piece can hold speech.
+func decodedWithoutSpeech(pieces []windowPiece, results []pieceResult, err error) bool {
+	return err == nil && len(results) >= len(pieces) && noSpeechResults(results)
 }
 
 // noSpeechResults reports whether every decoded piece of a window came back
@@ -151,7 +156,13 @@ func (s *Service) settleNoSpeech(ctx context.Context, doc model.Document, tc tra
 	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
 		return false, false, "", err
 	}
-	s.recordNoSpeechIdentity(ctx, doc.RelPath)
+	// The record is what makes a later STT identity change decode the track
+	// again. A no-speech outcome with no record would be skipped on every
+	// later run, so a write that fails is an error: the document is retried,
+	// and the retry reads the cached decode.
+	if err := s.recordNoSpeechIdentity(ctx, doc.RelPath); err != nil {
+		return false, false, "", err
+	}
 	return false, false, model.SkipReasonNoSpeech, nil
 }
 
@@ -295,17 +306,19 @@ type settingsStore interface {
 }
 
 // recordNoSpeechIdentity stores the active STT derivation identity as the one
-// that found no speech in relPath. A failed write is logged: the cost is that an
-// identity change later does not re-decode this recording until its content
-// changes or it is reindexed with --force.
-func (s *Service) recordNoSpeechIdentity(ctx context.Context, relPath string) {
+// that found no speech in relPath. A failed write is returned: without the
+// record an identity change later would not decode this recording again
+// (SPEC §8.6.13), so the caller must not settle the no-speech outcome. A store
+// without the capability records nothing and returns nil.
+func (s *Service) recordNoSpeechIdentity(ctx context.Context, relPath string) error {
 	st, ok := s.store.(settingsStore)
 	if !ok {
-		return
+		return nil
 	}
 	if err := st.SetSetting(ctx, store.NoSpeechIdentitySettingKey(relPath), s.activeTranscriptIdentity()); err != nil {
-		s.getLogger().Printf("stt: record the no-speech derivation identity of %s: %v", relPath, err)
+		return fmt.Errorf("record the no-speech derivation identity of %s: %w", relPath, err)
 	}
+	return nil
 }
 
 // clearNoSpeechIdentity deletes the no-speech record of relPath. It runs at the
