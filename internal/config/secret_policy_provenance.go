@@ -105,7 +105,53 @@ func captureSecretPolicyProvenance(stateDir string) error {
 	if err != nil {
 		return err
 	}
-	return statefs.WriteFile(target, append(encoded, '\n'))
+	return createExclusive(target, append(encoded, '\n'))
+}
+
+// createExclusive writes data to path only when path does not exist. Two
+// commands can save their first snapshot at the same time (the Stat above is
+// only a fast path), and the one that loses must not replace the record of the
+// one that wins: after the first save the snapshot holds this release's lists,
+// which are not the provenance. A lost race is not an error.
+//
+// The record must also never be visible half written, because ingest and
+// retrieval read it. So the data goes to a temporary file first, and a hard
+// link publishes it: the link fails when path exists, and it shows the whole
+// content at once. Where the file system has no hard links, an exclusive
+// create (O_EXCL) is the fallback.
+func createExclusive(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, statefs.FileMode); err != nil {
+		return err
+	}
+	linkErr := os.Link(tmpName, path)
+	if linkErr == nil || errors.Is(linkErr, os.ErrExist) {
+		return nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, statefs.FileMode) //nolint:gosec // mode is statefs.FileMode
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func trimmedList(in []string) []string {

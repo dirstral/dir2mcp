@@ -3,6 +3,8 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -70,5 +72,86 @@ func TestSecretPolicyProvenance_NoneFromASnapshotWithoutSecretPatterns(t *testin
 	}
 	if _, ok, err := config.PreviousSecretPolicy(stateDir); err != nil || ok {
 		t.Fatalf("PreviousSecretPolicy after a second save = (ok=%v, %v), want no provenance", ok, err)
+	}
+}
+
+// TestSecretPolicyProvenance_RacingFirstSavesKeepOneRecord pins the exclusive
+// create: many first saves at the same time leave the record of the old
+// snapshot, never the lists of this release, and never a half-written file.
+func TestSecretPolicyProvenance_RacingFirstSavesKeepOneRecord(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		stateDir := testutil.TempDir(t)
+		cfg := config.Default()
+		cfg.RootDir = testutil.TempDir(t)
+		cfg.StateDir = stateDir
+		old := "secret_patterns:\n  - 'MYCORP-[0-9]{4}'\n"
+		if err := os.WriteFile(filepath.Join(stateDir, config.EffectiveConfigSnapshotFile), []byte(old), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const savers = 8
+		var wg sync.WaitGroup
+		errs := make(chan error, savers)
+		start := make(chan struct{})
+		for i := 0; i < savers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{})
+				errs <- err
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: SaveEffectiveSnapshot: %v", round, err)
+			}
+		}
+		prov, ok, err := config.PreviousSecretPolicy(stateDir)
+		if err != nil {
+			t.Fatalf("round %d: PreviousSecretPolicy: %v", round, err)
+		}
+		// Each saver publishes its record before it replaces the snapshot. So
+		// the saver that wins read the snapshot before any saver replaced it,
+		// and the record holds the old list.
+		if !ok || len(prov.Secret) != 1 || prov.Secret[0] != "MYCORP-[0-9]{4}" || len(prov.Allow) != 0 {
+			t.Fatalf("round %d: provenance = (%+v, ok=%v), want the old list", round, prov, ok)
+		}
+		entries, err := os.ReadDir(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".tmp") {
+				t.Fatalf("round %d: temporary file %s was left in the state directory", round, e.Name())
+			}
+		}
+	}
+}
+
+// TestSecretPolicyProvenance_ExistingRecordIsNeverReplaced pins that a save
+// does not replace a record that exists, also when the fast-path check is
+// raced: the record is written by hand first, and the old snapshot holds a
+// different list.
+func TestSecretPolicyProvenance_ExistingRecordIsNeverReplaced(t *testing.T) {
+	stateDir := testutil.TempDir(t)
+	cfg := config.Default()
+	cfg.RootDir = testutil.TempDir(t)
+	cfg.StateDir = stateDir
+	record := `{"secret":["FIRST-[0-9]+"],"allow":[],"source":".dir2mcp.yaml.snapshot"}` + "\n"
+	if err := os.WriteFile(filepath.Join(stateDir, config.SecretPolicyProvenanceFile), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, config.EffectiveConfigSnapshotFile), []byte("secret_patterns:\n  - 'SECOND-[0-9]+'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{}); err != nil {
+		t.Fatalf("SaveEffectiveSnapshot: %v", err)
+	}
+	prov, ok, err := config.PreviousSecretPolicy(stateDir)
+	if err != nil || !ok || len(prov.Secret) != 1 || prov.Secret[0] != "FIRST-[0-9]+" {
+		t.Fatalf("provenance = (%+v, %v, %v), want the first record", prov, ok, err)
 	}
 }

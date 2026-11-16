@@ -59,13 +59,15 @@ func TestSecretDefaults_SpecFixtures(t *testing.T) {
 		"id_token":                 "id_" + strings.ToLower(tok) + ": " + fakeRun(30),
 		"OPENAI_API_KEY":           "OPENAI_API_KEY=s" + "k-proj-" + fakeRun(40),
 		"redirect plus credential": redirect + fakeRun(24) + " GITHUB_" + tok + "=" + fakeRun(40),
-		"credential after ; in the redirect value": redirect + "abc;GITHUB_" + tok + "=" + fakeRun(40),
-		"credential after ? in the redirect value": redirect + "abc?GITHUB_" + tok + "=" + fakeRun(40),
-		"credential after : in the redirect value": redirect + "abc,GITHUB_" + tok + ":" + fakeRun(40),
-		"match that starts inside a cancelled one": redirect + strings.Repeat("A", 20) + "GITHUB_" + tok + "=" + strings.Repeat("B", 20),
-		"AWS key inside the redirect value":        redirect + "AK" + "IA" + fakeUpperRun(16),
-		"pagination name on another host":          "https://example.org/list?page_" + strings.ToLower(tok) + "=" + fakeRun(24),
-		"redir_token name on another host":         "https://example.org/x?redir_" + strings.ToLower(tok) + "=" + fakeRun(24),
+		"credential after ; in the redirect value":    redirect + "abc;GITHUB_" + tok + "=" + fakeRun(40),
+		"credential after ? in the redirect value":    redirect + "abc?GITHUB_" + tok + "=" + fakeRun(40),
+		"credential after : in the redirect value":    redirect + "abc,GITHUB_" + tok + ":" + fakeRun(40),
+		"match that starts inside a cancelled one":    redirect + strings.Repeat("A", 20) + "GITHUB_" + tok + "=" + strings.Repeat("B", 20),
+		"AWS key inside the redirect value":           redirect + "AK" + "IA" + fakeUpperRun(16),
+		"pagination name on another host":             "https://example.org/list?page_" + strings.ToLower(tok) + "=" + fakeRun(24),
+		"redir_token name on another host":            "https://example.org/x?redir_" + strings.ToLower(tok) + "=" + fakeRun(24),
+		"credential in another parameter of the link": "https://www.youtube.com/redirect?GITHUB_" + tok + "=" + fakeRun(24) + "&redir_" + strings.ToLower(tok) + "=short",
+		"link inside the path of another URL":         "https://evil.example/" + redirect + fakeRun(24),
 	}
 	for name, sample := range mustHit {
 		if !m.MatchString(sample) {
@@ -79,6 +81,11 @@ func TestSecretDefaults_SpecFixtures(t *testing.T) {
 		// does the generic token match, so the allow match still covers it.
 		"redirect link with base64 padding": redirect + "QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4MTIz==&q=https%3A%2F%2Fexample.org",
 		"URL slug":                          "https://example.org/news/krasnoyar" + "s" + "k-podpisanie-dogovorov-o-sotrudnichestve",
+		"redirect link after a newline":     "see the source\n" + redirect + fakeRun(24) + "&q=x",
+		"redirect link in angle brackets":   "<" + redirect + fakeRun(24) + ">",
+		"redirect link in a markdown link":  "[link](" + redirect + fakeRun(24) + ")",
+		"redirect link in double quotes":    `href="` + redirect + fakeRun(24) + `"`,
+		"redirect link in single quotes":    "href='" + redirect + fakeRun(24) + "'",
 	}
 	for name, sample := range mustNotHit {
 		if m.MatchString(sample) {
@@ -146,6 +153,43 @@ func TestSecretAllow_CancelsOnlyTheGenericTokenRule(t *testing.T) {
 	}
 	if !none.MatchString("feature_" + tok + "=" + fakeRun(30)) {
 		t.Error("an empty allow list cancelled a match")
+	}
+}
+
+// TestSecretAllow_FirstCaptureGroupIsTheCover pins the cover rule (SPEC §7.2,
+// spec 0.93.0): with a capture group, only the first group cancels and the
+// rest of the match is required context; with no group, the whole match
+// cancels; (?:...) groups do not narrow the cover; a first group that took no
+// part in the match cancels nothing.
+func TestSecretAllow_FirstCaptureGroupIsTheCover(t *testing.T) {
+	tok := "to" + "ken"
+	value := fakeRun(30)
+	text := "ctx feature_" + tok + "=" + value + " end"
+	cases := []struct {
+		name  string
+		allow string
+		text  string
+		want  bool
+	}{
+		{"no group: the whole match covers", `ctx feature_` + tok + `=[A-Za-z0-9]+`, text, false},
+		{"group covers the assignment", `ctx (feature_` + tok + `=[A-Za-z0-9]+)`, text, false},
+		{"context is required", `other (feature_` + tok + `=[A-Za-z0-9]+)`, text, true},
+		{"group that covers only the context cancels nothing", `(ctx )feature_` + tok + `=[A-Za-z0-9]+`, text, true},
+		{"group that covers only a part of the match", `ctx feature_(` + tok + `=[A-Za-z0-9]{10})`, text, true},
+		{"non-capturing group does not narrow the cover", `(?:ctx )feature_` + tok + `=[A-Za-z0-9]+`, text, false},
+		{"only the first group is the cover", `(ctx )(feature_` + tok + `=[A-Za-z0-9]+)`, text, true},
+		{"first group took no part in the match", `(nomatch)?ctx feature_` + tok + `=[A-Za-z0-9]+`, text, true},
+		{"a credential in the context is not covered", `ctx \S+ (feature_` + tok + `=[A-Za-z0-9]+)`,
+			"ctx GITHUB_" + strings.ToUpper(tok) + "=" + fakeRun(24) + " feature_" + tok + "=" + value, true},
+	}
+	for _, tc := range cases {
+		m, err := secretmatch.Compile([]string{secretmatch.GenericTokenPattern}, []string{tc.allow})
+		if err != nil {
+			t.Fatalf("%s: compile: %v", tc.name, err)
+		}
+		if got := m.MatchString(tc.text); got != tc.want {
+			t.Errorf("%s: match = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

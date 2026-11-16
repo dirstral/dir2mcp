@@ -224,7 +224,9 @@ func TestSecretAllow_OpenFileReadBoundaries(t *testing.T) {
 	const boundary = 64 << 10
 	build := func(payload string, offset int) []byte {
 		pad := strings.Repeat("plain archive text line\n", (boundary+4096)/24)
-		body := []byte(pad[:boundary-offset] + payload + "\n" + pad)
+		// The payload follows a space: the default allow pattern releases a
+		// redirect link only at the start of the text or after a delimiter.
+		body := []byte(pad[:boundary-offset-1] + " " + payload + "\n" + pad)
 		return body
 	}
 	credential := "GITHUB_" + strings.ToUpper(tok) + "=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv"

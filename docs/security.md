@@ -61,7 +61,7 @@ the `redir_token=` parameter of a YouTube redirect link that a video
 description pastes. `security.secret_allow_patterns` releases such text. The
 default list holds one pattern:
 
-`(?i)https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?redir_token=[^\s&#;?=:<>"]*`
+`(?i)(?:^|[\s"'<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?(redir_token=[^\s&#;?=:<>"]*)`
 
 It names the host and the path, not only the parameter. A parameter name
 alone does not show that its value is not a credential, so the default trusts
@@ -69,14 +69,32 @@ no name outside that one link. To release another benign parameter (for
 example a pagination cursor of an API you use), add your own pattern, anchored
 to its host.
 
+**The cover.** An allow pattern has a cover, and only the cover cancels:
+
+- When the pattern has a capture group, the cover is the text of its **first**
+  capture group. The rest of the match is context: it must be present, but it
+  cancels nothing.
+- When the pattern has no capture group, the cover is the whole match.
+- Use `(?:...)` for a group that must not narrow the cover. A plain `(...)`
+  that comes first becomes the cover, also when you wrote it only to group an
+  alternative. Then the pattern can cancel less than you expect, never more.
+- A first group that takes no part in a match (an optional group, or a group
+  in an alternative that did not match) gives that match no cover.
+
+The default pattern uses this. Its context is the start of a YouTube redirect
+URL. The URL must begin the text or follow a space, a line break, a quote, an
+angle bracket, `(` or `[`, so the link is not a part of the path of another
+URL. Its cover is only the `redir_token` assignment, so a credential in
+another parameter of the same link is not cancelled.
+
 dir2mcp finds every match of every secret pattern. It looks at every start
 position, so a match that starts inside a cancelled match is still found and
-judged on its own. An allow match cancels a match of the generic token rule
-when it covers it: the allow match starts at or before the start of the secret
-match and ends at or after its end. An allow match never cancels a match of
-any other rule (an AWS key, an `sk-` key, your own rule), also when it covers
-it. A text is withheld when at least one secret match is left. So, for a
-YouTube redirect link:
+judged on its own. A cover cancels a match of the generic token rule when it
+covers it: the cover starts at or before the start of the secret match and
+ends at or after its end. A cover never cancels a match of any other rule (an
+AWS key, an `sk-` key, your own rule), also when it covers it. A text is
+withheld when at least one secret match is left. So, for a YouTube redirect
+link:
 
 - A redirect link alone does not withhold a document.
 - A redirect link and a real credential in one document withhold it.
@@ -88,6 +106,10 @@ YouTube redirect link:
 - `redir_token=<20 characters>GITHUB_TOKEN=...` withholds it: the second
   assignment starts inside the cancelled match and is judged on its own.
 - `redir_token=AKIA...` withholds it: an allow match never cancels an AWS key.
+- `youtube.com/redirect?GITHUB_TOKEN=...&redir_token=x` withholds it: only
+  the `redir_token` assignment is covered.
+- `https://evil.example/https://www.youtube.com/redirect?...&redir_token=...`
+  withholds it: the link is inside the path of another URL.
 - `page_token=...` or `redir_token=...` on any other host withholds it.
 
 The allow list applies wherever the secret patterns apply: source bytes,

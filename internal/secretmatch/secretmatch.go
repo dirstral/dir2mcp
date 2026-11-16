@@ -10,9 +10,11 @@
 // cancel only a match of the generic bearer-token default (GenericTokenPattern);
 // a match of any other secret pattern (an AWS key, an sk- key, an operator
 // pattern) is never cancelled, also when an allow match covers it. A generic
-// token match is cancelled when an allow match in the same text covers it: the
-// allow match starts at or before the start of the secret match and ends at or
-// after its end. The text matches when at least one secret match is not
+// token match is cancelled when the cover of an allow match in the same text
+// covers it: the cover starts at or before the start of the secret match and
+// ends at or after its end. The cover is the first capture group of the allow
+// pattern when it has one (the rest of the match is required context), and the
+// whole match when it has none. The text matches when at least one secret match is not
 // cancelled. A generic token match is judged at every start position, so a
 // match that starts inside a cancelled match is still judged on its own. So an
 // allow pattern releases only the text it covers, and a text that holds a
@@ -188,16 +190,31 @@ func (m *Matcher) cancellable(rx *regexp.Regexp) bool {
 	return len(m.allow) > 0 && rx.String() == GenericTokenPattern
 }
 
-// allowSpans returns every match of every allow pattern in text.
+// allowSpans returns the cover of every match of every allow pattern in text
+// (SPEC §7.2, spec 0.93.0). The cover of a match is the text of the first
+// capture group of the pattern when it has one, and the whole match when it
+// has none. The rest of the match is context: it must be present, but it
+// cancels nothing. A match whose first group took no part in it (an optional
+// group, or a group in an alternative that did not match) has no cover and
+// cancels nothing.
 func (m *Matcher) allowSpans(text []byte) [][]int {
 	var spans [][]int
 	for _, rx := range m.allow {
-		spans = append(spans, rx.FindAllIndex(text, -1)...)
+		if rx.NumSubexp() == 0 {
+			spans = append(spans, rx.FindAllIndex(text, -1)...)
+			continue
+		}
+		for _, loc := range rx.FindAllSubmatchIndex(text, -1) {
+			if loc[2] < 0 || loc[3] < 0 {
+				continue
+			}
+			spans = append(spans, []int{loc[2], loc[3]})
+		}
 	}
 	return spans
 }
 
-// coverIndex answers "does ONE allow span cover [start, end)?" in O(log n).
+// coverIndex answers "does ONE allow cover span cover [start, end)?" in O(log n).
 //
 // The spans are sorted by start once. maxEnd[i] is the largest end among the
 // spans 0..i, so for a secret match at start, maxEnd at the last span with

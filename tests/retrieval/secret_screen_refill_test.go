@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -134,5 +135,49 @@ func TestSecretScreen_AskChecksTheTrimmedPromptText(t *testing.T) {
 	}
 	if strings.Contains(gen.lastPrompt, tok+"=AAAA") {
 		t.Fatalf("the prompt holds the chunk that matches once trimmed:\n%s", gen.lastPrompt)
+	}
+}
+
+// TestSecretScreen_FallbackAnswerChecksTheTrimmedSnippet pins the ask path
+// with no generator (and so the path after a generator failure): the fallback
+// answer trims and cuts each snippet, so a snippet that passes as stored but
+// matches once trimmed must not appear in it.
+func TestSecretScreen_FallbackAnswerChecksTheTrimmedSnippet(t *testing.T) {
+	tok := "to" + "ken"
+	chunk := " " + tok + "=" + strings.Repeat("A", 24) + " "
+	allow := []string{`^ ` + tok + `=A+ $`}
+	for _, withGenerator := range []bool{false, true} {
+		idx := index.NewHNSWIndex("")
+		addVec(t, idx, 1, []float32{1, 0})
+		addVec(t, idx, 2, []float32{0.9, 0.1})
+		st := &fullTextStore{text: map[uint64]string{1: chunk, 2: "clean notes about the bridge"}}
+		var gen model.Generator
+		if withGenerator {
+			gen = &fakeGenerator{err: errors.New("generator down")}
+		}
+		svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+			"mistral-embed": {1, 0},
+		}}, gen)
+		if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+			t.Fatalf("SetSecretPolicy: %v", err)
+		}
+		svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: chunk})
+		svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "clean notes"})
+
+		res, err := svc.Ask(context.Background(), "what do the notes say", model.SearchQuery{K: 2, Index: "text"})
+		if err != nil {
+			t.Fatalf("Ask (generator=%v): %v", withGenerator, err)
+		}
+		if strings.Contains(res.Answer, tok+"=AAAA") {
+			t.Fatalf("the fallback answer (generator=%v) holds the snippet that matches once trimmed:\n%s", withGenerator, res.Answer)
+		}
+		if !strings.Contains(res.Answer, "clean notes") {
+			t.Fatalf("the fallback answer (generator=%v) lost the clean snippet:\n%s", withGenerator, res.Answer)
+		}
+		for _, hit := range res.Hits {
+			if strings.Contains(strings.TrimSpace(hit.Snippet), tok+"=AAAA") {
+				t.Fatalf("ask returned the hit whose snippet matches once trimmed (generator=%v)", withGenerator)
+			}
+		}
 	}
 }

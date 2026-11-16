@@ -427,7 +427,7 @@ security:
     - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
     - 'MYCORP-[A-Z0-9]{24}'   # your own rule
   secret_allow_patterns:
-    - '(?i)https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?redir_token=[^\s&#;?=:<>"]*'
+    - '(?i)(?:^|[\s"''<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?(redir_token=[^\s&#;?=:<>"]*)'
 ```
 
 These are the spec 0.93.0 defaults. The generic token rule is broad on
@@ -437,14 +437,21 @@ credential keys of every provider (`GITHUB_TOKEN`, `VERCEL_TOKEN`,
 to start a word, so a URL slug such as `krasnoyarsk-...` is not a key.
 
 `secret_allow_patterns` lists text that looks like a credential but is not
-one. An allow match cancels a match of the generic token rule that it covers
-(starts at or before it and ends at or after it). It never cancels a match of
-any other rule, also when it covers it. A text is withheld when at least one
+one. Each allow match has a cover: the text of the first capture group of the
+pattern when it has one, and the whole match when it has none. The rest of the
+match is context that must be present but cancels nothing. Use `(?:...)` for a
+group that must not narrow the cover. A cover cancels a match of the generic
+token rule that it covers (starts at or before it and ends at or after it). It
+never cancels a match of any other rule, also when it covers it. In a
+single-quoted YAML string, write a single quote twice (`''`), as the default
+above does. A text is withheld when at least one
 match is left. dir2mcp looks at every start position, so a match that starts
 inside a cancelled match is judged on its own. The default allow pattern
 releases only the `redir_token=` parameter of a YouTube redirect link
-(`youtube.com/redirect`): a parameter name alone does not show that its value
-is not a credential. Add your own pattern, anchored to its host, for another
+(`youtube.com/redirect`) that begins the text or follows a space, a quote, an
+angle bracket, `(` or `[`: a parameter name alone does not show that its value
+is not a credential, and a credential in another parameter of the link is not
+covered. Add your own pattern, anchored to its host, for another
 benign parameter. The default value stops at `&`, `#`, `;`, `?`, `=`, `:`, a
 space, a quote or an angle bracket, so a credential in the next parameter or in
 a second assignment is still found. An empty list cancels nothing. An allow pattern that is not a valid

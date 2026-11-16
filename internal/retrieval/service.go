@@ -2395,7 +2395,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		return abstained, nil
 	}
 
-	answer := buildFallbackAnswer(question, hits)
+	s.metaMu.RLock()
+	fallbackMatcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	answer := buildFallbackAnswer(question, hits, fallbackMatcher)
 	// faithfulness is the #336 answer-level verdict. It stays Unchecked on
 	// every path that does not verify, which §9.4.4 defines as "no judgement"
 	// rather than as a weak pass.
@@ -3336,12 +3339,15 @@ func (s *Service) screenSecretHits(ctx context.Context, hits []model.SearchHit) 
 	kept := hits[:0]
 	dropped := 0
 	for _, hit := range hits {
-		if matcher.MatchString(hit.Snippet) {
+		// A text is checked as it is and trimmed: later steps trim a snippet
+		// or a chunk text before they return it, and a trim changes what an
+		// anchored allow pattern can cover.
+		if matchesAsIsOrTrimmed(matcher, hit.Snippet) {
 			dropped++
 			continue
 		}
 		if fetcher != nil && hit.ChunkID != 0 {
-			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil && matcher.MatchString(task.Text) {
+			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil && matchesAsIsOrTrimmed(matcher, task.Text) {
 				dropped++
 				continue
 			}
@@ -4519,7 +4525,22 @@ func LooksLikeCodeQuery(query string) bool {
 	return indicators >= 2
 }
 
-func buildFallbackAnswer(question string, hits []model.SearchHit) string {
+// matchesAsIsOrTrimmed reports whether text matches the secret policy as it
+// is or once its surrounding space is removed.
+func matchesAsIsOrTrimmed(matcher *secretmatch.Matcher, text string) bool {
+	if matcher.MatchString(text) {
+		return true
+	}
+	trimmed := strings.TrimSpace(text)
+	return trimmed != text && matcher.MatchString(trimmed)
+}
+
+// buildFallbackAnswer lists the retrieved snippets as the answer when no
+// generator produced one. Each snippet is trimmed and cut to 300 characters,
+// and both steps can change what an allow pattern covers, so the snippet is
+// checked against the secret policy in the form the answer carries (SPEC §7.2,
+// spec 0.93.0). A snippet that matches is left out of the answer.
+func buildFallbackAnswer(question string, hits []model.SearchHit, matcher *secretmatch.Matcher) string {
 	if len(hits) == 0 {
 		return "No relevant context found in the indexed corpus."
 	}
@@ -4542,6 +4563,9 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 		}
 		h := hits[p]
 		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
+		if matcher.MatchString(snippet) {
+			snippet = "(snippet withheld)"
+		}
 		if snippet == "" {
 			snippet = "(no snippet)"
 		}
