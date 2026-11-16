@@ -3958,7 +3958,24 @@ func contentSample(content []byte) []byte {
 	return content[:secretScanSampleBytes]
 }
 
+// activeRelPathLister is a store that lists the active documents' paths in one
+// query (#1176), instead of the OFFSET-paged ListFiles walk below.
+type activeRelPathLister interface {
+	ListActiveRelPaths(ctx context.Context) ([]string, error)
+}
+
 func (s *Service) listActiveDocuments(ctx context.Context) (map[string]struct{}, error) {
+	if lister, ok := s.store.(activeRelPathLister); ok {
+		paths, err := lister.ListActiveRelPaths(ctx)
+		if err != nil {
+			return nil, err
+		}
+		active := make(map[string]struct{}, len(paths))
+		for _, p := range paths {
+			active[p] = struct{}{}
+		}
+		return active, nil
+	}
 	active := make(map[string]struct{})
 	const pageSize = 500
 
