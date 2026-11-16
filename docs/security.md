@@ -61,7 +61,7 @@ the `redir_token=` parameter of a YouTube redirect link that a video
 description pastes. `security.secret_allow_patterns` releases such text. The
 default list holds one pattern:
 
-`(?i)(?:^|[\s"'<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?(redir_token=[^\s&#;?=:<>"]*)`
+`(?i)(?:^|[\s"'<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"']*&)*?(redir_token=[^\s&#;?=:<>"']*)`
 
 It names the host and the path, not only the parameter. A parameter name
 alone does not show that its value is not a credential, so the default trusts
@@ -105,6 +105,9 @@ link:
   covers a second assignment.
 - `redir_token=<20 characters>GITHUB_TOKEN=...` withholds it: the second
   assignment starts inside the cancelled match and is judged on its own.
+- `'https://youtube.com/redirect?x=1'&redir_token=...` withholds it: the
+  parameters and the value stop at a single or double quote, so an assignment
+  after the closing quote of a quoted link is not covered.
 - `redir_token=AKIA...` withholds it: an allow match never cancels an AWS key.
 - `youtube.com/redirect?GITHUB_TOKEN=...&redir_token=x` withholds it: only
   the `redir_token` assignment is covered.

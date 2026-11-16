@@ -427,7 +427,7 @@ security:
     - '[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}'
     - 'MYCORP-[A-Z0-9]{24}'   # your own rule
   secret_allow_patterns:
-    - '(?i)(?:^|[\s"''<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?(redir_token=[^\s&#;?=:<>"]*)'
+    - '(?i)(?:^|[\s"''<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"'']*&)*?(redir_token=[^\s&#;?=:<>"'']*)'
 ```
 
 These are the spec 0.95.0 defaults. The generic token rule is broad on
@@ -453,7 +453,7 @@ angle bracket, `(` or `[`: a parameter name alone does not show that its value
 is not a credential, and a credential in another parameter of the link is not
 covered. Add your own pattern, anchored to its host, for another
 benign parameter. The default value stops at `&`, `#`, `;`, `?`, `=`, `:`, a
-space, a quote or an angle bracket, so a credential in the next parameter or in
+space, a single or double quote or an angle bracket, so a credential in the next parameter or in
 a second assignment is still found. An empty list cancels nothing. An allow pattern that is not a valid
 regular expression is a `CONFIG_INVALID` error, as a secret pattern is.
 

@@ -178,3 +178,29 @@ func TestSecretScreen_OpenFileRefusesTheSameText(t *testing.T) {
 		t.Fatal("MatchesSecret matches clean text")
 	}
 }
+
+// TestSecretScreen_DefaultAllowStopsAtASingleQuote pins the single quote in
+// both character classes of the default allow pattern (SPEC §7.2, spec
+// 0.95.0), on the screen every tool uses. Without it, the parameters of a
+// single-quoted link ran through the closing quote, and an assignment after
+// the quoted link was cancelled.
+func TestSecretScreen_DefaultAllowStopsAtASingleQuote(t *testing.T) {
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	tok := "to" + "ken"
+	value := strings.Repeat("A", 24)
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"assignment after a quoted link is withheld", "'https://youtube.com/redirect?x=1'&redir_" + tok + "=" + value, true},
+		{"single-quoted link is released", "'https://www.youtube.com/redirect?event=x&redir_" + tok + "=" + value + "'", false},
+		{"the value stops at a single quote", "https://www.youtube.com/redirect?event=x&redir_" + tok + "=abc'GITHUB_" + strings.ToUpper(tok) + "=" + value, true},
+		{"the value stops at a single quote, then a clean tail", "https://www.youtube.com/redirect?event=x&redir_" + tok + "=" + value + "' and more text", false},
+	}
+	for _, tc := range cases {
+		if got := svc.MatchesSecret(tc.text); got != tc.want {
+			t.Errorf("%s: MatchesSecret(%q) = %v, want %v", tc.name, tc.text, got, tc.want)
+		}
+	}
+}

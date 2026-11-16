@@ -33,7 +33,7 @@ func TestSecretAllowPatterns_DefaultRoundTrips(t *testing.T) {
 	}
 
 	yaml := "security:\n  secret_allow_patterns:\n" +
-		`    - '(?i)(?:^|[\s"''<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"]*&)*?(redir_token=[^\s&#;?=:<>"]*)'` + "\n"
+		`    - '(?i)(?:^|[\s"''<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"'']*&)*?(redir_token=[^\s&#;?=:<>"'']*)'` + "\n"
 	file := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
 	if err := os.WriteFile(file, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
