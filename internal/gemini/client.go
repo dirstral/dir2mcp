@@ -574,6 +574,29 @@ type geminiPart struct {
 	InlineData *geminiInlineData `json:"inlineData,omitempty"`
 }
 
+// UnmarshalJSON decodes a response part. A text field that is present must be
+// a JSON string: encoding/json would leave the Go string empty for a null and
+// report no error, and an empty text is a no-speech result (SPEC §8.2). A
+// present text of another type (null, a number, an object) makes the response
+// malformed. An absent text field and an empty string decode as before.
+func (p *geminiPart) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		Text       json.RawMessage   `json:"text"`
+		InlineData *geminiInlineData `json:"inlineData"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	p.Text, p.InlineData = "", aux.InlineData
+	if len(aux.Text) == 0 {
+		return nil
+	}
+	if aux.Text[0] != '"' {
+		return errors.New("gemini response part: text is present and is not a string")
+	}
+	return json.Unmarshal(aux.Text, &p.Text)
+}
+
 type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }

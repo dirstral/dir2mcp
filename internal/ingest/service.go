@@ -6270,6 +6270,10 @@ func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document
 	if len(ids) == 0 {
 		return nil
 	}
+	// §8.6.13: the summaries derived from a retired transcript go with it
+	// (§8.6.7). A summary that stayed live would keep answering from text the
+	// document no longer has.
+	ids = append(ids, summariesOfRepresentations(reps, ids)...)
 	retired, err := retirer.SoftDeleteRepresentations(ctx, doc.RelPath, ids)
 	if err != nil {
 		return fmt.Errorf("retire %d stale transcript representation(s) of %s: %w",
@@ -6278,6 +6282,31 @@ func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document
 	s.getLogger().Printf("partial transcript: retired %d stale transcript representation(s) of %s%s, so the refused transcript stops answering queries (SPEC §8.6.13)",
 		retired, doc.RelPath, trackSuffixForLog(tc))
 	return nil
+}
+
+// summariesOfRepresentations returns the ids of the active summary
+// representations whose coverage names one of sourceIDs as its source
+// representation (SPEC §5.2 coverage.source_rep_id). A summary with meta that
+// does not parse is left alone.
+func summariesOfRepresentations(reps []store.RepresentationRow, sourceIDs []int64) []int64 {
+	sources := make(map[int64]struct{}, len(sourceIDs))
+	for _, id := range sourceIDs {
+		sources[id] = struct{}{}
+	}
+	var out []int64
+	for _, rep := range reps {
+		if !model.IsSummaryRepType(rep.RepType) {
+			continue
+		}
+		var meta model.SummaryMeta
+		if err := json.Unmarshal([]byte(rep.MetaJSON), &meta); err != nil {
+			continue
+		}
+		if _, ok := sources[meta.Coverage.SourceRepID]; ok {
+			out = append(out, rep.RepID)
+		}
+	}
+	return out
 }
 
 // warnPartialTranscript emits the §8.6.13 `warn` signal for a transcript that is

@@ -31,6 +31,8 @@ func TestTranscribe_EmptyGeneratedTextIsNoSpeech(t *testing.T) {
 		"whitespace text": `{"candidates":[{"content":{"parts":[{"text":" \n\t "}]},"finishReason":"STOP"}]}`,
 		"no parts":        `{"candidates":[{"content":{"role":"model"},"finishReason":"STOP"}]}`,
 		"no finishReason": `{"candidates":[{"content":{"parts":[{"text":""}]}}]}`,
+		// A part with no text field is as before: no generated text.
+		"part with no text field": `{"candidates":[{"content":{"parts":[{}]},"finishReason":"STOP"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			text, err := newClient(geminiSTTServer(t, body).URL).Transcribe(context.Background(), "music.mp3", []byte("audio"))
@@ -60,6 +62,10 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 		"empty candidate":  `{"candidates":[{}]}`,
 		"no content, STOP": `{"candidates":[{"finishReason":"STOP"}]}`,
 		"null content":     `{"candidates":[{"content":null,"finishReason":"STOP"}]}`,
+		// A text field that is present and is not a JSON string is malformed.
+		"null text":   `{"candidates":[{"content":{"parts":[{"text":null}]},"finishReason":"STOP"}]}`,
+		"number text": `{"candidates":[{"content":{"parts":[{"text":7}]},"finishReason":"STOP"}]}`,
+		"object text": `{"candidates":[{"content":{"parts":[{"text":{}}]},"finishReason":"STOP"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := newClient(geminiSTTServer(t, body).URL).Transcribe(context.Background(), "music.mp3", []byte("audio"))

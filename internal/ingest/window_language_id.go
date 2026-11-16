@@ -244,6 +244,14 @@ func (s *Service) fallThroughCandidates(ctx context.Context, relPath string, pie
 			return nil, cand, windowVerdict{}, derr
 		}
 		results, cur = r, cand
+		if decodedWithoutSpeech(pieces, r, derr) {
+			// SPEC §8.2: a complete decode that found no speech reports no
+			// language, so it is not judged against the candidate's declared
+			// coverage and the walk stops here. Otherwise the outcome would
+			// depend on the candidate order: a later candidate that fails would
+			// turn this no-speech window into a failed window.
+			return results, cur, windowVerdict{covered: true}, nil
+		}
 		v = s.judgeWindow(results, cur, lang, core)
 	}
 	return results, cur, v, nil

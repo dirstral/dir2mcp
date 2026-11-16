@@ -14,6 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -223,5 +224,197 @@ func TestNoSpeech_DerivationPassSkipsANoSpeechTrack(t *testing.T) {
 	}
 	if snap := state.Snapshot(); snap.Errors != 0 {
 		t.Errorf("run errors = %d, want 0: a no-speech track is not a translation failure", snap.Errors)
+	}
+}
+
+// TestNoSpeech_BracketedTextIsNotATimestampMarker: the merge drops a window
+// with no text, and a line that is only a timestamp marker is no text. A
+// bracketed line that is not a timestamp ("[hello]", "[music]") is text, as
+// the segment parser reads it, so the merge keeps that window.
+//
+// Mutant killed: removing every leading bracketed token before the text test,
+// which drops the window and returns an empty transcript.
+func TestNoSpeech_BracketedTextIsNotATimestampMarker(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, text string
+		wantText   bool
+	}{
+		{"bracketed word", "[hello]", true},
+		{"bracketed word after a marker", "[00:05] [music]", true},
+		{"bracketed sound tag", "[music]", true},
+		{"timestamp marker only", "[00:10]", false},
+		{"sub-second marker only", "[00:10.500]", false},
+		{"blank", "  \n ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, _ := ingest.MergeTranscriptWindows([]ingest.TranscriptWindow{{StartMS: 0, Res: model.TranscriptResult{Text: tc.text}}}, 590_000)
+			if got := strings.TrimSpace(text) != ""; got != tc.wantText {
+				t.Fatalf("merged text of %q = %q, want text=%v", tc.text, text, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestNoSpeech_FailedPieceOfASingleWindowIsNotNoSpeech: a short recording over
+// the provider cap is one scheduled window, and the cap splits it into two
+// pieces. One piece fails and the other holds no speech. A decode of one
+// window records no coverage, so the failed count must not be lost: the
+// recording is a failure that is retried, not a no-speech recording. With no
+// failed piece it is a no-speech recording.
+//
+// Mutant killed: reading the empty text of a one-window decode with no
+// coverage record as a successful no-speech decode.
+func TestNoSpeech_FailedPieceOfASingleWindowIsNotNoSpeech(t *testing.T) {
+	t.Parallel()
+	for _, failed := range []bool{true, false} {
+		failed := failed
+		name := "both pieces silent"
+		if failed {
+			name = "one piece failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const totalMS = 20 * 1000
+			content := make([]byte, 300_000)
+			tr := &cappedSilentTranscriber{limit: 200_000}
+			if failed {
+				tr.failAt = map[int]error{1: windowProviderFailure}
+			}
+			h := newWindowSTTHarness(t, &windowRecordingTranscriber{}, totalMS, content)
+			h.svc.SetTranscriber(tr)
+			h.svc.SetSTTIdentity("whisper", "large-v3")
+
+			err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/jingle.m4a"), content)
+			if !strings.Contains(h.logs.String(), "/1 windows decoded") || tr.calls != 2 {
+				t.Fatalf("want one scheduled window sent as two pieces, got %d request(s):\n%s", tr.calls, h.logs.String())
+			}
+			settled := strings.Contains(h.logs.String(), "so no transcript is produced")
+			if !failed {
+				if err != nil || !settled {
+					t.Fatalf("both pieces silent: err=%v, no-speech settled=%v, want a no-speech recording\n%s", err, settled, h.logs.String())
+				}
+				return
+			}
+			if settled {
+				t.Fatalf("a recording with a failed piece was settled as no speech:\n%s", h.logs.String())
+			}
+			if !errors.Is(err, ingest.ErrTranscriptProviderFailure) {
+				t.Fatalf("err = %v, want a transcript provider failure", err)
+			}
+		})
+	}
+}
+
+// TestNoSpeech_SilentCandidateDoesNotDependOnCandidateOrder: a route candidate
+// that does not declare the window's language can stay in the candidate list.
+// Window 1: the first candidate decodes a loop that the gate refuses,
+// and the next candidate finds no speech. A no-speech result reports no
+// language, so it is not judged against that candidate's coverage: the window
+// is a no-speech window whether the silent candidate is the last one or a
+// failing candidate follows it. The failing candidate is not asked.
+//
+// Mutant killed: judging the silent decode as language_uncovered, which walks
+// on to the failing candidate and turns the window into a failed window.
+func TestNoSpeech_SilentCandidateDoesNotDependOnCandidateOrder(t *testing.T) {
+	t.Parallel()
+	for _, trailing := range []bool{false, true} {
+		trailing := trailing
+		name := "silent candidate is last"
+		if trailing {
+			name = "a failing candidate follows"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			def := &langWindowTranscriber{def: langReply{lang: "ru", conf: 0.9, text: ruText}}
+			h, content := newScopedHarness(t, def, scopeTotalMS)
+			h.svc.SetQualityGate(quality.New(quality.DefaultConfig()))
+			h.svc.SetOnUncoveredLanguage("skip")
+			h.svc.AddRouteCandidate("ru", &langWindowTranscriber{def: langReply{lang: "ru", conf: 0.9, text: loopText}}, "ru-first", []string{"ru"})
+			silent := &replyTranscriber{}
+			h.svc.AddRouteCandidate("ru", silent, "ru-silent", []string{"de"})
+			failing := &replyTranscriber{err: windowProviderFailure}
+			if trailing {
+				h.svc.AddRouteCandidate("ru", failing, "ru-broken", []string{"ru"})
+			}
+
+			_ = h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/music.m4a"), content)
+			out := h.logs.String()
+			if !strings.Contains(out, "window [0,590000]ms of talks/music.m4a holds no speech; it counts as decoded") {
+				t.Errorf("window 1 must be a no-speech window:\n%s", out)
+			}
+			if strings.Contains(out, "refusing window [0,") {
+				t.Errorf("a no-speech result must not be refused for a language it does not report:\n%s", out)
+			}
+			if silent.calls == 0 {
+				t.Fatalf("the silent candidate was not asked; the fixture is wrong:\n%s", out)
+			}
+			if failing.calls != 0 {
+				t.Errorf("the failing candidate was asked %d time(s) after a complete no-speech decode", failing.calls)
+			}
+		})
+	}
+}
+
+// TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript pins SPEC 0.96.0
+// §8.6.13: when a no-speech result retires an earlier transcript, the
+// summaries derived from that transcript go with it. Scan 1 indexes a
+// transcript and its document summary. In scan 2 another STT model finds no
+// speech in the same bytes: the transcript and the summary are retired, their
+// chunks are tombstoned, and the lexical index returns no hit for either.
+//
+// Mutant killed: retiring only the transcript and its translations, which
+// leaves a summary that answers from text the document no longer has.
+func TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
+	st := newRealStore(t)
+
+	scan := func(sttModel, transcript string) {
+		t.Helper()
+		cfg := hierarchicalConfig(stateDir)
+		cfg.RootDir = root
+		cfg.STTProvider = "off"
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+		svc.SetTranscriber(&fakeTranscriber{text: transcript})
+		svc.SetSTTIdentity("whisper", sttModel)
+		svc.SetTranscriptLanguage("en")
+		svc.SetSummarizer(&fakeSummarizer{out: "summarywordzq of the talk"}, "mistral", "mistral-small-latest")
+		if err := svc.Run(ctx); err != nil {
+			t.Fatalf("scan (%s): %v", sttModel, err)
+		}
+	}
+
+	scan("large-v3", "[00:00] the budget talkwordzq is here\n[00:03] second line of the talk")
+	types := activeRepTypes(t, st, "talk.mp3")
+	if !types[ingest.RepTypeTranscript] || !types[model.SummaryRepType] {
+		t.Fatalf("scan 1 must index a transcript and its summary, got %v", types)
+	}
+	transcriptID := repIDForType(t, st, "talk.mp3", ingest.RepTypeTranscript)
+	summaryID := repIDForType(t, st, "talk.mp3", model.SummaryRepType)
+	for _, word := range []string{"talkwordzq", "summarywordzq"} {
+		if hits, _ := st.SearchBM25(ctx, word, 5, ""); len(hits) == 0 {
+			t.Fatalf("%q gives no lexical hit after scan 1; the fixture is wrong", word)
+		}
+	}
+
+	scan("large-v4", "")
+	doc := mustGetDoc(t, st, "talk.mp3")
+	if doc.Status != "skipped" || doc.SkipReason != model.SkipReasonNoSpeech {
+		t.Fatalf("scan 2: status=%q skip_reason=%q error=%q, want skipped/no_speech", doc.Status, doc.SkipReason, doc.ErrorMessage)
+	}
+	if types := activeRepTypes(t, st, "talk.mp3"); len(types) != 0 {
+		t.Errorf("live representations after the no-speech result = %v, want none", types)
+	}
+	assertChunksTombstoned(t, st, transcriptID)
+	assertChunksTombstoned(t, st, summaryID)
+	for _, word := range []string{"talkwordzq", "summarywordzq"} {
+		if hits, _ := st.SearchBM25(ctx, word, 5, ""); len(hits) != 0 {
+			t.Errorf("%q still gives %d lexical hit(s) after the no-speech result", word, len(hits))
+		}
 	}
 }

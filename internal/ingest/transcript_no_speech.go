@@ -22,7 +22,10 @@ import (
 //
 //   - a decode window with no speech counts as decoded and adds to coverage, so
 //     it is never a shortfall under media.stt.min_coverage, and the §8.6.6
-//     low-density check leaves it out of the duration;
+//     low-density check leaves it out of the duration. It is not a failed
+//     window, with one exception: a no-speech result of a fallback decode
+//     after the window's route failed counts as a failed window when no
+//     window produced transcript text;
 //   - a failed window next to windows with no speech is still a failure: the
 //     failed window can hold speech, so the document is an error and retried;
 //   - a recording whose single decode, or every decode window, found no speech
@@ -59,7 +62,7 @@ const noSpeechMarkerSuffix = ".nospeech"
 // A window that the payload cap split, and that lost one of its pieces, is a
 // failed window here: the lost piece can hold speech.
 func decodedNoSpeech(text string, coverage *TranscriptCoverage) bool {
-	if strings.TrimSpace(stripSegmentMarkers(text)) != "" {
+	if hasTranscriptText(text) {
 		return false
 	}
 	if coverage == nil {
@@ -81,11 +84,30 @@ func splitNoSpeech(err error) (bool, error) {
 	return false, err
 }
 
+// hasTranscriptText reports whether a decode's text holds something that the
+// merge keeps. It reads the text as the merge does (windowSegments): a line
+// that is only a real timestamp marker ("[00:12]") holds no text, and every
+// other line that is not blank does. A bracketed line that is not a timestamp
+// ("[hello]", "[music]") is text.
+func hasTranscriptText(text string) bool {
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		_, body, ok := parseTranscriptTimestamp(line)
+		if !ok || strings.TrimSpace(body) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // windowsWithText returns the windows whose decode holds text, in order.
 func windowsWithText(windows []TranscriptWindow) []TranscriptWindow {
 	out := make([]TranscriptWindow, 0, len(windows))
 	for _, w := range windows {
-		if strings.TrimSpace(stripSegmentMarkers(w.Res.Text)) != "" {
+		if hasTranscriptText(w.Res.Text) {
 			out = append(out, w)
 		}
 	}
@@ -231,7 +253,7 @@ func cachedNoSpeech(text, markerPath string) bool {
 // to no-speech windows is TRANSCRIBE_FAILED there, and a language refusal is
 // the language skip.
 func failedBesideNoSpeech(relPath, text string, coverage *TranscriptCoverage) error {
-	if coverage == nil || strings.TrimSpace(stripSegmentMarkers(text)) != "" {
+	if coverage == nil || hasTranscriptText(text) {
 		return nil
 	}
 	failed := coverage.WindowsFailed

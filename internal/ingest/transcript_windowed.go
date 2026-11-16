@@ -624,6 +624,13 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	coverage := withNoSpeech(withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS), stats.noSpeech, totalMS)
 	if coverage != nil {
 		coverage.WindowsFailed = stats.failed
+	} else if stats.failed > 0 && !hasTranscriptText(text) {
+		// A decode of one scheduled window records no coverage, so the failed
+		// count would be lost here and the empty text would read as a
+		// no-speech recording. A window that the payload cap split and that
+		// lost a piece is a failed window (§8.6.13): the lost piece can hold
+		// speech, so the recording is an error and is retried.
+		return "", nil, nil, fmt.Errorf("windowed %s %s: a piece of the recording failed and the other pieces hold no speech; a failed piece can hold speech, so the recording is retried (SPEC §8.6.13)", label, relPath)
 	}
 	rd.stamp(coverage)
 	return text, words, coverage, nil
