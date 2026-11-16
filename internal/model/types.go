@@ -105,7 +105,9 @@ const (
 	// well-formed response with empty text and no segment that holds text, for
 	// example a recording that holds only music or ambient sound, and the
 	// document has no other searchable representation. It is not an error, and
-	// the recording is not decoded again while the file is unchanged.
+	// the recording is not decoded again while both its content_hash and the
+	// STT derivation identity are unchanged; a change of either makes the next
+	// run decode it again.
 	SkipReasonNoSpeech = "no_speech"
 )
 

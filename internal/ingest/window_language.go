@@ -821,8 +821,16 @@ func stampSegmentLanguages(segs []chunkSegment, entries []model.CoverageLanguage
 // refused: language_uncovered when any refusal was for language (an operator
 // decision that recurs every run), else quality_gate. Empty when nothing was
 // refused, so an ordinary empty or failed decode is judged as before.
+//
+// The caller passes the coverage of a decode whose merged text is empty, so a
+// window that counts as decoded here is a no-speech window (§8.2): it produced
+// no text. Such windows do not change the verdict (§8.6.13, SPEC 0.93.0). A
+// quality-gate refusal next to no-speech windows counts as a failed window,
+// and the outcome is TRANSCRIBE_FAILED; a language refusal next to them is
+// still the language skip. The outcome no_speech needs every window to be a
+// no-speech result.
 func allWindowsRefusedReason(coverage *TranscriptCoverage) string {
-	if coverage == nil || coverage.WindowsDecoded > 0 || len(coverage.Refused) == 0 {
+	if coverage == nil || len(coverage.Refused) == 0 {
 		return ""
 	}
 	reason := model.RefusedQualityGate

@@ -30,6 +30,8 @@ func TestTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 	for name, body := range map[string]string{
 		"text and segments": `{"model":"voxtral-mini-latest","text":"","language":null,"segments":[]}`,
 		"text only":         `{"text":""}`,
+		// §8.2: an absent text field counts as empty.
+		"segments only": `{"segments":[]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			text, err := voxtralClient(t, body).Transcribe(context.Background(), "music.mp3", []byte("audio"))

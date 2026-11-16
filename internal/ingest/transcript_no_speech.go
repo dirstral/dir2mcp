@@ -189,7 +189,9 @@ func cachedNoSpeech(text, markerPath string) bool {
 // no-speech result. It is an error, not a no-speech recording: a failed window
 // can hold speech, so the document is recorded as an error and retried. It
 // returns nil for every other decode, including one with refused windows,
-// which the §8.2.2 terminal-status rules judge.
+// which the §8.2.2 terminal-status rules judge (allWindowsRefusedReason): a
+// quality-gate refusal next to no-speech windows is TRANSCRIBE_FAILED there,
+// and a language refusal is the language skip.
 func failedBesideNoSpeech(relPath, text string, coverage *TranscriptCoverage) error {
 	if coverage == nil || len(coverage.Refused) > 0 || strings.TrimSpace(stripSegmentMarkers(text)) != "" {
 		return nil

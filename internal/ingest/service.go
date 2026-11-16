@@ -6086,7 +6086,9 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 // judgement left to make here.
 func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (skipReason string, gateRejected bool, err error) {
 	// §8.2.2 terminal status: no window produced text and at least one was
-	// refused. A language refusal is an operator decision that recurs on every
+	// refused. The other windows failed or hold no speech (§8.6.13: a refusal
+	// next to no-speech windows is judged here, never as no_speech). A language
+	// refusal is an operator decision that recurs on every
 	// run, so the item is a declared skip with that reason, and any earlier
 	// run's transcript is retired first exactly as the §8.6.13 floor does. When
 	// every refusal is quality_gate the decoder produced only degenerate output:
@@ -6095,7 +6097,7 @@ func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, 
 	switch allWindowsRefusedReason(coverage) {
 	case model.RefusedLanguageUncovered:
 		s.logTrackDropped(doc, tc, fmt.Sprintf(
-			"every decode window was refused: the resolved language is outside the routed model's declared coverage (media.stt.on_uncovered_language=skip, SPEC §8.2.2; %d of %d windows refused)",
+			"no decode window produced text and %d of %d were refused or failed: the resolved language is outside the routed model's declared coverage (media.stt.on_uncovered_language=skip, SPEC §8.2.2)",
 			coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted))
 		if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
 			return "", false, fmt.Errorf("uncovered-language refusal for %s: %w", doc.RelPath, err)
@@ -6107,7 +6109,8 @@ func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, 
 			reason = quality.Reason(model.RefusedQualityGate)
 		}
 		s.logTrackDropped(doc, tc, fmt.Sprintf(
-			"every decode window was refused by the per-window quality gate (first reason %s; SPEC §8.2.2, §8.6.6)", reason))
+			"no decode window produced text and %d of %d were refused by the per-window quality gate or failed (first reason %s; SPEC §8.2.2, §8.6.6, §8.6.13)",
+			coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted, reason))
 		// An earlier run's transcript of this track is retired, exactly as the
 		// language refusal above does: otherwise another track's success would
 		// finish the document with this track's stale chunks still searchable.
