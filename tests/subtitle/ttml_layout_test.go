@@ -128,3 +128,30 @@ func TestTTMLLanguages(t *testing.T) {
 		}
 	}
 }
+
+// TestTTMLTextLanguages pins the languages of a TTML's caption text: the
+// xml:lang in effect for each run of body text, inherited from the nearest
+// tagged ancestor (the root included), unique, in document order. Text outside
+// <body> and metadata text (<metadata>, ttm:*) do not count, and an empty
+// xml:lang clears the inherited language for its subtree only.
+func TestTTMLTextLanguages(t *testing.T) {
+	divs := subtitle.RenderTTMLWith(layoutCues, "ru", subtitle.TTMLOptions{Layout: "divs", LanguageCodes: "iso639_2"})
+	for name, c := range map[string]struct {
+		doc  string
+		want string
+	}{
+		"divs":              {divs, "rus,eng"},
+		"spans":             {subtitle.RenderTTML(layoutCues, "ru"), "ru,en"},
+		"root only":         {`<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru"><head><metadata xml:lang="en">title</metadata></head><body><div><p begin="0s" end="1s"><span>текст</span></p></div></body></tt>`, "ru"},
+		"override":          {`<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div xml:lang="ru"><p begin="0s" end="1s">текст</p></div></body></tt>`, "ru"},
+		"untagged":          {`<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="0s" end="1s">x</p></div></body></tt>`, ""},
+		"empty body":        {`<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="ru"><body><div xml:lang="en"></div></body></tt>`, ""},
+		"metadata in body":  {`<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xml:lang="ru"><body><metadata xml:lang="en"><ttm:title>News</ttm:title></metadata><div><ttm:desc xml:lang="en">An English description</ttm:desc><p begin="0s" end="1s">текст</p></div></body></tt>`, "ru"},
+		"empty lang resets": {`<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div><p xml:lang="" begin="0s" end="1s">x</p><p begin="1s" end="2s">y</p></div></body></tt>`, "en"},
+		"reset only":        {`<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div xml:lang=""><p begin="0s" end="1s">x</p></div></body></tt>`, ""},
+	} {
+		if got := strings.Join(subtitle.TTMLTextLanguages(c.doc), ","); got != c.want {
+			t.Fatalf("%s: TTMLTextLanguages = %q, want %q", name, got, c.want)
+		}
+	}
+}
