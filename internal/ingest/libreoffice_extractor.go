@@ -103,16 +103,19 @@ func (l *libreofficeExtractor) Extract(ctx context.Context, _ string, data []byt
 	if err != nil {
 		return "", err
 	}
-	work, err := libreofficeMakeWorkDir(l.root)
+	// One deadline covers the work-directory step, the conversion and the
+	// read. The work-directory step is inside it because a temp or cache
+	// mount that stops responding can block the create call.
+	dctx, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
+	work, err := libreofficeMakeWorkDirContext(dctx, l.root)
 	if err != nil {
-		return "", err
+		return "", l.deadlineErr(ctx, dctx, err)
 	}
 	// Removed after the read step, and after a failure or a timeout in either
 	// step.
 	defer func() { _ = os.RemoveAll(work) }()
 
-	dctx, cancel := context.WithTimeout(ctx, l.timeout)
-	defer cancel()
 	docx, err := l.convertToDocx(dctx, bin, work, data)
 	if err != nil {
 		return "", l.deadlineErr(ctx, dctx, err)
@@ -188,6 +191,35 @@ func libreofficeMakeWorkDir(root string) (string, error) {
 	return "", errLibreOfficeNoWorkBase
 }
 
+// libreofficeMakeWorkDirContext is libreofficeMakeWorkDir bounded by ctx. The
+// create call and the path checks cannot be cancelled, and a directory on a
+// mount that stopped responding can block them, so they run in a goroutine.
+// When ctx ends first, the result is ctx.Err(), and a directory that the call
+// creates late is removed, so it does not stay on disk.
+func libreofficeMakeWorkDirContext(ctx context.Context, root string) (string, error) {
+	type result struct {
+		work string
+		err  error
+	}
+	// Buffered, so the goroutine never blocks on the send.
+	res := make(chan result, 1)
+	go func() {
+		work, err := libreofficeMakeWorkDir(root)
+		res <- result{work: work, err: err}
+	}()
+	select {
+	case r := <-res:
+		return r.work, r.err
+	case <-ctx.Done():
+		go func() {
+			if r := <-res; r.err == nil {
+				_ = os.RemoveAll(r.work)
+			}
+		}()
+		return "", ctx.Err()
+	}
+}
+
 // libreofficeWorkDirUsable reports whether libreofficeMakeWorkDir can make a
 // work directory for root. It makes one and removes it at once. The
 // availability probe uses it, so an engine that could not make its work
@@ -195,25 +227,16 @@ func libreofficeMakeWorkDir(root string) (string, error) {
 //
 // The probe has the sofficeProbeTimeout limit, because a directory on a dead
 // network mount can block the create call. A probe that reaches the limit
-// counts as failed. The create call cannot be cancelled, so its goroutine
-// removes the directory itself when the call returns late.
+// counts as failed.
 func libreofficeWorkDirUsable(root string) bool {
-	done := make(chan bool, 1)
-	go func() {
-		work, err := libreofficeMakeWorkDir(root)
-		if err == nil {
-			_ = os.RemoveAll(work)
-		}
-		done <- err == nil
-	}()
-	timer := time.NewTimer(sofficeProbeTimeout)
-	defer timer.Stop()
-	select {
-	case ok := <-done:
-		return ok
-	case <-timer.C:
+	ctx, cancel := context.WithTimeout(context.Background(), sofficeProbeTimeout)
+	defer cancel()
+	work, err := libreofficeMakeWorkDirContext(ctx, root)
+	if err != nil {
 		return false
 	}
+	_ = os.RemoveAll(work)
+	return true
 }
 
 // deadlineErr maps an error that happened because the per-document deadline

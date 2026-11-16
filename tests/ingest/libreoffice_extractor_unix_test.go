@@ -5,6 +5,7 @@ package tests
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -371,7 +372,7 @@ func TestLibreOfficeExtract_TimeoutKillsProcessGroup(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	// The loop ends when the helper is gone, or is a zombie that waits to be
 	// reaped (it has exited, so it does not count as a survivor).
-	for processRunning(pid) {
+	for processRunning(t, pid) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("helper process %d survived the timeout; the process group was not killed", pid)
@@ -548,13 +549,21 @@ func docxDocumentXML(t *testing.T, path string) string {
 
 // processRunning reports whether pid is a live process. A zombie (state Z)
 // has exited and only waits for its parent to reap it, so it does not count.
-func processRunning(pid int) bool {
-	if syscall.Kill(pid, 0) != nil {
+// A ps call that fails is not proof that the process is gone: the test fails
+// unless a second probe (signal 0) confirms that the PID no longer exists.
+func processRunning(t *testing.T, pid int) bool {
+	t.Helper()
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 		return false
 	}
 	out, err := exec.Command("/bin/ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
-		return false // ps finds no such process
+		// ps exits non-zero when it finds no such process. Accept that only
+		// when the PID is confirmed gone.
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return false
+		}
+		t.Fatalf("cannot inspect process %d (ps: %v) and it still exists", pid, err)
 	}
 	state := strings.TrimSpace(string(out))
 	return state != "" && !strings.HasPrefix(state, "Z")
@@ -642,5 +651,41 @@ func TestLibreOfficeEngine_CacheIsOwnerOnly(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestLibreOfficeExtract_CancelledContextLeavesNoWorkDir: the work-directory
+// step is inside the extraction deadline. With a context that is already
+// cancelled, Extract returns the context error (not a timeout error), soffice
+// never runs, and no work directory stays on disk, also when the create call
+// finished after the wait ended.
+func TestLibreOfficeExtract_CancelledContextLeavesNoWorkDir(t *testing.T) {
+	usePathOnly(t, map[string]string{"soffice": fakeSofficeOK, "pandoc": fakePandocOK})
+	argsLog := filepath.Join(testutil.TempDir(t), "args.txt")
+	t.Setenv("ARGS_LOG", argsLog)
+	tmp := isolateTempDir(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := ingest.NewLibreOfficeExtractor("", "", "", 30*time.Second).Extract(ctx, "a.doc", []byte("x"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Extract error = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(argsLog); !os.IsNotExist(statErr) {
+		t.Fatalf("soffice ran under a cancelled context (err=%v)", statErr)
+	}
+	// A late directory is removed by a goroutine, so wait for it briefly.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, readErr := os.ReadDir(tmp)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if len(entries) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a work directory stayed in %s after the cancelled extraction: %d entries", tmp, len(entries))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
