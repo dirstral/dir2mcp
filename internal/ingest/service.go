@@ -496,7 +496,7 @@ type Service struct {
 
 	// pendingNoSpeechSkip records that the transcript path of the document
 	// currently being processed found no speech in the whole recording (SPEC
-	// 0.95.0) and that the document has no media chunks. The no_speech skip is
+	// 0.96.0) and that the document has no media chunks. The no_speech skip is
 	// settled only after recognition ran, because a recognition representation
 	// keeps the document searchable and then it stays status=ok (§8.6.13).
 	// Same per-document lifecycle as recognizeIncompleteThisDoc.
@@ -1004,7 +1004,7 @@ func (s *Service) recordPartialTranscriptSkip(ctx context.Context, doc model.Doc
 		return false, true
 	}
 	if skipReason == model.SkipReasonNoSpeech {
-		// SPEC 0.95.0: settled after recognition (settlePendingNoSpeech), which
+		// SPEC 0.96.0: settled after recognition (settlePendingNoSpeech), which
 		// can still give the document a searchable representation.
 		s.pendingNoSpeechSkip = true
 		return false, true
@@ -2439,7 +2439,7 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	if existing.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) {
 		return false, nil
 	}
-	// SPEC 0.95.0: a no-speech outcome is stale when the STT derivation identity
+	// SPEC 0.96.0: a no-speech outcome is stale when the STT derivation identity
 	// changed, so the recording is decoded again by the new model. This holds
 	// for a document skipped as no_speech and for a document that is ok.
 	if s.noSpeechIdentityStale(ctx, existing) {
@@ -3109,7 +3109,7 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
 	tc.noFallbackRetry = true
 	transcriptText, words, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
-	// SPEC 0.95.0: a track with no speech has no transcript to translate. It
+	// SPEC 0.96.0: a track with no speech has no transcript to translate. It
 	// is a successful decode, not a translation failure.
 	noSpeech, err := splitNoSpeech(err)
 	if err != nil {
@@ -6189,7 +6189,7 @@ func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, 
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
 //
-// A decode that found no speech (SPEC 0.95.0) is its own outcome, a no_speech
+// A decode that found no speech (SPEC 0.96.0) is its own outcome, a no_speech
 // skip, and never reaches the silence judgement below.
 func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage, noSpeech bool) (bool, bool, string, error) {
 	if noSpeech {
@@ -7101,7 +7101,7 @@ func TranscriptLangSuffix(language string) string {
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
 	text, _, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
 	if errors.Is(err, errNoSpeech) {
-		// SPEC 0.95.0: no speech is a successful decode with nothing said, so a
+		// SPEC 0.96.0: no speech is a successful decode with nothing said, so a
 		// caller that reads only the text (the MCP transcribe tools) gets the
 		// empty transcript, as it does for any other empty decode.
 		return "", nil
@@ -7168,7 +7168,7 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 				noSpeech: cachedNoSpeech(string(cached), paths.noSpeech),
 			}
 			if hit.noSpeech {
-				// SPEC 0.95.0: a decode that found no speech is cached as such, so
+				// SPEC 0.96.0: a decode that found no speech is cached as such, so
 				// the same bytes are not sent to the provider again.
 				return hit.unpack()
 			}
@@ -7231,7 +7231,7 @@ type cachedTranscript struct {
 	coverage *TranscriptCoverage
 	route    *itemRoute
 	// noSpeech is true for a decode that succeeded and found no speech (SPEC
-	// 0.95.0). Its text is empty, and unpack reports errNoSpeech.
+	// 0.96.0). Its text is empty, and unpack reports errNoSpeech.
 	noSpeech bool
 }
 
@@ -7448,7 +7448,7 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 	} else {
 		text, words, coverage, err = s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber, true)
 	}
-	// SPEC 0.95.0: the decode succeeded and the whole recording holds no
+	// SPEC 0.96.0: the decode succeeded and the whole recording holds no
 	// speech. Reported as errNoSpeech, never as a provider failure. The no
 	// audio track case returned above with no error and keeps its meaning.
 	if err == nil && decodedNoSpeech(text, coverage) {
@@ -7581,7 +7581,7 @@ type coverageCacheEntry struct {
 	RedecodedWindows []model.RedecodedWindow `json:"redecoded_windows,omitempty"`
 	RedecodeRule     string                  `json:"redecode_rule,omitempty"`
 	// NoSpeechMS is how much of the recording the no-speech windows span (SPEC
-	// 0.95.0), restored with the text so the §8.6.6 low-density check on a
+	// 0.96.0), restored with the text so the §8.6.6 low-density check on a
 	// cache hit leaves it out of the duration, as the fresh decode did.
 	NoSpeechMS int `json:"no_speech_ms,omitempty"`
 }

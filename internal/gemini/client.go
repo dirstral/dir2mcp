@@ -663,7 +663,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
-	// SPEC 0.95.0 §8.2: the generated text is the text field of the normalized
+	// SPEC 0.96.0 §8.2: the generated text is the text field of the normalized
 	// response. A response with no candidate has no text field, so it is
 	// malformed. A candidate that the model did not finish (a safety block, a
 	// token limit) is not a decode result either.

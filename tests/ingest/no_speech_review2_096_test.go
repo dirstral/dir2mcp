@@ -18,7 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Edge cases of the SPEC 0.95.0 no-speech outcome from the second review of
+// Edge cases of the SPEC 0.96.0 no-speech outcome from the second review of
 // #1169.
 
 // cappedSilentTranscriber declares a payload cap, so an oversized window is

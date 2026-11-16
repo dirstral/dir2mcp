@@ -74,7 +74,7 @@ type TranscriptCoverage struct {
 	// so text cached while gates were off still gets every check.
 	ScreenedPerWindow bool `json:"-"`
 	// NoSpeechMS is the summed length of the windows whose decode was a
-	// no-speech result (SPEC 0.95.0), coalesced. Those windows are decoded and
+	// no-speech result (SPEC 0.96.0), coalesced. Those windows are decoded and
 	// sit inside Ranges; this says how much of that decoded audio held no
 	// speech, so the §8.6.6 low-density check can leave it out of the duration.
 	// Not part of the persisted coverage object; the transcript cache keeps it.

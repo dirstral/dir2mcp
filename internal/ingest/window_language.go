@@ -172,7 +172,7 @@ type windowDecode struct {
 	// scope (§8.6.13 low-confidence rule). Zero under window scope.
 	report windowReport
 	// noSpeech is the window's core when its decode was a no-speech result
-	// (SPEC 0.95.0), nil otherwise.
+	// (SPEC 0.96.0), nil otherwise.
 	noSpeech *CoverageRange
 	// piecesFailed is true for a decoded window that the payload cap split
 	// and that has no result for at least one piece. The window keeps the
@@ -212,7 +212,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 		return out
 	}
 	if decodedWithoutSpeech(pieces, results, err) {
-		// SPEC 0.95.0: nothing said in this window, so there is no language to
+		// SPEC 0.96.0: nothing said in this window, so there is no language to
 		// identify, no route to move to and no text to screen.
 		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
 	}
@@ -233,7 +233,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 		}
 	}
 	if decodedWithoutSpeech(pieces, results, ferr) {
-		// SPEC 0.95.0: a later candidate or the default profile found no speech
+		// SPEC 0.96.0: a later candidate or the default profile found no speech
 		// in the window. It is a decoded window with no language, never a
 		// refusal for the language the first decode resolved.
 		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
@@ -440,7 +440,7 @@ func (s *Service) rerouteWindow(ctx context.Context, relPath string, pieces []wi
 		return results, cur
 	}
 	rerouted, derr := s.decodePieces(ctx, relPath, want.stt, pieces, plan)
-	// SPEC 0.95.0: a route that hears no speech where the first decode heard
+	// SPEC 0.96.0: a route that hears no speech where the first decode heard
 	// some has produced nothing either, so the first decode stands.
 	if len(rerouted) == 0 || !resultsHaveContent(rerouted) {
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s resolved to %q but route %q returned nothing (%v); keeping the %q decode",
@@ -829,7 +829,7 @@ func stampSegmentLanguages(segs []chunkSegment, entries []model.CoverageLanguage
 //
 // The caller passes the coverage of a decode whose merged text is empty, so a
 // window that counts as decoded here is a no-speech window (§8.2): it produced
-// no text. Such windows do not change the verdict (§8.6.13, SPEC 0.95.0). A
+// no text. Such windows do not change the verdict (§8.6.13, SPEC 0.96.0). A
 // quality-gate refusal next to no-speech windows counts as a failed window,
 // and the outcome is TRANSCRIBE_FAILED; a language refusal next to them is
 // still the language skip. The outcome no_speech needs every window to be a

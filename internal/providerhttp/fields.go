@@ -5,7 +5,7 @@ import (
 )
 
 // WellFormedEmptySTT reports whether raw is a well-formed speech-to-text
-// response, the shape a no-speech result needs (SPEC 0.95.0, §8.2). The caller
+// response, the shape a no-speech result needs (SPEC 0.96.0, §8.2). The caller
 // has already found that the response holds no text; this answers whether that
 // emptiness is a successful decode or a malformed body.
 //
