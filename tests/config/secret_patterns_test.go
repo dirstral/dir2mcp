@@ -58,7 +58,7 @@ func TestDefaultSecretPatterns_NoProseFalsePositives(t *testing.T) {
 	}
 }
 
-// Synthetic fixture builders for the spec 0.93.0 boundary tests. The prefixes
+// Synthetic fixture builders for the spec 0.95.0 boundary tests. The prefixes
 // are split by concatenation so a repository secret scanner never sees a
 // credential-shaped literal in this file; every value is a repeated run of
 // obviously fake characters.
@@ -78,7 +78,7 @@ func repeatAlphabet(alphabet string, n int) string {
 	return string(b)
 }
 
-// TestDefaultSecretPatterns_Boundaries_0_93_0 pins the spec 0.93.0 defaults
+// TestDefaultSecretPatterns_Boundaries_0_95_0 pins the spec 0.95.0 defaults
 // through the real default set, the default allow list and the real matcher.
 // The must-not-match rows are the false positives an archive hit: 13 Word
 // documents withheld through a pasted YouTube redirect link (`redir_token=`)
@@ -86,7 +86,7 @@ func repeatAlphabet(alphabet string, n int) string {
 // The must-match rows are the credential shapes the rules must keep catching.
 // The generic token rule stays broad, so a key that only ends in `token`
 // matches outside a URL query string.
-func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
+func TestDefaultSecretPatterns_Boundaries_0_95_0(t *testing.T) {
 	patterns := config.Default().SecretPatterns
 	tok := "to" + "ken"
 	skDash := "s" + "k-"
@@ -104,7 +104,7 @@ func TestDefaultSecretPatterns_Boundaries_0_93_0(t *testing.T) {
 		{"task id with sk_ mid-word", "ta" + skUnder + synthLowerRun(32), false},
 		{"task id in prose", "see job ta" + skUnder + synthLowerRun(32) + " for details", false},
 		{"sk_ after an underscore", "task_" + skUnder + synthLowerRun(32), false},
-		// The two must-not-hit samples SPEC §7.2 (spec 0.93.0) lists verbatim.
+		// The two must-not-hit samples SPEC §7.2 (spec 0.95.0) lists verbatim.
 		{"spec redirect sample", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org", false},
 		{"spec slug sample", "https://example.org/news/krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
 

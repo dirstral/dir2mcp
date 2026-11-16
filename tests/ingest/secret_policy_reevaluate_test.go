@@ -15,7 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Upgrade path for the spec 0.93.0 secret-pattern defaults.
+// Upgrade path for the spec 0.95.0 secret-pattern defaults.
 //
 // A corpus indexed by an older binary holds documents withheld as
 // `secret_excluded` under the old, boundary-less defaults. After an upgrade
@@ -24,9 +24,9 @@ import (
 // incremental gates never re-read them: carrySecretExclusion keeps the verdict
 // on an unchanged content hash, and the cheap-signal fast path skips the read.
 
-// preSpec0930SecretPatterns is the default list an older binary shipped. The
+// preSpec0950SecretPatterns is the default list an older binary shipped. The
 // generic token rule and both key rules have no leading boundary.
-var preSpec0930SecretPatterns = []string{
+var preSpec0950SecretPatterns = []string{
 	`AKIA[0-9A-Z]{16}`,
 	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
@@ -62,10 +62,10 @@ func policyConfig(root, stateDir string, patterns []string) config.Config {
 	return cfg
 }
 
-// oldBinaryConfig is the policy of a binary before spec 0.93.0: its default
+// oldBinaryConfig is the policy of a binary before spec 0.95.0: its default
 // secret patterns and no allow list.
 func oldBinaryConfig(root, stateDir string) config.Config {
-	cfg := policyConfig(root, stateDir, preSpec0930SecretPatterns)
+	cfg := policyConfig(root, stateDir, preSpec0950SecretPatterns)
 	cfg.SecretAllowPatterns = []string{}
 	return cfg
 }
@@ -113,7 +113,7 @@ func forgetSecretPolicyIdentity(t *testing.T, st *store.SQLiteStore, dbPath stri
 }
 
 // keepOldBinarySnapshot writes the effective-config snapshot that a release
-// before spec 0.93.0 left in the state directory (it records secret_patterns
+// before spec 0.95.0 left in the state directory (it records secret_patterns
 // and no allow list), then saves the new snapshot the way every command does
 // at config load. The save keeps the old lists as the provenance of the
 // previous secret policy (config.PreviousSecretPolicy).
@@ -175,7 +175,7 @@ func requireSearchable(t *testing.T, st *store.SQLiteStore, relPath string) {
 }
 
 // TestSecretPolicy_UpgradeReevaluatesWithheldDocuments indexes a corpus under
-// the pre-0.93.0 defaults, then runs an incremental scan under the shipped
+// the pre-0.95.0 defaults, then runs an incremental scan under the shipped
 // defaults on the same store. The false positives must come back as indexed.
 func TestSecretPolicy_UpgradeReevaluatesWithheldDocuments(t *testing.T) {
 	t.Parallel()
@@ -347,7 +347,7 @@ func requireNotSearchable(t *testing.T, st *store.SQLiteStore, relPath string) {
 }
 
 // TestSecretPolicy_ReleasedDocumentKeepsTheOtherGates pins SPEC §7.2 (spec
-// 0.93.0): a document that a policy change releases is treated as a new
+// 0.95.0): a document that a policy change releases is treated as a new
 // document, so every other §7.1 gate still applies. Three documents are
 // withheld under a custom pattern. Then the operator drops the pattern and, in
 // the same edit, adds a .gitignore rule, a path exclude and a size limit that

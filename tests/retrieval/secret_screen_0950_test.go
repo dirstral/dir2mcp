@@ -15,7 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Serve-time secret screen (spec 0.93.0, SPEC §7.2). When the effective secret
+// Serve-time secret screen (spec 0.95.0, SPEC §7.2). When the effective secret
 // pattern set changes, a background pass retires the indexed chunks that the
 // new set matches. Until the pass reaches a document, its chunks stay in the
 // index, so every tool that returns indexed text screens that text against the

@@ -802,7 +802,7 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE emitted_artifacts ADD COLUMN output_root TEXT NOT NULL DEFAULT ''`,
 		// secret_reeval_pending marks a live document that waits for a
 		// secret-policy re-evaluation against a broader pattern set (SPEC
-		// §7.2, spec 0.93.0). Retrieval returns no part of such a document.
+		// §7.2, spec 0.95.0). Retrieval returns no part of such a document.
 		// ResetForSecretPolicy sets it; UpsertDocument clears it when the row
 		// gets a content hash again.
 		`ALTER TABLE documents ADD COLUMN secret_reeval_pending INTEGER NOT NULL DEFAULT 0`,

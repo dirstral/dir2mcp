@@ -14,7 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// security.secret_allow_patterns at ingest (SPEC §7.2, spec 0.93.0): the
+// security.secret_allow_patterns at ingest (SPEC §7.2, spec 0.95.0): the
 // upgrade path releases a document that only the redirect link withheld,
 // without a read of every indexed document; the allow list applies to derived
 // text; and a corpus with no recorded policy under a custom list is read again
@@ -69,7 +69,7 @@ func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) 
 	requireStatus(t, st, "redirect.md", model.DocumentStatusSecretExcluded)
 	requireSearchable(t, st, "clean.md")
 	forgetSecretPolicyIdentity(t, st, dbPath)
-	keepOldBinarySnapshot(t, policyConfig(root, stateDir, config.Default().SecretPatterns), preSpec0930SecretPatterns)
+	keepOldBinarySnapshot(t, policyConfig(root, stateDir, config.Default().SecretPatterns), preSpec0950SecretPatterns)
 
 	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "redirect.md")
@@ -136,7 +136,7 @@ func TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed(t *testing.T)
 }
 
 // TestSecretAllow_UnrecordedCustomPolicyReadsIndexed covers a corpus indexed
-// before spec 0.93.0 under a custom list. That list is not recorded and cannot
+// before spec 0.95.0 under a custom list. That list is not recorded and cannot
 // be known, so the first scan reads every indexed document again.
 func TestSecretAllow_UnrecordedCustomPolicyReadsIndexed(t *testing.T) {
 	t.Parallel()

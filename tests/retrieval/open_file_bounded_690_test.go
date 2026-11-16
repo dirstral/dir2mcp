@@ -24,7 +24,7 @@ import (
 // source that grew after indexing, or a large remote text file, therefore cost
 // unbounded memory and bandwidth for a strictly bounded answer.
 //
-// Since spec 0.93.0 open_file checks the WHOLE source against the secret
+// Since spec 0.95.0 open_file checks the WHOLE source against the secret
 // policy before it returns any byte (SPEC §7.2, §15.4), so the read is bounded
 // by ingest.max_file_mb, the cap ingest applies to the same file, and not by
 // max_chars. A source above the cap is refused with FILE_TOO_LARGE after cap+1
@@ -373,7 +373,7 @@ func TestOpenFile_SecretBeforeTheWindow_AlwaysRefuses(t *testing.T) {
 }
 
 // TestOpenFile_SecretFarPastTheWindow_Refuses pins the whole-source check
-// (spec 0.93.0). The earlier bounded read stopped after the answer and a margin,
+// (spec 0.95.0). The earlier bounded read stopped after the answer and a margin,
 // so it served the head of a document whose credential sat 8 MiB down, a
 // document that ingest withholds. The whole-source check refuses it, as ingest
 // does, and the read stays bounded by the cap.

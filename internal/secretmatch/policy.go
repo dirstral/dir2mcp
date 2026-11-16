@@ -44,9 +44,9 @@ func sortedCopy(in []string) []string {
 	return out
 }
 
-// preSpec0930SecretPatterns is the default list every release before spec
-// 0.93.0 shipped (since #443).
-var preSpec0930SecretPatterns = []string{
+// preSpec0950SecretPatterns is the default list every release before spec
+// 0.95.0 shipped (since #443).
+var preSpec0950SecretPatterns = []string{
 	`AKIA[0-9A-Z]{16}`,
 	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
@@ -56,17 +56,17 @@ var preSpec0930SecretPatterns = []string{
 	`[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}`,
 }
 
-// PreSpec0930DefaultPolicy returns the default policy that every release
-// before spec 0.93.0 shipped: its secret defaults and no allow list.
-func PreSpec0930DefaultPolicy() Policy {
-	return Policy{Secret: append([]string{}, preSpec0930SecretPatterns...)}
+// PreSpec0950DefaultPolicy returns the default policy that every release
+// before spec 0.95.0 shipped: its secret defaults and no allow list.
+func PreSpec0950DefaultPolicy() Policy {
+	return Policy{Secret: append([]string{}, preSpec0950SecretPatterns...)}
 }
 
 // narrowedSecretPatterns maps a pattern to the older pattern it narrows: every
 // string the new pattern matches, the old one matches too. Each new pattern
 // keeps the old pattern's core as a literal suffix and only adds a left
-// boundary, so this holds by construction (spec 0.93.0). The generic token
-// rule is not here: spec 0.93.0 keeps it broad and releases benign keys with
+// boundary, so this holds by construction (spec 0.95.0). The generic token
+// rule is not here: spec 0.95.0 keeps it broad and releases benign keys with
 // the allow list instead.
 var narrowedSecretPatterns = map[string]string{
 	`(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`: `sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,

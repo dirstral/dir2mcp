@@ -16,7 +16,7 @@ import (
 )
 
 // The local ask path builds its retrieval service from the corpus config. Before
-// spec 0.93.0 no production site installed security.secret_patterns on it, so
+// spec 0.95.0 no production site installed security.secret_patterns on it, so
 // open_file applied only the built-in defaults. This test runs the real `ask`
 // command, keeps the service it built (RuntimeHooks.WrapRetriever), and checks
 // that both operator lists reach it. The wrapper answers the question itself,

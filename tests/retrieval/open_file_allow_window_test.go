@@ -18,7 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 / §15.4 (spec 0.93.0): open_file checks the WHOLE source against
+// SPEC §7.2 / §15.4 (spec 0.95.0): open_file checks the WHOLE source against
 // the secret policy before it returns any byte, so its decision is exactly the
 // decision secretmatch.Matcher.Match makes on the whole text. The cases below
 // broke earlier designs that judged the source in read windows.

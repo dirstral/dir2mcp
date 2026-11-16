@@ -14,9 +14,9 @@ import (
 )
 
 // SecretPolicyProvenanceFile is the state file that records the secret
-// pattern lists of the run before the first spec 0.93.0 run (SPEC §7.2).
+// pattern lists of the run before the first spec 0.95.0 run (SPEC §7.2).
 //
-// The store records the effective secret policy since spec 0.93.0. A corpus
+// The store records the effective secret policy since spec 0.95.0. A corpus
 // that an older release indexed has no such record, and the configured lists
 // of THIS run do not show what the older run used. The effective-config
 // snapshot (EffectiveConfigSnapshotFile) does: every release since March 2026
@@ -37,7 +37,7 @@ type SecretPolicyProvenance struct {
 }
 
 // PreviousSecretPolicy returns the secret pattern lists that the run before
-// the first spec 0.93.0 run used, from SecretPolicyProvenanceFile. ok is false
+// the first spec 0.95.0 run used, from SecretPolicyProvenanceFile. ok is false
 // when no provenance exists: then the previous policy is unknown.
 func PreviousSecretPolicy(stateDir string) (SecretPolicyProvenance, bool, error) {
 	path := filepath.Join(stateDirOrDefault(stateDir), SecretPolicyProvenanceFile)
@@ -68,7 +68,7 @@ func PreviousSecretPolicy(stateDir string) (SecretPolicyProvenance, bool, error)
 // this release) as the provenance of a corpus that an older release indexed:
 //
 //   - a snapshot with a `secret_patterns` key gives its lists. A snapshot
-//     without `secret_allow_patterns` comes from a release before spec 0.93.0,
+//     without `secret_allow_patterns` comes from a release before spec 0.95.0,
 //     which had no allow list, so the allow list is empty;
 //   - no snapshot, a snapshot that does not parse, or one without
 //     `secret_patterns` (a release too old to record it) gives no lists: the

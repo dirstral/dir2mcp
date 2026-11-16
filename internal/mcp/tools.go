@@ -3430,7 +3430,7 @@ func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool
 //
 // When the retriever exposes its secret pattern set (retrieval.Service does),
 // the gate uses that set, so annotate/transcribe refuse exactly what open_file,
-// search, ask and related refuse (spec 0.93.0). Otherwise it compiles
+// search, ask and related refuse (spec 0.95.0). Otherwise it compiles
 // security.secret_patterns and security.secret_allow_patterns itself.
 func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 	if screener, ok := s.retriever.(secretMatcher); ok {
