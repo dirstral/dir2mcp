@@ -192,13 +192,28 @@ func libreofficeMakeWorkDir(root string) (string, error) {
 // work directory for root. It makes one and removes it at once. The
 // availability probe uses it, so an engine that could not make its work
 // directory is reported as unavailable, not as a per-document error.
+//
+// The probe has the sofficeProbeTimeout limit, because a directory on a dead
+// network mount can block the create call. A probe that reaches the limit
+// counts as failed. The create call cannot be cancelled, so its goroutine
+// removes the directory itself when the call returns late.
 func libreofficeWorkDirUsable(root string) bool {
-	work, err := libreofficeMakeWorkDir(root)
-	if err != nil {
+	done := make(chan bool, 1)
+	go func() {
+		work, err := libreofficeMakeWorkDir(root)
+		if err == nil {
+			_ = os.RemoveAll(work)
+		}
+		done <- err == nil
+	}()
+	timer := time.NewTimer(sofficeProbeTimeout)
+	defer timer.Stop()
+	select {
+	case ok := <-done:
+		return ok
+	case <-timer.C:
 		return false
 	}
-	_ = os.RemoveAll(work)
-	return true
 }
 
 // deadlineErr maps an error that happened because the per-document deadline

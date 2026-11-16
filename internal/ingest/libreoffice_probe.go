@@ -20,10 +20,12 @@ import (
 // deactivates the pandoc engine, and a .doc is a §7.4.B.2 coverage gap.
 
 // sofficeProbeTimeout bounds the `soffice --version` functional check so a hung
-// LibreOffice cannot stall startup or `dir2mcp doctor`. LibreOffice starts more
-// slowly than pandoc (a few seconds on a cold disk), so the limit is longer than
-// pandocProbeTimeout. The result is memoized per process.
-const sofficeProbeTimeout = 30 * time.Second
+// LibreOffice cannot stall startup or `dir2mcp doctor`. Spec 0.93.0 §7.4.B: the
+// check MUST have a time limit (the reference value is 10 seconds), and a check
+// that reaches it counts as failed, so the engine is unavailable. The same
+// limit bounds the work-directory probe (libreofficeWorkDirUsable). The result
+// is memoized per process.
+const sofficeProbeTimeout = 10 * time.Second
 
 // sofficeBinaryNames are the executable names the engine looks up on PATH, in
 // order. Debian/Ubuntu and Homebrew install `soffice`; some distributions ship

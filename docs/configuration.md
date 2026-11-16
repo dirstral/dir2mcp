@@ -523,7 +523,9 @@ ingest:
 No extraction engine reads the legacy binary Word format (`.doc`) directly. The
 `libreoffice` engine fills that gap. It is a T2 engine, like pandoc, and it is
 turned on by capability: it is active when a LibreOffice binary AND a `pandoc`
-binary resolve and both pass a short probe (`--version`). The LibreOffice binary
+binary resolve and both pass a short probe (`--version`). The LibreOffice probe
+has a time limit of 10 seconds; a probe that reaches the limit counts as
+failed, and the engine is unavailable. The LibreOffice binary
 is `ingest.libreoffice.command` when it is set, else `soffice` on `PATH`, else
 `libreoffice` on `PATH`. When
 either is missing, the engine is off and no engine reads `.doc`, the same as a
@@ -576,6 +578,7 @@ ingest:
 - Env equivalent: `DIR2MCP_LIBREOFFICE_TIMEOUT_SEC=600`. The env value wins over the file.
 - When the limit expires, dir2mcp stops every process the engine started for the document (the whole LibreOffice process tree, with `taskkill /T` on Windows, or the pandoc process) and records an error for that document only. Indexing continues with the next document. The error names the document and the setting, for example `libreoffice extract old/notes.doc: libreoffice extraction timed out after 5m0s (ingest.libreoffice.timeout_sec=300)`.
 - A conversion that fails (for example an encrypted or damaged `.doc`) is a per-document error under the usual rules. The daemon log gets one line that names the engine and the document.
+- The engine does not keep the converted `.docx`. It keeps only the extracted text, in `<state>/cache/libreoffice`. Only the owner of the dir2mcp process can read that folder (mode `0700`) and its files (mode `0600`) on POSIX systems.
 - A `.doc` that an earlier scan recorded as an `unsupported_format` skip or error is extracted on the first scan in which the engine is available, also when its content is unchanged. You do not need `--force` or a reindex.
 - A `.doc` that is already indexed (`status=ok`) keeps its text while its content is unchanged. A new engine reads it again only on an explicit `dir2mcp reindex`, so a new engine never reads a corpus again without your request.
 

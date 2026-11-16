@@ -568,3 +568,79 @@ func containsString(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestLibreOfficeAvailability_HungVersionProbeIsUnavailable: spec 0.93.0
+// §7.4.B says the `--version` check MUST have a time limit (10 seconds in this
+// implementation), and a check that reaches it counts as failed. A soffice
+// that sleeps on --version makes the engine unavailable within the limit.
+func TestLibreOfficeAvailability_HungVersionProbeIsUnavailable(t *testing.T) {
+	usePathOnly(t, map[string]string{"soffice": loStubPath + "exec sleep 120", "pandoc": fakePandocOK})
+	cfg := config.Config{IngestExtractor: "auto"}
+	start := time.Now()
+	active := ingest.LibreOfficeActive(cfg)
+	elapsed := time.Since(start)
+	if active {
+		t.Fatal("engine active although soffice --version never returns")
+	}
+	if elapsed < 9*time.Second || elapsed > 25*time.Second {
+		t.Fatalf("the probe ended after %s, want it to end at the 10s limit", elapsed)
+	}
+	if hint := ingest.LibreOfficeInstallHint(cfg); !strings.Contains(hint, "soffice (LibreOffice)") {
+		t.Fatalf("hint = %q, want it to name soffice", hint)
+	}
+}
+
+// TestLibreOfficeEngine_CacheIsOwnerOnly: the cached extraction output holds
+// the document text, so <state>/cache/libreoffice is 0700 and its files are
+// 0600 (spec 0.93.0 §7.4.B), also when the directory existed with a wider
+// mode. The converted .docx itself is not kept anywhere under the state dir.
+func TestLibreOfficeEngine_CacheIsOwnerOnly(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "")
+	const rel = "old/notes.doc"
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, rel), "legacy word bytes")
+	state := testutil.TempDir(t)
+	cacheDir := filepath.Join(state, "cache", "libreoffice")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{RootDir: root, StateDir: state, STTProvider: "off", IngestExtractor: "auto", IngestLibreOfficeTimeoutSec: 30}
+	usePathOnly(t, map[string]string{"soffice": fakeSofficeOK, "pandoc": fakePandocOK})
+	st := newRealStore(t)
+	f := ingest.DiscoveredFile{RelPath: rel, SizeBytes: 17, MTimeUnix: time.Now().Unix()}
+	if err := wiredService(t, cfg, st).ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+	info, err := os.Stat(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Fatalf("cache dir mode = %o, want 700", mode)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("no cache entry was written (err=%v), so this test proves nothing", err)
+	}
+	for _, e := range entries {
+		fi, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			t.Fatalf("cache file %s mode = %o, want 600", e.Name(), mode)
+		}
+	}
+	err = filepath.WalkDir(state, func(p string, _ os.DirEntry, err error) error {
+		if err == nil && strings.HasSuffix(p, ".docx") {
+			t.Errorf("a converted .docx stayed under the state dir: %s", p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

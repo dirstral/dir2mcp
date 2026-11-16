@@ -5515,8 +5515,12 @@ func (s *Service) generateFlatEngineMarkdownRepresentation(ctx context.Context, 
 // retryable per-document OCR_FAILED in the run manifest (§14.4), mirroring
 // readOrComputeOCR.
 func (s *Service) readOrComputeFlatEngine(ctx context.Context, doc model.Document, content []byte, eng flatEngine) (string, error) {
+	// The cache holds document text, so the directory is owner-only (0700)
+	// and each file is 0600 (statefs.WriteFile). Spec 0.93.0 §7.4.B requires
+	// this for a cached copy of the libreoffice conversion. The hardened call
+	// also tightens a directory that already exists with a wider mode.
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", eng.name)
-	if err := statefs.MkdirAll(cacheDir); err != nil {
+	if err := statefs.MkdirAllHardened(cacheDir); err != nil {
 		return "", fmt.Errorf("create %s cache dir: %w", eng.name, err)
 	}
 	cachePath := s.flatEngineCachePath(eng.name, content)
