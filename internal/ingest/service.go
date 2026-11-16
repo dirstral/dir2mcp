@@ -2177,17 +2177,21 @@ func (s *Service) runScan(ctx context.Context) error {
 	// identity/cache state (§7.6/§8.6.7) so an interrupted transcription pass does
 	// not force re-transcription of completed assets. Default (off) is the single
 	// pass below, byte-identical to before the split existed.
+	//
+	// Each pass processes the files in the order ingest.priority_list sets
+	// (SPEC §7.1): listed files first, then the rest in relative-path order.
+	ordered := s.orderForProcessing(discovered)
 	if s.cfg.MediaBatchTwoPhase {
-		if err := s.scanPass(ctx, passTranscription, discovered, compiledSecrets, forceReindex, seen); err != nil {
+		if err := s.scanPass(ctx, passTranscription, ordered, compiledSecrets, forceReindex, seen); err != nil {
 			return err
 		}
-		if err := s.scanPass(ctx, passDerivation, discovered, compiledSecrets, forceReindex, seen); err != nil {
+		if err := s.scanPass(ctx, passDerivation, ordered, compiledSecrets, forceReindex, seen); err != nil {
 			return err
 		}
 		return s.finishScan(ctx, existing, seen)
 	}
 
-	if err := s.scanPass(ctx, passSingle, discovered, compiledSecrets, forceReindex, seen); err != nil {
+	if err := s.scanPass(ctx, passSingle, ordered, compiledSecrets, forceReindex, seen); err != nil {
 		return err
 	}
 	return s.finishScan(ctx, existing, seen)

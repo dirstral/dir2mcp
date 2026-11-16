@@ -758,6 +758,12 @@ type Config struct {
 	// Changing it changes the identity of every media document larger than 12 MiB
 	// (one re-processing pass; the transcript cache still hits).
 	IngestMediaIdentity string
+	// IngestPriorityList is a file of corpus-relative paths to process first
+	// (config `ingest.priority_list`, SPEC §7.1): one file or directory per
+	// line, in the order they are processed; every other file follows in
+	// relative-path order. A relative path resolves against the corpus root.
+	// Empty (the default) keeps relative-path order.
+	IngestPriorityList string
 
 	// IndexBackend selects the vector index backend (issue #246): "memory"
 	// (default, the in-memory HNSW) or "disk" (the Tier-B pure-Go on-disk
@@ -1626,6 +1632,7 @@ type fileConfig struct {
 	IngestExtractor                     *string
 	IngestOnUnsupported                 *string
 	IngestMediaIdentity                 *string
+	IngestPriorityList                  *string
 	IndexBackend                        *string
 	IngestScanCache                     *bool
 	IngestLateChunking                  *bool
@@ -1822,6 +1829,7 @@ type persistedConfig struct {
 	IngestExtractor                     string        `yaml:"ingest_extractor"`
 	IngestOnUnsupported                 string        `yaml:"ingest_on_unsupported"`
 	IngestMediaIdentity                 string        `yaml:"ingest_media_identity"`
+	IngestPriorityList                  string        `yaml:"ingest_priority_list"`
 	IndexBackend                        string        `yaml:"index_backend"`
 	IngestScanCache                     bool          `yaml:"ingest_scan_cache"`
 	IngestLateChunking                  bool          `yaml:"ingest_late_chunking"`
@@ -2331,6 +2339,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		IngestExtractor:                     cfg.IngestExtractor,
 		IngestOnUnsupported:                 cfg.IngestOnUnsupported,
 		IngestMediaIdentity:                 cfg.IngestMediaIdentity,
+		IngestPriorityList:                  cfg.IngestPriorityList,
 		IndexBackend:                        cfg.IndexBackend,
 		IngestScanCache:                     cfg.IngestScanCache,
 		IngestLateChunking:                  cfg.IngestLateChunking,
@@ -3354,6 +3363,9 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.IngestMediaIdentity != nil {
 		cfg.IngestMediaIdentity = *fc.IngestMediaIdentity
 	}
+	if fc.IngestPriorityList != nil {
+		cfg.IngestPriorityList = strings.TrimSpace(*fc.IngestPriorityList)
+	}
 	applyMediaProcessingFileParsed(cfg, fc)
 	applyMediaBatchFileParsed(cfg, fc)
 }
@@ -4027,6 +4039,7 @@ var configKeyAliases = map[string]string{
 	"extractor":                                "ingest.extractor",
 	"ingest_on_unsupported":                    "ingest.on_unsupported",
 	"ingest_media_identity":                    "ingest.media_identity",
+	"ingest_priority_list":                     "ingest.priority_list",
 	"on_unsupported":                           "ingest.on_unsupported",
 	"index_backend":                            "index.backend",
 	"backend":                                  "index.backend",
@@ -4576,6 +4589,10 @@ func setModelStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.IngestDoclingServeURL = strPtr(value)
 	case "pandoc_command":
 		cfg.IngestPandocCommand = strPtr(value)
+	case "ingest.priority_list":
+		// An ingest key, placed here to keep the ingest and media setters
+		// inside the cyclomatic budget.
+		cfg.IngestPriorityList = strPtr(value)
 	case "rag.system_prompt":
 		cfg.RAGSystemPrompt = strPtr(value)
 	case "rag.evidence_threshold":
@@ -4977,6 +4994,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("ingest_extractor", cfg.IngestExtractor)
 	writeScalar("ingest_on_unsupported", cfg.IngestOnUnsupported)
 	writeScalar("ingest_media_identity", cfg.IngestMediaIdentity)
+	writeScalar("ingest_priority_list", cfg.IngestPriorityList)
 	writeScalar("index_backend", cfg.IndexBackend)
 	writeBool("ingest_scan_cache", cfg.IngestScanCache)
 	writeBool("ingest_late_chunking", cfg.IngestLateChunking)
@@ -5362,6 +5380,7 @@ func applyIngestEnvOverrides(cfg *Config, env map[string]string) {
 		{"DIR2MCP_INGEST_EXTRACTOR", &cfg.IngestExtractor},
 		{"DIR2MCP_INGEST_ON_UNSUPPORTED", &cfg.IngestOnUnsupported},
 		{"DIR2MCP_INGEST_MEDIA_IDENTITY", &cfg.IngestMediaIdentity},
+		{"DIR2MCP_INGEST_PRIORITY_LIST", &cfg.IngestPriorityList},
 		{"DIR2MCP_INDEX_BACKEND", &cfg.IndexBackend},
 	} {
 		if raw, ok := envLookup(o.key, env); ok && strings.TrimSpace(raw) != "" {
