@@ -731,3 +731,30 @@ func TestEmbeddingWorker_Run_FatalErrorStops(t *testing.T) {
 		t.Fatal("expected error in errCh")
 	}
 }
+
+// TestEmbeddingWorker_Run_RequestTimeoutIsRetried pins #1170: an embedding
+// request that times out wraps context.DeadlineExceeded (the HTTP client's
+// timeout), but the worker's own context is still live, so it is a retryable
+// failure of one request, not a shutdown. It used to end the worker for good.
+func TestEmbeddingWorker_Run_RequestTimeoutIsRetried(t *testing.T) {
+	timeout := &model.ProviderError{Code: "OPENAI_FAILED", Message: "request failed", Retryable: true,
+		Cause: fmt.Errorf("Post \"http://127.0.0.1:11434/v1/embeddings\": %w", context.DeadlineExceeded)}
+	tw := &testWorker{errs: []error{timeout, fmt.Errorf("embed: %w", context.DeadlineExceeded)}}
+	ew := &index.EmbeddingWorker{RunOnceFunc: tw.RunOnce, ErrCh: make(chan error, 1)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := ew.Run(ctx, 1*time.Millisecond, "text")
+	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() == nil {
+		t.Fatalf("Run must end only with its own context, got %v", err)
+	}
+	if tw.calls < 3 {
+		t.Fatalf("a request timeout must be retried; RunOnce ran %d times", tw.calls)
+	}
+	select {
+	case e := <-ew.ErrCh:
+		t.Fatalf("a request timeout must not be reported as fatal: %v", e)
+	default:
+	}
+}
