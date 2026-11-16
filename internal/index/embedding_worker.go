@@ -1129,7 +1129,7 @@ func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, index
 				w.logf("embedded %d chunk(s) [kind=%s]", n, indexKind)
 			}
 			if err != nil {
-				if isRetryable(err) {
+				if isRetryable(ctx, err) {
 					w.logf("run once failed (retryable): %v; backing off %v", err, backoff)
 					// wait either for context cancel or the backoff timer
 					select {
@@ -1196,14 +1196,17 @@ var errRetryableMediaRead = errors.New("retryable media read")
 var errChunkMarkedFailed = errors.New("chunk marked failed")
 
 // isRetryable determines whether RunOnce should be retried when it returns
-// the provided error. The predicate is intentionally conservative; context
-// cancellation, deadline errors, and ErrFatal are considered fatal because
-// re‑running after they have occurred is unlikely to succeed.
-func isRetryable(err error) bool {
+// the provided error. ErrFatal and the worker's own context ending (shutdown)
+// are fatal. A cancellation or deadline error while ctx is still live is not:
+// it comes from one request, most often an HTTP client timeout, which wraps
+// context.DeadlineExceeded. Treating that as fatal ended the worker for good on
+// one slow embedding response while the daemon kept running, so embedding
+// stopped silently (dir2mcp #1170).
+func isRetryable(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
 		return false
 	}
 	if errors.Is(err, ErrFatal) {
