@@ -176,3 +176,70 @@ func TestNoSpeech_LaterSpeechRemovesTheRecord(t *testing.T) {
 		t.Fatalf("a decode with speech must remove the no-speech record, still present: %q", value)
 	}
 }
+
+// TestNoSpeech_IdentityChangeDecodesAnOKDocumentAgain pins SPEC §7.6 with
+// §8.6.13 for a document that is status=ok: a video whose only selected audio
+// track holds no speech stays ok through its recognition representation. It
+// has no transcript, so the §8.6.7 transcript identity gate has nothing to
+// compare; only the no-speech record can make it stale. Scan 2 (nothing
+// changed) decodes nothing. Then the STT derivation identity changes and the
+// content_hash does not: scan 3 decodes the selected track again. Scan 4
+// (the new identity is recorded) decodes nothing.
+//
+// Mutant killed: limiting the no-speech identity gate to a document skipped
+// as no_speech, which leaves the track of an ok document on the old model.
+func TestNoSpeech_IdentityChangeDecodesAnOKDocumentAgain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "match.mp4"), "fake-video-bytes")
+	st := newRealStore(t)
+	client, calls := noSpeechWhisperServer(t)
+	f := ingest.DiscoveredFile{RelPath: "match.mp4", SizeBytes: 16, MTimeUnix: time.Now().Unix()}
+
+	scan := func(sttModel string) {
+		t.Helper()
+		cfg := config.Config{RootDir: root, StateDir: stateDir, STTProvider: "off", RecognizeProvider: "serve"}
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+		svc.SetTranscriber(client)
+		svc.SetSTTIdentity("whisper", sttModel)
+		svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, errors.New("no duration") }
+		svc.ExtractAudioTrackFunc = func(context.Context, string) ([]byte, error) { return []byte("audio-track"), nil }
+		svc.SetRecognizer(&fakeRecognizer{result: recognizeTestResult()})
+		if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+			t.Fatalf("ProcessDocument (%s): %v", sttModel, err)
+		}
+		doc := mustGetDoc(t, st, "match.mp4")
+		if doc.Status != "ok" || doc.SkipReason != "" {
+			t.Fatalf("%s: status=%q skip_reason=%q, want ok", sttModel, doc.Status, doc.SkipReason)
+		}
+		assertRecognitionWithoutTranscript(t, st, "match.mp4")
+	}
+
+	scan("large-v3")
+	hash := mustGetDoc(t, st, "match.mp4").ContentHash
+	first, _ := noSpeechRecord(t, st, "match.mp4")
+	scan("large-v3")
+	if n := atomic.LoadInt32(calls); n != 1 {
+		t.Fatalf("STT requests after an unchanged scan = %d, want 1", n)
+	}
+
+	scan("gigaam-v2")
+	if n := atomic.LoadInt32(calls); n != 2 {
+		t.Fatalf("STT requests after the identity change = %d, want 2: the no-speech track of an ok document must be decoded again", n)
+	}
+	if got := mustGetDoc(t, st, "match.mp4").ContentHash; got != hash || hash == "" {
+		t.Errorf("content_hash = %q, was %q: the test needs an unchanged, settled hash", got, hash)
+	}
+	second, ok := noSpeechRecord(t, st, "match.mp4")
+	if !ok || second == first {
+		t.Errorf("no-speech record = %q (present=%v), was %q: the new identity must be recorded", second, ok, first)
+	}
+
+	scan("gigaam-v2")
+	if n := atomic.LoadInt32(calls); n != 2 {
+		t.Errorf("STT requests after one more unchanged scan = %d, want 2", n)
+	}
+}

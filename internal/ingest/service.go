@@ -2440,7 +2440,8 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 		return false, nil
 	}
 	// SPEC 0.95.0: a no-speech outcome is stale when the STT derivation identity
-	// changed, so the recording is decoded again by the new model.
+	// changed, so the recording is decoded again by the new model. This holds
+	// for a document skipped as no_speech and for a document that is ok.
 	if s.noSpeechIdentityStale(ctx, existing) {
 		return false, nil
 	}

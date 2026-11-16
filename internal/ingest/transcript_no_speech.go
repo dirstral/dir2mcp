@@ -30,7 +30,14 @@ import (
 //     representation it is recorded as status="skipped" with
 //     skip_reason="no_speech"; otherwise it stays status="ok". It is not an
 //     error, and it is not decoded again while both the content and the STT
-//     derivation identity are unchanged (§8.6.13).
+//     derivation identity are unchanged (§8.6.13). A change of either makes
+//     the next run decode it again when the track is still selected, also
+//     when the document is ok (§7.6);
+//   - a failed track is not covered by that guard. When no selected track
+//     produced a transcript the document is an error and is processed again
+//     on the next run. A failed track in a document that stays ok is decoded
+//     again only when the document is processed again (a content change, a
+//     re-index, an identity change).
 
 // errNoSpeech reports that the decode of a recording succeeded and found no
 // speech anywhere in it. It travels on the error channel of the transcript read

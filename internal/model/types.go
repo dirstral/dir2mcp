@@ -108,7 +108,8 @@ const (
 	// document has no other searchable representation. It is not an error, and
 	// a track whose decode was a no-speech result is not decoded again while
 	// both the content_hash and the STT derivation identity are unchanged; a
-	// change of either makes the next run decode it again.
+	// change of either makes the next run decode it again when the track is
+	// still selected.
 	SkipReasonNoSpeech = "no_speech"
 )
 
