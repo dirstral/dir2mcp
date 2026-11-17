@@ -13,7 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// SPEC 0.96.0 §8.6.13, §15.4: dir2mcp_open_file on a document that is
+// SPEC 0.97.0 §8.6.13, §15.4: dir2mcp_open_file on a document that is
 // status=skipped with skip_reason=no_speech returns the non-retryable
 // MEDIA_NO_TEXT. It never returns the retryable OCR_NOT_READY and never empty
 // content. The document row decides, not the file extension.
@@ -191,7 +191,7 @@ func okNoSpeechEnv096(t *testing.T, relPath, docType, body string) *openFile1100
 	return env
 }
 
-// TestOpenFile_OKDocumentWithNoSpeechTranscript pins SPEC 0.96.0 §8.6.13,
+// TestOpenFile_OKDocumentWithNoSpeechTranscript pins SPEC 0.97.0 §8.6.13,
 // §15.4 for a document that stays ok through another representation after
 // every selected track was a no-speech result. Its transcript is absent, not
 // pending. A call that would return the transcript (the default call or a

@@ -27,7 +27,7 @@ func elevenLabsSTTClient(body string) *elevenlabs.Client {
 	return client
 }
 
-// TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.96.0: a
+// TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech pins SPEC 0.97.0: a
 // well-formed response whose text fields are empty is a decode that found no
 // speech, so Transcribe returns ("", nil) instead of ELEVENLABS_FAILED.
 func TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
@@ -52,10 +52,10 @@ func TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 func TestElevenLabsTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 	for _, body := range []string{
 		`{"language_code":"eng"}`, `{"text":null}`, `{"text":"","transcript":null}`,
-		// A timed segment with no text key (SPEC 0.96.0 §8.2), in seconds and
+		// A timed segment with no text key (SPEC 0.97.0 §8.2), in seconds and
 		// in the millisecond form this adapter reads.
 		`{"segments":[{"start":1.0}]}`, `{"segments":[{"start_ms":1000}]}`,
-		// Timed words with no text (SPEC 0.96.0 §8.2).
+		// Timed words with no text (SPEC 0.97.0 §8.2).
 		`{"text":" ","words":[{"text":"hello","start":0,"end":1}]}`,
 		// A words field that is present and not an array.
 		`{"text":"","words":{}}`,

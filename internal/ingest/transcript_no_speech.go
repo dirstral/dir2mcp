@@ -14,7 +14,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// This file implements the SPEC 0.96.0 no-speech outcome. A speech-to-text
+// This file implements the SPEC 0.97.0 no-speech outcome. A speech-to-text
 // provider that answers a recording of music, ambient sound or silence with a
 // well-formed response holding empty text and no segments has decoded the audio
 // successfully and found nothing said (a no-speech result, SPEC §8.2). The
@@ -164,7 +164,7 @@ func noSpeechResults(results []pieceResult) bool {
 }
 
 // recordNoSpeechWindow settles a window-scoped decode window whose pieces all
-// came back with no speech (SPEC 0.96.0, §8.2.2). There is nothing to identify,
+// came back with no speech (SPEC 0.97.0, §8.2.2). There is nothing to identify,
 // route or screen: the decoder's language report on music is noise, and the
 // identifier would be asked about audio with nothing said. The window is
 // recorded as decoded, so it counts toward coverage, on the route that decoded
@@ -180,7 +180,7 @@ func noSpeechResults(results []pieceResult) bool {
 // text, the window keeps its fallback_from entry and follows the window
 // retry.
 func (s *Service) recordNoSpeechWindow(relPath string, plan windowSchedule, core CoverageRange, results []pieceResult, cur routedSTT, fallbackFrom string, st *windowLanguageState) windowDecode {
-	s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s holds no speech; it counts as decoded (SPEC 0.96.0)",
+	s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s holds no speech; it counts as decoded (SPEC 0.97.0)",
 		plan.label, core.StartMS, core.EndMS, relPath)
 	// The no-speech decode adds no language (§8.6.13). A pin is another
 	// signal: it resolves the language of every window (§8.2.2), so the
@@ -256,7 +256,7 @@ func cachedNoSpeech(text, markerPath string) bool {
 // speech (in a covered language too), so the document is recorded as an error
 // and retried. A failed window takes precedence over the §8.2.2 rules, so
 // this holds also when other windows are language_uncovered refusals or
-// no-speech results (SPEC 0.96.0). A window whose route failed and whose
+// no-speech results (SPEC 0.97.0). A window whose route failed and whose
 // fallback decode is a no-speech result is one of the failed windows. It
 // returns nil for every other decode. A
 // decode with refused windows and no failed window goes to the §8.2.2
@@ -304,7 +304,7 @@ func withNoSpeech(cov *TranscriptCoverage, spans []CoverageRange, totalMS int) *
 }
 
 // speechDuration is the duration the §8.6.6 low-density check compares the
-// transcript with: the recording minus its no-speech windows (SPEC 0.96.0). A
+// transcript with: the recording minus its no-speech windows (SPEC 0.97.0). A
 // recording with one window of speech and long windows of music is not
 // degenerate output. A result at or below zero disables the duration floor, as
 // an unknown duration does.

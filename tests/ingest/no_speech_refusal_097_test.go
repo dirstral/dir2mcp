@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §8.6.13 (0.96.0): a window that the quality gate refused counts as a
+// SPEC §8.6.13 (0.97.0): a window that the quality gate refused counts as a
 // failed window next to no-speech windows. When every window is a no-speech
 // result or a quality-gate refusal, and at least one is a refusal, the outcome
 // is the TRANSCRIBE_FAILED error and the recording is retried. With a
@@ -153,7 +153,7 @@ func TestNoSpeech_BothRefusalsBesideNoSpeechAreALanguageSkip(t *testing.T) {
 // windowProviderFailure is a provider failure of one decode window.
 var windowProviderFailure = &model.ProviderError{Code: "WHISPER_FAILED", Message: "upstream 502", Retryable: false}
 
-// assertFailedWindowWins checks the SPEC 0.96.0 §8.6.13 precedence rule: the
+// assertFailedWindowWins checks the SPEC 0.97.0 §8.6.13 precedence rule: the
 // document is a transcription failure (the class that the run manifest reports
 // as TRANSCRIBE_FAILED), not a declared skip.
 func assertFailedWindowWins(t *testing.T, st *store.SQLiteStore) {
@@ -252,7 +252,7 @@ func ruWindow() model.TranscriptResult {
 	return model.TranscriptResult{Text: ruText, Language: "ru", LanguageConfidence: 0.9}
 }
 
-// TestNoSpeech_FallbackNoSpeechWindowCountsAsFailed pins SPEC 0.96.0 §8.6.13:
+// TestNoSpeech_FallbackNoSpeechWindowCountsAsFailed pins SPEC 0.97.0 §8.6.13:
 // when no window produced transcript text, a window whose route failed and
 // whose fallback decode is a no-speech result counts as a failed window. The
 // outcome is an error and the recording is retried. The route is carried from

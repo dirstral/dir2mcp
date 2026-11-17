@@ -12,7 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// SPEC §8.6.13 (0.96.0): subtitle files that write-back (§8.6.14) wrote for a
+// SPEC §8.6.13 (0.97.0): subtitle files that write-back (§8.6.14) wrote for a
 // track in an earlier run remain when the track becomes a no-speech result.
 // The implementation MUST NOT delete them, and their emitted_artifacts rows
 // remain, so the files stay owned and are never read as authored sidecars.

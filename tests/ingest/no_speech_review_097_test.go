@@ -18,7 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Edge cases of the SPEC 0.96.0 no-speech outcome that a review of #1169 found.
+// Edge cases of the SPEC 0.97.0 no-speech outcome that a review of #1169 found.
 
 // replyTranscriber answers each call (1-based) with replies[n], else def. A
 // reply with empty text is a no-speech result.

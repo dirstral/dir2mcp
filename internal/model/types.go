@@ -100,7 +100,7 @@ const (
 	// declared not-indexed coverage rather than a transcript that silently answers
 	// "no" for the audio no window decoded.
 	SkipReasonTranscriptPartial = "transcript_partial"
-	// SkipReasonNoSpeech (SPEC 0.96.0, §15.2): media whose STT decode found no
+	// SkipReasonNoSpeech (SPEC 0.97.0, §15.2): media whose STT decode found no
 	// speech in any selected audio track (media.stt.tracks; a track that is
 	// not selected is not decoded) (§8.2, §8.6.13): every decode returned a
 	// well-formed response with empty text and no segment that holds text, for

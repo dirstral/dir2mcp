@@ -21,7 +21,7 @@ func geminiSTTServer(t *testing.T, body string) *httptest.Server {
 	return srv
 }
 
-// TestTranscribe_EmptyGeneratedTextIsNoSpeech pins SPEC 0.96.0 §8.2 for the
+// TestTranscribe_EmptyGeneratedTextIsNoSpeech pins SPEC 0.97.0 §8.2 for the
 // native Gemini surface: the generated text is the text field of the
 // normalized response, so empty or whitespace-only generated text is a
 // no-speech result. Transcribe returns ("", nil), not GEMINI_FAILED.
@@ -87,7 +87,7 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 	}
 }
 
-// TestTranscribe_TextWithNonStopFinishReasonIsUnchanged: the 0.96.0 rule covers
+// TestTranscribe_TextWithNonStopFinishReasonIsUnchanged: the 0.97.0 rule covers
 // only a candidate with no text. A candidate that holds text and did not
 // finish normally is returned as before.
 func TestTranscribe_TextWithNonStopFinishReasonIsUnchanged(t *testing.T) {

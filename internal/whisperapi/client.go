@@ -563,7 +563,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	}
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
-		// SPEC 0.96.0: a well-formed response with empty text and no segment
+		// SPEC 0.97.0: a well-formed response with empty text and no segment
 		// text is a successful decode that found NO SPEECH (music, ambient
 		// sound, silence), not a provider failure. A body that names neither a
 		// text nor a segments field, or has one of the wrong type, is malformed.

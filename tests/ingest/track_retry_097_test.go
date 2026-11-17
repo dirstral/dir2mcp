@@ -17,7 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC 0.96.0 §8.6.13, §7.6: a selected audio track that failed with a
+// SPEC 0.97.0 §8.6.13, §7.6: a selected audio track that failed with a
 // transport or provider error, in a document that stays ok through another
 // track, is retried on the next run. The document is processed again with an
 // unchanged content_hash until the track produces a transcript or a no-speech

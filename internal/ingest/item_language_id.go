@@ -132,11 +132,11 @@ func (s *Service) identifyItem(ctx context.Context, relPath string, content []by
 	tag := provider.PrimarySubtag(res.Language)
 	if tag == "" {
 		if strings.TrimSpace(res.Text) == "" {
-			// SPEC 0.96.0: the identifier heard no speech in the probe. That is
+			// SPEC 0.97.0: the identifier heard no speech in the probe. That is
 			// no identification, not a failure: the item decodes on the default
 			// profile, and if that decode finds no speech either the item is a
 			// no_speech skip.
-			s.getLogger().Printf("item language identification %s: identifier %q found no speech in the probe; decoding on the default profile (SPEC §8.2.4, 0.96.0)", relPath, s.identifier.route)
+			s.getLogger().Printf("item language identification %s: identifier %q found no speech in the probe; decoding on the default profile (SPEC §8.2.4, 0.97.0)", relPath, s.identifier.route)
 		}
 		return "", 0, false
 	}
