@@ -139,7 +139,7 @@ func pandocRow(cfg config.Config, primary ingest.ExtractorDecision) (routingRow,
 }
 
 // libreofficeRow renders the capability-activated libreoffice engine (T2, spec
-// 0.96.0) as its own banner row under `ingest.extractor: auto`, mirroring
+// 0.97.0) as its own banner row under `ingest.extractor: auto`, mirroring
 // pandocRow: a missing soffice or pandoc is what leaves legacy .doc uncovered,
 // and SPEC §7.7 lists an eligible-but-unavailable engine with its reason. No row
 // when libreoffice is the primary (the OCR row names it) or when the policy

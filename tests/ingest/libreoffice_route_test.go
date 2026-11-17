@@ -7,7 +7,7 @@ import (
 )
 
 // TestExtractionCovered_LibreOffice checks the per-format routing of the
-// libreoffice engine (spec 0.96.0) through the exported coverage predicate:
+// libreoffice engine (spec 0.97.0) through the exported coverage predicate:
 // .doc is covered only when the engine is active and the policy permits it,
 // and the libreoffice pin gives no fallback for other formats.
 func TestExtractionCovered_LibreOffice(t *testing.T) {

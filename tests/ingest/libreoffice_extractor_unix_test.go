@@ -22,7 +22,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Unit-level tests for the libreoffice engine (spec 0.96.0), through the
+// Unit-level tests for the libreoffice engine (spec 0.97.0), through the
 // exported surface of internal/ingest. Fake binaries stand in for soffice and
 // pandoc. The scripts set their own PATH because the tests point PATH at the
 // stub directory only, so a real soffice or pandoc on the host can never leak
@@ -382,7 +382,7 @@ func TestLibreOfficeExtract_TimeoutKillsProcessGroup(t *testing.T) {
 }
 
 // TestLibreOfficeExtract_TimeoutCoversPandocRead checks that one time limit
-// covers the conversion AND the pandoc read (spec 0.96.0): a fast soffice
+// covers the conversion AND the pandoc read (spec 0.97.0): a fast soffice
 // followed by a hung pandoc still ends at the libreoffice limit, with the
 // libreoffice timeout error, and the work dir is removed.
 func TestLibreOfficeExtract_TimeoutCoversPandocRead(t *testing.T) {
@@ -578,7 +578,7 @@ func containsString(list []string, want string) bool {
 	return false
 }
 
-// TestLibreOfficeAvailability_HungVersionProbeIsUnavailable: spec 0.96.0
+// TestLibreOfficeAvailability_HungVersionProbeIsUnavailable: spec 0.97.0
 // §7.4.B says the `--version` check MUST have a time limit (10 seconds in this
 // implementation), and a check that reaches it counts as failed. A soffice
 // that sleeps on --version makes the engine unavailable within the limit.
@@ -601,7 +601,7 @@ func TestLibreOfficeAvailability_HungVersionProbeIsUnavailable(t *testing.T) {
 
 // TestLibreOfficeEngine_CacheIsOwnerOnly: the cached extraction output holds
 // the document text, so <state>/cache/libreoffice is 0700 and its files are
-// 0600 (spec 0.96.0 §7.4.B), also when the directory existed with a wider
+// 0600 (spec 0.97.0 §7.4.B), also when the directory existed with a wider
 // mode. The converted .docx itself is not kept anywhere under the state dir.
 func TestLibreOfficeEngine_CacheIsOwnerOnly(t *testing.T) {
 	t.Setenv("MISTRAL_API_KEY", "")
