@@ -875,7 +875,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		}
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
-			Message:   "malformed transcription response: no text or segments field, or a field of the wrong type",
+			Message:   "malformed transcription response: no text or segments field, a field of the wrong type, or timed words with no text",
 			Retryable: false,
 		}
 	}

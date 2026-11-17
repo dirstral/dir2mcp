@@ -74,7 +74,12 @@ func TestTranscribe_NoSpeechKeepsTheLanguageReport(t *testing.T) {
 func TestTranscribe_WordsWithoutTextStayAnError(t *testing.T) {
 	for name, body := range map[string]string{
 		"top-level words": `{"text":"","segments":[],"words":[{"word":"hello","start":0,"end":1}]}`,
-		"segment words":   `{"text":"","segments":[{"start":0,"end":1,"text":"","words":[{"word":"hi","start":0,"end":1}]}]}`,
+		// The text holds only whitespace, or is absent (SPEC 0.96.0 §8.2).
+		"whitespace text, top-level words": `{"text":" ","words":[{"word":"hello","start":0,"end":1}]}`,
+		"absent text, top-level words":     `{"segments":[],"words":[{"word":"hello","start":0,"end":1}]}`,
+		// Every entry counts, also a blank one: the rule is "at least one entry".
+		"blank word entries": `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":""}]}`,
+		"segment words":      `{"text":"","segments":[{"start":0,"end":1,"text":"","words":[{"word":"hi","start":0,"end":1}]}]}`,
 		// Blank segment words must not hide a spoken top-level word.
 		"blank segment words, spoken top-level word": `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":"hello","start":0,"end":1}]}`,
 	} {
@@ -132,10 +137,10 @@ func TestTranscribe_TimedSegmentWithEmptyTextIsNoSpeech(t *testing.T) {
 	}
 }
 
-// TestTranscribe_BlankWordsAreNoSpeech: word arrays that hold only blank words
-// report no speech, so the response is a no-speech result.
-func TestTranscribe_BlankWordsAreNoSpeech(t *testing.T) {
-	body := `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":""}]}`
+// TestTranscribe_EmptyWordArraysAreNoSpeech: a words array with no entry
+// reports no speech, so the response is a no-speech result.
+func TestTranscribe_EmptyWordArraysAreNoSpeech(t *testing.T) {
+	body := `{"text":"","segments":[{"text":"","words":[]}],"words":[]}`
 	c := newClient(whisperServer(t, body).URL, "")
 	res, err := c.TranscribeStructured(context.Background(), "x.m4a", []byte("audio"))
 	if err != nil || res.Text != "" {

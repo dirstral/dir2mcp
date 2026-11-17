@@ -17,7 +17,11 @@ import (
 //     each segment, when present, is a string;
 //   - no segment has a start or an end but no text: such a segment reports a
 //     timed range of speech that the text does not hold. A segment with an
-//     empty text ("text":"") is well-formed.
+//     empty text ("text":"") is well-formed;
+//   - it carries no timed words: no top-level words array and no words array
+//     inside a segment with at least one entry. The caller found no text, so
+//     such an array reports speech that the text does not hold. An empty
+//     words array is well-formed.
 //
 // An OpenAI-compatible server answers music or silence with
 // `{"text":"","segments":[]}`: well-formed, and a no-speech result. A body that
@@ -46,6 +50,9 @@ func WellFormedEmptySTT(raw []byte, textFields []string, segmentsField string) b
 			return false
 		}
 	}
+	if hasEntries(obj["words"]) {
+		return false
+	}
 	return present
 }
 
@@ -61,6 +68,9 @@ func segmentsWellFormed(v json.RawMessage) bool {
 		if seg == nil {
 			return false
 		}
+		if hasEntries(seg["words"]) {
+			return false
+		}
 		t, ok := seg["text"]
 		if !ok {
 			if segmentIsTimed(seg) {
@@ -74,6 +84,16 @@ func segmentsWellFormed(v json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+// hasEntries reports whether v is a JSON array with at least one entry. An
+// absent field, a null and an empty array have none.
+func hasEntries(v json.RawMessage) bool {
+	if len(v) == 0 {
+		return false
+	}
+	var entries []json.RawMessage
+	return json.Unmarshal(v, &entries) == nil && len(entries) > 0
 }
 
 // segmentTimeKeys are the keys under which an adapter reads the start or the

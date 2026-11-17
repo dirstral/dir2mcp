@@ -36,6 +36,15 @@ func TestWellFormedEmptySTT(t *testing.T) {
 		{`{"segments":[{"end_ms":2000}]}`, false},
 		{`{"segments":[{"start_ms":1000,"text":""}]}`, true},
 		{`{"text":"","segments":[{"start":0,"end":1,"text":""},{"start":1,"end":2}]}`, false},
+		// Timed words with no text: a words array with at least one entry, at
+		// the top level or inside a segment, is malformed. The caller found no
+		// text (absent, empty or only whitespace). An empty array is well-formed.
+		{`{"text":"","words":[]}`, true},
+		{`{"text":"","segments":[{"text":"","words":[]}]}`, true},
+		{`{"text":" ","words":[{"word":"hello","start":0,"end":1}]}`, false},
+		{`{"text":"","words":[{"word":"hello","start":0,"end":1}]}`, false},
+		{`{"segments":[],"words":[{"word":""}]}`, false},
+		{`{"text":"","segments":[{"text":"","words":[{"word":" "}]}]}`, false},
 		{`{}`, false},
 		{`null`, false},
 		{`[]`, false},

@@ -52,6 +52,8 @@ func TestElevenLabsTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 		// A timed segment with no text key (SPEC 0.96.0 §8.2), in seconds and
 		// in the millisecond form this adapter reads.
 		`{"segments":[{"start":1.0}]}`, `{"segments":[{"start_ms":1000}]}`,
+		// Timed words with no text (SPEC 0.96.0 §8.2).
+		`{"text":" ","words":[{"text":"hello","start":0,"end":1}]}`,
 	} {
 		_, err := elevenLabsSTTClient(body).Transcribe(context.Background(), "x.mp3", []byte("audio"))
 		var pe *model.ProviderError

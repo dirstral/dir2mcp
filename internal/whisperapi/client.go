@@ -567,20 +567,22 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		// text is a successful decode that found NO SPEECH (music, ambient
 		// sound, silence), not a provider failure. A body that names neither a
 		// text nor a segments field, or has one of the wrong type, is malformed.
+		// Timed words with no text (absent, empty or only whitespace) is a
+		// contradiction, not silence: the decoder reports speech that the text
+		// does not hold (SPEC §8.2). The response is malformed and stays an
+		// error, so the audio is decoded again and is never recorded as no
+		// speech.
+		if parsed.hasWordEntries() {
+			return model.TranscriptResult{}, &model.ProviderError{
+				Code:      "WHISPER_FAILED",
+				Message:   "malformed transcription response: timed words but no text",
+				Retryable: false,
+			}
+		}
 		if !providerhttp.WellFormedEmptySTT(raw, []string{"text"}, "segments") {
 			return model.TranscriptResult{}, &model.ProviderError{
 				Code:      "WHISPER_FAILED",
 				Message:   "malformed transcription response: no text or segments field, or a field of the wrong type",
-				Retryable: false,
-			}
-		}
-		// Timed words with no text is a contradiction, not silence: the server
-		// heard something it did not write out. It stays an error, so the audio
-		// is decoded again rather than recorded as no speech.
-		if parsed.hasSpokenWord() {
-			return model.TranscriptResult{}, &model.ProviderError{
-				Code:      "WHISPER_FAILED",
-				Message:   "contradictory transcription response: timed words but no text",
 				Retryable: false,
 			}
 		}
@@ -705,20 +707,17 @@ func (r transcribeResponse) timedWords() []model.TimedWord {
 	return out
 }
 
-// hasSpokenWord reports whether the response holds a word that is not blank
-// in the segment words or in the top-level words. It reads both arrays:
-// timedWords prefers the segment words, so blank segment words would hide a
-// spoken top-level word from the no-speech test.
-func (r transcribeResponse) hasSpokenWord() bool {
-	for _, seg := range r.Segments {
-		for _, w := range seg.Words {
-			if strings.TrimSpace(w.Word) != "" {
-				return true
-			}
-		}
+// hasWordEntries reports whether the response carries timed words: a
+// top-level words array or a words array inside a segment, with at least one
+// entry (SPEC §8.2). It reads both arrays and counts every entry, also a blank
+// one: timedWords prefers the segment words and drops blank words, so it
+// cannot answer this question.
+func (r transcribeResponse) hasWordEntries() bool {
+	if len(r.Words) > 0 {
+		return true
 	}
-	for _, w := range r.Words {
-		if strings.TrimSpace(w.Word) != "" {
+	for _, seg := range r.Segments {
+		if len(seg.Words) > 0 {
 			return true
 		}
 	}

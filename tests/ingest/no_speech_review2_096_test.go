@@ -418,3 +418,88 @@ func TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript(t *testing.T) {
 		}
 	}
 }
+
+// TestNoSpeech_WindowDoesNotChangeTheContinuityState pins SPEC 0.96.0 §8.6.13
+// under window scope. Window 1 resolves Kyrgyz and moves to the Kyrgyz route.
+// Window 2 is a no-speech result: it has no language and does not change the
+// continuity state. Window 3 has speech with no confident language: it
+// inherits Kyrgyz, the last language resolved before the no-speech window,
+// and stays on the Kyrgyz route.
+//
+// Mutant killed: advancing the continuity state on a no-speech window, which
+// leaves window 3 with no language to inherit and sends it to the default
+// profile.
+func TestNoSpeech_WindowDoesNotChangeTheContinuityState(t *testing.T) {
+	t.Parallel()
+	def := &langWindowTranscriber{def: langReply{lang: "ky", conf: 0.9}}
+	h, content := newScopedHarness(t, def, scopeTotalMS)
+	route := &replyTranscriber{
+		def: model.TranscriptResult{Text: ruText, Language: "ky", LanguageConfidence: 0.9},
+		replies: map[int]model.TranscriptResult{
+			2: {},
+			3: {Text: ruText, Language: "tr", LanguageConfidence: 0.1},
+		},
+	}
+	h.svc.SetRouteTranscriber("ky", route, "ky-ckpt", nil)
+
+	meta := runScoped(t, h, "talks/mixed.m4a", content)
+	if def.callCount() != 1 {
+		t.Errorf("default profile calls = %d, want 1: windows 2 to 4 must start on the carried Kyrgyz route", def.callCount())
+	}
+	if meta.Coverage == nil {
+		t.Fatalf("no coverage record:\n%s", h.logs.String())
+	}
+	var silent, inherited bool
+	for _, e := range meta.Coverage.Languages {
+		if e.Route != "ky-ckpt" {
+			t.Errorf("entry [%d,%d] is on route %q, want ky-ckpt", e.StartMS, e.EndMS, e.Route)
+		}
+		switch {
+		case e.Language == "":
+			silent = true
+		case e.Language == "ky" && e.LanguageSource == "inherited":
+			inherited = true
+		case e.Language != "ky":
+			t.Errorf("entry [%d,%d] has language %q, want ky or none", e.StartMS, e.EndMS, e.Language)
+		}
+	}
+	if !silent {
+		t.Errorf("the no-speech window must have an entry with no language: %+v", meta.Coverage.Languages)
+	}
+	if !inherited {
+		t.Errorf("the window after the no-speech window must inherit ky: %+v", meta.Coverage.Languages)
+	}
+}
+
+// TestNoSpeech_PinnedWindowKeepsThePinnedLanguage: the no-speech decode adds
+// no language, but a pin resolves the language of every window (§8.2.2). So a
+// no-speech window of a pinned recording records the pinned language, with
+// the source "configured", and the coverage record holds no entry without a
+// language.
+//
+// Mutant killed: recording the no-speech window of a pinned recording with no
+// language.
+func TestNoSpeech_PinnedWindowKeepsThePinnedLanguage(t *testing.T) {
+	t.Parallel()
+	def := &langWindowTranscriber{def: langReply{lang: "ky", conf: 0.9}}
+	h, content := newScopedHarness(t, def, scopeTotalMS)
+	tr := &replyTranscriber{
+		def:     model.TranscriptResult{Text: ruText, Language: "ky", LanguageConfidence: 0.9},
+		replies: map[int]model.TranscriptResult{2: {}},
+	}
+	h.svc.SetTranscriber(tr)
+	h.svc.SetTranscriptLanguage("ky")
+
+	meta := runScoped(t, h, "talks/pinned.m4a", content)
+	if !strings.Contains(h.logs.String(), "holds no speech; it counts as decoded") {
+		t.Fatalf("window 2 must be a no-speech window; the fixture is wrong:\n%s", h.logs.String())
+	}
+	if meta.Coverage == nil || len(meta.Coverage.Languages) == 0 {
+		t.Fatalf("no coverage.languages record:\n%s", h.logs.String())
+	}
+	for _, e := range meta.Coverage.Languages {
+		if e.Language != "ky" || e.LanguageSource != "configured" {
+			t.Errorf("entry [%d,%d] = language %q source %q, want ky/configured for every window of a pinned recording", e.StartMS, e.EndMS, e.Language, e.LanguageSource)
+		}
+	}
+}

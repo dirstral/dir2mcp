@@ -166,10 +166,11 @@ func noSpeechResults(results []pieceResult) bool {
 // came back with no speech (SPEC 0.96.0, §8.2.2). There is nothing to identify,
 // route or screen: the decoder's language report on music is noise, and the
 // identifier would be asked about audio with nothing said. The window is
-// recorded as decoded, so it counts toward coverage, with the unknown language
-// and on the route that decoded it. The continuity state does not advance, so
-// the next window with speech inherits the language of the last window that
-// had some, not the silence.
+// recorded as decoded, so it counts toward coverage, on the route that decoded
+// it, with the pinned language when the recording has a pin and with no
+// language otherwise. The continuity state does not advance, so the next
+// window with no confident language inherits the language of the last window
+// that resolved one, not the silence, and stays on that window's route.
 //
 // A window whose route failed and whose fallback decode found no speech
 // (fallbackFrom is set) also counts as a failed window (§8.6.13): the route
@@ -180,8 +181,17 @@ func noSpeechResults(results []pieceResult) bool {
 func (s *Service) recordNoSpeechWindow(relPath string, plan windowSchedule, core CoverageRange, results []pieceResult, cur routedSTT, fallbackFrom string, st *windowLanguageState) windowDecode {
 	s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s holds no speech; it counts as decoded (SPEC 0.96.0)",
 		plan.label, core.StartMS, core.EndMS, relPath)
+	// The no-speech decode adds no language (§8.6.13). A pin is another
+	// signal: it resolves the language of every window (§8.2.2), so the
+	// window records the pinned language. With no pin the window has no
+	// language. The identifier is not asked about a window with nothing said,
+	// so it gives no report for it.
+	lang, source := "", ""
+	if st.pinned {
+		lang, source = st.lang, langSourceConfigured
+	}
 	var out windowDecode
-	out.decoded, out.covered, out.languages = recordWindow(results, core, "", "", nil, cur, true, fallbackFrom)
+	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, nil, cur, true, fallbackFrom)
 	out.noSpeech = &core
 	out.fallbackNoSpeech = fallbackFrom != ""
 	st.recordDecoded(out.covered, out.languages)

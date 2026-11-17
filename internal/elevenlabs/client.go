@@ -210,7 +210,7 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 		if providerhttp.WellFormedEmptySTT(bodyBytes, []string{"text", "transcript"}, "segments") {
 			return "", nil
 		}
-		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "malformed stt response: no text, transcript or segments field, or a field of the wrong type", Retryable: false}
+		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "malformed stt response: no text, transcript or segments field, a field of the wrong type, or timed words with no text", Retryable: false}
 	}
 	return text, nil
 }
