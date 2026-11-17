@@ -276,3 +276,26 @@ func TestOpenFile_MultiTrackWithOneTranscriptKeepsTheTranscript(t *testing.T) {
 		t.Fatalf("want the transcript of the track that has one, got error=%v code=%q content=%q", res.isError, res.code, res.content)
 	}
 }
+
+// TestOpenFile_TrackTranscriptIsOnTheOriginDocument: ingest stores the
+// transcript of an additional audio track as a transcript@t<N> representation
+// of the origin document (the "<path>#t<N>.<ext>" name is only the STT input
+// name and the cache key of that track). So a document in which track 0 held
+// no speech and track 1 has a transcript is not the "every selected track"
+// case: open_file does not answer MEDIA_NO_TEXT.
+func TestOpenFile_TrackTranscriptIsOnTheOriginDocument(t *testing.T) {
+	const body = "fake-audio-bytes of two tracks"
+	env := newOpenFile1100Env(t)
+	env.writeCorpusFile(t, "dub.mp3", body)
+	env.seedDocument(t, model.Document{RelPath: "dub.mp3", DocType: "audio", SourceType: "file", SizeBytes: int64(len(body)), Status: "ok"})
+	seedRepresentation096(t, env, "dub.mp3", "transcript@t1")
+	seedNoSpeechRecord(t, env, "dub.mp3")
+
+	absent, err := env.store.NoSpeechTranscriptAbsent(context.Background(), "dub.mp3")
+	if err != nil || absent {
+		t.Fatalf("NoSpeechTranscriptAbsent = %v, %v; want false: track 1 has a transcript", absent, err)
+	}
+	if res := callOpenFile1100(t, env.url, map[string]interface{}{"rel_path": "dub.mp3"}); res.code == "MEDIA_NO_TEXT" {
+		t.Fatalf("a document with a transcript of another track must not answer MEDIA_NO_TEXT (body=%s)", res.raw)
+	}
+}

@@ -30,6 +30,8 @@ type cappedSilentTranscriber struct {
 	calls  int
 	limit  int
 	failAt map[int]error
+	// replies answers the 1-based requests it names with speech.
+	replies map[int]model.TranscriptResult
 }
 
 func (c *cappedSilentTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -43,6 +45,9 @@ func (c *cappedSilentTranscriber) TranscribeStructured(context.Context, string, 
 	c.calls++
 	if err := c.failAt[c.calls]; err != nil {
 		return model.TranscriptResult{}, err
+	}
+	if res, ok := c.replies[c.calls]; ok {
+		return res, nil
 	}
 	return model.TranscriptResult{}, nil
 }
@@ -501,5 +506,141 @@ func TestNoSpeech_PinnedWindowKeepsThePinnedLanguage(t *testing.T) {
 		if e.Language != "ky" || e.LanguageSource != "configured" {
 			t.Errorf("entry [%d,%d] = language %q source %q, want ky/configured for every window of a pinned recording", e.StartMS, e.EndMS, e.Language, e.LanguageSource)
 		}
+	}
+}
+
+// TestNoSpeech_RefusedWindowWithAFailedPieceCountsAsFailed: window 1 is over
+// the provider cap and is sent as two pieces. The first piece fails at the
+// provider. The second decodes in a language that the profile does not
+// declare, so the window is refused for its language. Every other window
+// holds no speech. The failed piece can hold speech in a covered language, so
+// the recording is a failure that is retried, not the language_uncovered skip.
+// With no failed piece the same recording is refused for its language and is
+// not a failure.
+//
+// Mutant killed: dropping the failed piece of a refused window from the
+// failed count.
+func TestNoSpeech_RefusedWindowWithAFailedPieceCountsAsFailed(t *testing.T) {
+	t.Parallel()
+	for _, failed := range []bool{true, false} {
+		failed := failed
+		name := "no failed piece"
+		if failed {
+			name = "one piece failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const totalMS = 30 * 60 * 1000
+			content := make([]byte, 300_000)
+			uncovered := model.TranscriptResult{
+				Text:     "[00:00] opening line spoken at some length\n[00:30] closing line spoken at some length",
+				Language: "uk", LanguageConfidence: 0.9,
+			}
+			tr := &cappedSilentTranscriber{limit: 200_000, replies: map[int]model.TranscriptResult{2: uncovered}}
+			if failed {
+				tr.failAt = map[int]error{1: windowProviderFailure}
+			} else {
+				tr.replies[1] = uncovered
+			}
+			h := newWindowSTTHarness(t, &windowRecordingTranscriber{}, totalMS, content)
+			h.oversize = 3 // every window comes out over the cap and is split
+			h.svc.SetTranscriber(tr)
+			h.svc.SetSTTIdentity("whisper", "large-v3")
+			h.svc.SetSTTLanguages([]string{"ru"})
+			h.svc.SetOnUncoveredLanguage("skip")
+			h.svc.SetLanguageScope("window")
+
+			err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/mixed.m4a"), content)
+			if !strings.Contains(h.logs.String(), "refusing window [0,") {
+				t.Fatalf("window 1 must be refused for its language; the fixture is wrong:\n%s", h.logs.String())
+			}
+			if failed {
+				if !errors.Is(err, ingest.ErrTranscriptProviderFailure) {
+					t.Fatalf("err = %v, want a transcript provider failure: the failed piece of the refused window can hold speech\n%s", err, h.logs.String())
+				}
+				return
+			}
+			if errors.Is(err, ingest.ErrTranscriptProviderFailure) {
+				t.Fatalf("with no failed piece the recording is refused, not failed: %v", err)
+			}
+		})
+	}
+}
+
+// silentWindowTranslator is a structured transcriber for the whisper translate
+// path. It fails the 1-based requests in failAt and answers every other
+// request with no speech.
+type silentWindowTranslator struct {
+	mu     sync.Mutex
+	calls  int
+	failAt map[int]error
+}
+
+func (f *silentWindowTranslator) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
+	res, err := f.TranscribeStructured(ctx, relPath, data)
+	return res.Text, err
+}
+
+func (f *silentWindowTranslator) TranscribeStructured(context.Context, string, []byte) (model.TranscriptResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if err := f.failAt[f.calls]; err != nil {
+		return model.TranscriptResult{}, err
+	}
+	return model.TranscriptResult{}, nil
+}
+
+// TestNoSpeech_TranslateWithAFailedWindowIsNotCachedAsEmpty: the whisper
+// translate pass decodes the source audio in windows. One window fails and
+// every other window holds no speech, so the translate decode has no text.
+// That is a failure, not an empty translation: it must not be cached, and the
+// next run must decode again. With no failed window the empty translation is
+// a success, and the next run reads it from the cache.
+//
+// Mutant killed: returning the empty text of a translate decode with a failed
+// window as a success, which caches it and stops every later retry.
+func TestNoSpeech_TranslateWithAFailedWindowIsNotCachedAsEmpty(t *testing.T) {
+	t.Parallel()
+	for _, failed := range []bool{true, false} {
+		failed := failed
+		name := "every window silent"
+		if failed {
+			name = "one window failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			stateDir := testutil.TempDir(t)
+			content := []byte("audio-bytes")
+			run := func() *silentWindowTranslator {
+				tr := &silentWindowTranslator{}
+				if failed {
+					tr.failAt = map[int]error{1: windowProviderFailure}
+				}
+				svc := mustNewIngestService(t, config.Config{StateDir: stateDir, MediaTranslateWhisperWindowSec: 600}, &fakeIngestStore{})
+				svc.SetTranscriber(&fakeTranscriber{text: "[00:00] привет\n[00:02] пока"})
+				svc.SetTranscriptLanguage("ru")
+				svc.SetTranslateTranscriber(tr, "whisper", "large-v3", []string{"en"})
+				svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 30 * time.Minute, nil }
+				svc.ExtractSegmentFunc = func(context.Context, string, int, int) ([]byte, error) { return []byte("slice"), nil }
+				doc := model.Document{DocID: 3, RelPath: "audio/clip.mp3", DocType: "audio"}
+				if err := svc.GenerateTranscriptRepresentation(context.Background(), doc, content); err != nil {
+					t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+				}
+				return tr
+			}
+
+			first := run()
+			if first.calls < 2 {
+				t.Fatalf("translate requests on the first run = %d, want a windowed decode; the fixture is wrong", first.calls)
+			}
+			second := run()
+			if failed && second.calls == 0 {
+				t.Fatalf("the second run sent no translate request: the failed decode was cached as an empty translation")
+			}
+			if !failed && second.calls != 0 {
+				t.Fatalf("the second run sent %d translate request(s), want 0: an empty translation with no failed window is cached", second.calls)
+			}
+		})
 	}
 }

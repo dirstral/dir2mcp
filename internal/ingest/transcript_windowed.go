@@ -553,11 +553,20 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	// transcript; §8.6.13 scopes the recorded coverage to the authoritative source
 	// transcript, so the coverage is dropped here and the decode is otherwise
 	// unchanged (issue #961).
-	text, words, _, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
+	text, words, coverage, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		s.getLogger().Printf("windowed translate %s: the audio cannot be sliced (%v); decoding in one pass", doc.RelPath, err)
 		return s.translateStructured(ctx, doc, content)
+	}
+	if err == nil {
+		// The coverage record is not kept for a translation, but its failed
+		// window count decides the outcome here: a failed window next to
+		// windows with no speech is a failure, as in the source decode
+		// (§8.6.13). Without this the caller would cache the empty text, and
+		// no later run would decode the recording again. An empty text with
+		// no failed window stays a successful empty translation.
+		err = failedBesideNoSpeech(doc.RelPath, text, coverage)
 	}
 	return text, words, err
 }
@@ -657,9 +666,9 @@ type windowStats struct {
 	decoded   int
 	// failed counts the windows that failed: a cut failure, a window with no
 	// decoded piece and no refusal (a transport or provider failure), a
-	// decoded window that lost a piece, or a no-speech window that the
-	// default profile decoded after the window's route failed (the last two
-	// also count in decoded).
+	// decoded or refused window that lost a piece, or a no-speech window that
+	// the default profile decoded after the window's route failed (a decoded
+	// window of these also counts in decoded).
 	failed int
 	ranges []CoverageRange
 	// languages and refused are the §8.2.2 per-window records, populated only
@@ -724,7 +733,11 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 			firstDecodeErr = wd.err
 		}
 		if len(wd.decoded) == 0 {
-			if len(wd.refused) == 0 {
+			// A window with no decoded piece failed, unless it was refused. A
+			// refused window that lost a piece failed too: the cap split it,
+			// one piece was refused and another has no result, and that piece
+			// can hold speech.
+			if len(wd.refused) == 0 || wd.piecesFailed {
 				stats.failed++
 			}
 			continue

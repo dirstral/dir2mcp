@@ -174,9 +174,10 @@ type windowDecode struct {
 	// noSpeech is the window's core when its decode was a no-speech result
 	// (SPEC 0.96.0), nil otherwise.
 	noSpeech *CoverageRange
-	// piecesFailed is true for a decoded window that the payload cap split
-	// and that has no result for at least one piece. The window keeps the
-	// pieces that decoded, and the decode counts one failed window for it.
+	// piecesFailed is true for a decoded or refused window that the payload
+	// cap split and that has no result for at least one piece. A decoded
+	// window keeps the pieces that decoded. The decode counts one failed
+	// window for it in both cases.
 	piecesFailed bool
 	// fallbackNoSpeech is true for a no-speech window that the default
 	// profile decoded because the window's route failed (§8.2.4). The decode
@@ -257,6 +258,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 		s.getLogger().Printf("windowed %s: refusing window [%d,%d]ms of %s: language %q is outside %s's declared coverage %v (media.stt.on_uncovered_language=skip, SPEC §8.2.2)",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 		out.refused, out.languages = st.refuse(core, model.RefusedLanguageUncovered)
+		out.piecesFailed = len(results) < len(pieces)
 		st.advance(lang, source, conf, cur)
 		return out
 	case model.RefusedQualityGate:
@@ -267,6 +269,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			plan.label, core.StartMS, core.EndMS, relPath, v.finding.Reason, v.finding.Detail)
 		out.refused, out.languages = st.refuse(core, model.RefusedQualityGate)
 		out.qualityReason = string(v.finding.Reason)
+		out.piecesFailed = len(results) < len(pieces)
 		st.advance(lang, source, conf, cur)
 		return out
 	}
