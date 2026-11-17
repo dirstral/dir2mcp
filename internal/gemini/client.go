@@ -580,6 +580,12 @@ type geminiPart struct {
 // present text of another type (null, a number, an object) makes the response
 // malformed. An absent text field and an empty string decode as before.
 func (p *geminiPart) UnmarshalJSON(data []byte) error {
+	// encoding/json calls this method for a JSON null too. A null part is not
+	// an object, so it holds no text field at all: malformed. An empty object
+	// ({}) is a part with no text and stays valid.
+	if isJSONNull(data) {
+		return errors.New("gemini response part: the part is null")
+	}
 	var aux struct {
 		Text       json.RawMessage   `json:"text"`
 		InlineData *geminiInlineData `json:"inlineData"`
@@ -599,6 +605,33 @@ func (p *geminiPart) UnmarshalJSON(data []byte) error {
 
 type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
+}
+
+// UnmarshalJSON decodes a response content object. An absent parts field is
+// valid: Gemini omits it when the model generated nothing (a no-speech result
+// for transcription). A parts field that is present must be an array, so an
+// explicit null makes the response malformed, as a field of the wrong type
+// does in every other STT response (SPEC §8.2).
+func (c *geminiContent) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		Parts json.RawMessage `json:"parts"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	c.Parts = nil
+	if len(aux.Parts) == 0 {
+		return nil
+	}
+	if isJSONNull(aux.Parts) {
+		return errors.New("gemini response content: parts is null")
+	}
+	return json.Unmarshal(aux.Parts, &c.Parts)
+}
+
+// isJSONNull reports whether raw is the JSON literal null.
+func isJSONNull(raw []byte) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }
 
 type geminiPrebuiltVoice struct {

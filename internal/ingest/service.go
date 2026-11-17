@@ -553,8 +553,9 @@ type Service struct {
 	// gate rejection to the failing TRACK instead of the whole document (SPEC
 	// §8.6.12). It is set only while transcribing a multi-track selection (all/list):
 	// there a rejected track's transcript is dropped and recorded as honest coverage,
-	// and the document is marked error only if EVERY selected track failed — that
-	// final decision is made by the per-track orchestrator, not per gate call. The
+	// and the document is marked error only when no selected track produced a
+	// transcript and at least one selected track failed. That final decision is
+	// made by the per-track orchestrator, not per gate call. The
 	// chunk-level quarantine encoded in the returned decision is unaffected. It is
 	// per-document/per-pass state (the scan loop is sequential) and is always reset to
 	// false after the multi-track loop.
@@ -5614,8 +5615,9 @@ func (s *Service) screenOutputQualityWith(gate *quality.Gate, ctx context.Contex
 	//
 	// §8.6.12: while transcribing a multi-track selection the doc-error marking is
 	// DEFERRED (deferGateDocError) so a gate rejection fails only that track; the
-	// orchestrator marks the document error only if every selected track failed. The
-	// chunk-level quarantine below is unaffected either way.
+	// orchestrator marks the document error only when no selected track produced
+	// a transcript and at least one selected track failed. The chunk-level
+	// quarantine below is unaffected either way.
 	if !s.deferGateDocError {
 		s.recordQualityGateDocError(ctx, doc, kind, reason)
 	}
@@ -5758,8 +5760,9 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 // stream order. Track-scoped failure semantics apply: a per-track transcription
 // error or quality-gate rejection fails ONLY that track (its representation is
 // dropped and recorded as honest coverage), and the DOCUMENT is reported as an
-// error only if EVERY selected track failed — otherwise it is ready with whatever
-// tracks succeeded.
+// error only when no selected track produced a transcript and at least one
+// selected track failed. A track with no speech did not fail (§8.6.13). Otherwise
+// the document is ready with whatever tracks succeeded.
 func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc model.Document, content []byte, sel config.STTTrackSelection) (bool, string, error) {
 	info := s.probeTrackInfo(ctx, doc)
 	indices := resolveTrackIndices(sel, info)
@@ -5908,7 +5911,9 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 // dropped this track's transcript under the deferred multi-track semantics
 // (§8.6.12); skipReason names the refusal that dropped the track on purpose
 // (transcript_partial for the §8.6.13 floor, language_uncovered for a §8.2.2
-// decode whose every window was refused), empty otherwise; err carries a
+// decode in which no window produced text, a window was refused for its
+// language and no window failed; no_speech when every window is a no-speech
+// result), empty otherwise; err carries a
 // provider/transient transcription failure or a hard persistence error. Track 0
 // keeps the bare `transcript` rep_type and is byte-for-byte identical to the legacy
 // single-track path; each additional track N ≥ 1 is persisted under

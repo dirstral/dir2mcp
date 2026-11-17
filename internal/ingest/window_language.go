@@ -365,8 +365,9 @@ func windowGateConfigFrom(base quality.Config) quality.Config {
 // windowDocGateConfigFrom is the document-level gate for a transcript whose
 // windows were already gated (SPEC §8.2.2): only the empty and density
 // detectors. Repetition, gibberish and script mismatch ran on every window, and
-// a window that passed them must not fail the document through the merged text,
-// which the spec fails only when every window fails.
+// a window that passed them must not fail the document through the merged text.
+// A no-speech window is not gated: the spec fails the document when every
+// gated window fails, also when the other windows are no-speech results.
 func windowDocGateConfigFrom(base quality.Config) quality.Config {
 	cfg := base
 	cfg.Repetition.Enabled = false

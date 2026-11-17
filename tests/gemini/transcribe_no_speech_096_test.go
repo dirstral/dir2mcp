@@ -33,6 +33,7 @@ func TestTranscribe_EmptyGeneratedTextIsNoSpeech(t *testing.T) {
 		"no finishReason": `{"candidates":[{"content":{"parts":[{"text":""}]}}]}`,
 		// A part with no text field is as before: no generated text.
 		"part with no text field": `{"candidates":[{"content":{"parts":[{}]},"finishReason":"STOP"}]}`,
+		"empty parts array":       `{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			text, err := newClient(geminiSTTServer(t, body).URL).Transcribe(context.Background(), "music.mp3", []byte("audio"))
@@ -66,6 +67,15 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 		"null text":   `{"candidates":[{"content":{"parts":[{"text":null}]},"finishReason":"STOP"}]}`,
 		"number text": `{"candidates":[{"content":{"parts":[{"text":7}]},"finishReason":"STOP"}]}`,
 		"object text": `{"candidates":[{"content":{"parts":[{"text":{}}]},"finishReason":"STOP"}]}`,
+		// A null where an object or an array must be. A null part and a null
+		// parts field are malformed. A null content and a null candidate have
+		// no content object, and null candidates is a response with no
+		// candidate: the existing rules cover those three.
+		"null part":        `{"candidates":[{"content":{"parts":[null]},"finishReason":"STOP"}]}`,
+		"null among parts": `{"candidates":[{"content":{"parts":[{"text":""},null]},"finishReason":"STOP"}]}`,
+		"null parts":       `{"candidates":[{"content":{"parts":null},"finishReason":"STOP"}]}`,
+		"null candidate":   `{"candidates":[null]}`,
+		"null candidates":  `{"candidates":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := newClient(geminiSTTServer(t, body).URL).Transcribe(context.Background(), "music.mp3", []byte("audio"))
