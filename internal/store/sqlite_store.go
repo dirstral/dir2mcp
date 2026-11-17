@@ -1122,16 +1122,45 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	// otherwise). Title intentionally uses the CASE-preserve pattern because
 	// title can be extracted *after* the first upsert; error_message has no
 	// such two-phase write, so the always-replace semantics are correct.
+	// Secret-policy re-evaluation mark (SPEC §7.2, spec 0.96.0). The writer's
+	// context carries the identity of the policy it screened this document with
+	// (model.WithSecretPolicyIdentity). The statement compares it with the
+	// identity the store records now, inside the one statement, so a policy
+	// change cannot fall between the comparison and the write:
+	//
+	//   - evaluated under the recorded policy, and the write finalizes (a
+	//     content hash): the mark is cleared;
+	//   - evaluated under another policy (a scan that started before the last
+	//     policy change): the document is marked, so no tool returns it until a
+	//     pass evaluates it against the current policy;
+	//   - no identity (a writer that screens nothing): the mark stays as it is.
+	//
+	// A row that keeps or gets the mark never stores a content hash. An empty
+	// hash is the "not finalized" state, so the next scan reads the document
+	// again and decides under the policy that is current then.
+	// recorded is the identity the store records now; stale and current are the
+	// two outcomes of the comparison described above.
+	const (
+		recorded = `COALESCE((SELECT value FROM settings WHERE key = @policy_key), '')`
+		stale    = `(@scan <> '' AND ` + recorded + ` <> '' AND ` + recorded + ` <> @scan)`
+		current  = `(@scan <> '' AND @hash <> '' AND ` + recorded + ` = @scan)`
+	)
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message, skip_reason)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, etag, sidecar_fingerprint, status, deleted, title, error_message, skip_reason, secret_reeval_pending)
+		 VALUES(@rel_path, @doc_type, @source_type, @size_bytes, @mtime_unix,
+		        CASE WHEN `+stale+` THEN '' ELSE @hash END,
+		        @etag, @sidecar_fingerprint, @status, @deleted, @title, @error_message, @skip_reason,
+		        CASE WHEN `+stale+` THEN 1 ELSE 0 END)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
 		   source_type=excluded.source_type,
 		   size_bytes=excluded.size_bytes,
 		   mtime_unix=excluded.mtime_unix,
-		   content_hash=excluded.content_hash,
+		   content_hash=CASE
+		     WHEN excluded.secret_reeval_pending = 1 THEN ''
+		     WHEN documents.secret_reeval_pending = 1 AND NOT `+current+` THEN ''
+		     ELSE excluded.content_hash END,
 		   etag=excluded.etag,
 		   sidecar_fingerprint=excluded.sidecar_fingerprint,
 		   status=excluded.status,
@@ -1139,20 +1168,25 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   title=CASE WHEN excluded.title <> '' THEN excluded.title ELSE documents.title END,
 		   error_message=excluded.error_message,
 		   skip_reason=excluded.skip_reason,
-		   secret_reeval_pending=CASE WHEN excluded.content_hash <> '' THEN 0 ELSE documents.secret_reeval_pending END`,
-		relPath,
-		normalizeDocType(doc.DocType),
-		normalizeSourceType(doc.SourceType),
-		doc.SizeBytes,
-		doc.MTimeUnix,
-		strings.TrimSpace(doc.ContentHash),
-		strings.TrimSpace(doc.ETag),
-		doc.SidecarFingerprint,
-		normalizeStatus(doc.Status),
-		boolToInt(doc.Deleted),
-		strings.TrimSpace(doc.Title),
-		sanitizeDocErrorMessage(doc.ErrorMessage),
-		strings.TrimSpace(doc.SkipReason),
+		   secret_reeval_pending=CASE
+		     WHEN excluded.secret_reeval_pending = 1 THEN 1
+		     WHEN `+current+` THEN 0
+		     ELSE documents.secret_reeval_pending END`,
+		sql.Named("policy_key", SecretPolicyIdentitySetting),
+		sql.Named("scan", strings.TrimSpace(model.SecretPolicyIdentityFrom(ctx))),
+		sql.Named("hash", strings.TrimSpace(doc.ContentHash)),
+		sql.Named("rel_path", relPath),
+		sql.Named("doc_type", normalizeDocType(doc.DocType)),
+		sql.Named("source_type", normalizeSourceType(doc.SourceType)),
+		sql.Named("size_bytes", doc.SizeBytes),
+		sql.Named("mtime_unix", doc.MTimeUnix),
+		sql.Named("etag", strings.TrimSpace(doc.ETag)),
+		sql.Named("sidecar_fingerprint", doc.SidecarFingerprint),
+		sql.Named("status", normalizeStatus(doc.Status)),
+		sql.Named("deleted", boolToInt(doc.Deleted)),
+		sql.Named("title", strings.TrimSpace(doc.Title)),
+		sql.Named("error_message", sanitizeDocErrorMessage(doc.ErrorMessage)),
+		sql.Named("skip_reason", strings.TrimSpace(doc.SkipReason)),
 	)
 	return err
 }

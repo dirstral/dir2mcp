@@ -164,6 +164,13 @@ need to run `dir2mcp reindex`.
   read the pending marks, it sends no candidate text to the reranker and the
   request fails. A check of each excerpt is not enough here, because a
   credential can cross a chunk boundary and then no single excerpt matches.
+- **Only the current lists release a marked document.** Each scan writes its
+  documents with the fingerprint of the lists it checked them with. The store
+  clears a mark only when that fingerprint equals the recorded one. A scan
+  that started before the last change cannot release a document, and a
+  document it writes is marked for the next scan. A marked document also stays
+  marked through a later change, also one that can only match less, until a
+  scan checks it against the lists that are current then.
 - **A change that can only match less skips that read and hides nothing.**
   Only three changes count: a removed secret pattern, an added allow pattern,
   and the shipped narrowings of the `sk-`, `sk_` and `api_` rules. Any other
@@ -187,7 +194,11 @@ effect when it answers:
   returns `FORBIDDEN` when the source matches. This is the same check ingest
   makes on the same bytes. It reads the source once for each call, so the
   part it returns comes from the bytes that it checked; a file that changes
-  during the call cannot add content that no check covered. The read is
+  during the call cannot add content that no check covered. This also applies
+  when the index holds page or time chunks for a text file: the whole file is
+  checked first. For a document whose text is derived (a PDF, an image, audio,
+  video, an office document), a page or a transcript excerpt comes from the
+  stored chunks, and the check covers that excerpt. The read is
   bounded by `ingest.max_file_mb`. A
   source over that cap returns `FILE_TOO_LARGE`: ingest never checked or
   indexed it.

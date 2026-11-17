@@ -2141,6 +2141,13 @@ func (s *Service) runScan(ctx context.Context) error {
 	// incremental gates would otherwise never re-read, and indexed documents
 	// that the new set matches (SPEC §7.2, spec 0.96.0). Both are applied here,
 	// before any document is visited.
+	//
+	// Every document write of this scan carries the identity of the policy the
+	// scan screens with. The store releases a document that waits for
+	// re-evaluation only on a write whose identity equals the one it records at
+	// that moment, so a scan that started before a later policy change cannot
+	// release a document that the later policy has not evaluated.
+	ctx = withSecretPolicyIdentity(ctx, compiledSecrets)
 	if err := s.beginSecretPolicyReevaluation(ctx, compiledSecrets); err != nil {
 		return err
 	}
@@ -2565,6 +2572,7 @@ func (s *Service) refreshDocID(ctx context.Context, doc *model.Document) error {
 // file's content, records the status transition, and generates the representations
 // of an ok document.
 func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns *secretmatch.Matcher, forceReindex bool, seen map[string]struct{}) error {
+	ctx = withSecretPolicyIdentity(ctx, secretPatterns)
 	// Authoritative per-document reset of the §8.6.6/#426 quality-gate quarantine
 	// flag. The scan loop is sequential (at most one asset in flight), so resetting
 	// here — at the VERY START, before any early-return branch (build error, remote
@@ -3011,6 +3019,18 @@ func (s *Service) deriveDocument(ctx context.Context, f DiscoveredFile, secretPa
 	s.recordContentHash(doc.ContentHash)
 
 	derived := s.deriveDocumentTranslations(ctx, f, doc)
+	// A translation matched the secret policy and the withholding did not
+	// complete (the row write or the retirement failed). Surface it: the scan
+	// counts an error for this document, and the next derivation pass retries
+	// (see withholdInDerivationPass).
+	if s.secretWithholdFailedThisDoc {
+		return fmt.Errorf("secret policy: withholding %s did not complete; the next scan retries", doc.RelPath)
+	}
+	// The document is withheld now: it has no output to reconcile or to write
+	// back.
+	if s.secretExcludedThisDoc {
+		return nil
+	}
 	// The translations just derived are the last outputs of this document for
 	// the run, so the output reconciliation runs here as it runs after the
 	// generation pass in single-pass mode (#692, #1133): the transcription pass
@@ -3552,6 +3572,7 @@ func buildArchiveMemberDocument(
 // memory (e.g. an archive member). relPath is the virtual path stored in the
 // documents table; mtimeUnix is inherited from the parent archive.
 func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns *secretmatch.Matcher, forceReindex bool) error {
+	ctx = withSecretPolicyIdentity(ctx, secretPatterns)
 	// Each archive member is an independent document, so it opens its own
 	// per-document secret scope (#681) even though the members of one archive run
 	// under a single processDocument entry.

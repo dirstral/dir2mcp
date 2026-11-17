@@ -254,3 +254,14 @@ func (s *Service) retireUncheckedTranslations(ctx context.Context, relPath strin
 	s.getLogger().Printf("secret policy: retired %d translation(s) of %s; the derivation pass derives and checks them again", len(unchecked), relPath)
 	return nil
 }
+
+// withSecretPolicyIdentity attaches the identity of the policy that matcher
+// applies to ctx, unless ctx already carries one (the scan attaches it once,
+// and each document of the scan is screened with the same matcher). The store
+// reads it on every document write (model.WithSecretPolicyIdentity).
+func withSecretPolicyIdentity(ctx context.Context, matcher *secretmatch.Matcher) context.Context {
+	if model.SecretPolicyIdentityFrom(ctx) != "" {
+		return ctx
+	}
+	return model.WithSecretPolicyIdentity(ctx, matcher.Policy().Identity())
+}

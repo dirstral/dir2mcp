@@ -3,7 +3,9 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 
@@ -32,14 +34,8 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 		return model.RelatedResult{}, model.ErrRelatedNotSupported
 	}
 	k := s.effectiveK(q.K)
-	seed, err := s.resolveRelatedSource(ctx, cs, q)
+	seed, err := s.resolveCheckedRelatedSeed(ctx, cs, q)
 	if err != nil {
-		return model.RelatedResult{}, err
-	}
-	// A seed document that waits for re-evaluation against a broader secret
-	// policy is withheld whole (SPEC §7.2, spec 0.96.0). Its text must not
-	// reach the embedder, so the check runs before relatedNeighbors embeds it.
-	if err := s.rejectPendingSeed(ctx, seed); err != nil {
 		return model.RelatedResult{}, err
 	}
 	// Retrieve more than k, so the secret screen below can leave hits out and
@@ -102,6 +98,78 @@ type relatedSeed struct {
 	axis        string // text|code|both
 	excludeIDs  map[uint64]struct{}
 	textsByAxis map[string][]string
+}
+
+// resolveCheckedRelatedSeed resolves the seed and proves that its text
+// belongs to a document state that the current secret policy evaluated (SPEC
+// §7.2, spec 0.96.0). The seed text goes to an embedder, so it must not come
+// from a document that waits for re-evaluation.
+//
+// The pending check alone is not enough. A broader policy can mark the
+// document after the seed text is read, and a scan can replace the document
+// and clear the mark before the check runs: the check then passes for text
+// that only the earlier policy evaluated. So the document generation (status
+// and content hash; a policy reset clears the hash, and a new version of the
+// document has another one) is read before the seed text and again after the
+// pending check. The seed is used only when both readings are equal:
+//
+//  1. resolve the seed once, to learn its document;
+//  2. read the generation;
+//  3. resolve the seed again: this is the text that is used;
+//  4. reject a pending document;
+//  5. read the generation again and compare.
+//
+// A reset or a replacement between 2 and 5 changes the generation or leaves
+// the mark set, and the request is refused. The caller can try again.
+func (s *Service) resolveCheckedRelatedSeed(ctx context.Context, cs relatedChunkStore, q model.RelatedQuery) (*relatedSeed, error) {
+	first, err := s.resolveRelatedSource(ctx, cs, q)
+	if err != nil {
+		return nil, err
+	}
+	before, err := s.seedDocumentGeneration(ctx, first.relPath)
+	if err != nil {
+		return nil, err
+	}
+	seed, err := s.resolveRelatedSource(ctx, cs, q)
+	if err != nil {
+		return nil, err
+	}
+	if seed.relPath != first.relPath {
+		return nil, model.ErrForbidden
+	}
+	if err := s.rejectPendingSeed(ctx, seed); err != nil {
+		return nil, err
+	}
+	after, err := s.seedDocumentGeneration(ctx, seed.relPath)
+	if err != nil {
+		return nil, err
+	}
+	if after != before {
+		s.logf("related: the seed document changed during the request; the seed text is not used")
+		return nil, model.ErrForbidden
+	}
+	return seed, nil
+}
+
+// seedDocumentGeneration returns a value that changes when the seed document
+// is reset for a secret-policy change or replaced by a scan: its status and
+// content hash. A store with no row for the path gives the empty generation.
+// Any other store error is returned: the seed cannot be proven current.
+func (s *Service) seedDocumentGeneration(ctx context.Context, relPath string) (string, error) {
+	s.metaMu.RLock()
+	st := s.store
+	s.metaMu.RUnlock()
+	if st == nil || relPath == "" {
+		return "", nil
+	}
+	doc, err := st.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("related: read the seed document: %w", err)
+	}
+	return doc.Status + "\x00" + doc.ContentHash, nil
 }
 
 // rejectPendingSeed returns model.ErrForbidden when the seed document waits

@@ -3922,10 +3922,35 @@ func handleYAMLInlineList(cfg *fileConfig, key, value string, lineNo int) error 
 		setFileListValue(cfg, key, "")
 		return nil
 	}
-	for _, token := range strings.Split(inner, ",") {
+	for _, token := range splitInlineListItems(inner) {
 		setFileListValue(cfg, key, unquoteYAMLScalar(strings.TrimSpace(token)))
 	}
 	return nil
+}
+
+// splitInlineListItems splits the inside of a bracketed inline list at each
+// comma that is outside a quoted scalar. A comma inside a quoted item (for
+// example the `{20,}` of a regular expression) belongs to that item. A quote
+// opens a quoted scalar only at the start of an item, as in YAML flow style.
+func splitInlineListItems(inner string) []string {
+	var items []string
+	start := 0
+	atItemStart := true
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		switch {
+		case c == ',':
+			items = append(items, inner[start:i])
+			start = i + 1
+			atItemStart = true
+		case atItemStart && (c == '\'' || c == '"'):
+			i = quotedScalarEnd(inner, i)
+			atItemStart = false
+		case c != ' ' && c != '\t':
+			atItemStart = false
+		}
+	}
+	return append(items, inner[start:])
 }
 
 // nearestSectionPrefix returns the section name registered at the

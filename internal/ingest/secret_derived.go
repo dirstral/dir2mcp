@@ -145,22 +145,60 @@ func (s *Service) withholdDocumentForSecret(ctx context.Context, doc model.Docum
 		doc.RelPath, kind,
 	)
 
+	doc.Status = string(model.DocumentStatusSecretExcluded)
+	doc.SkipReason = model.SkipReasonSecretExcluded
+	doc.Title = ""
+	doc.ErrorMessage = ""
+
+	if s.activePass == passDerivation {
+		s.withholdInDerivationPass(ctx, doc)
+		return
+	}
+
 	if err := s.retireRepresentationsForPath(ctx, doc.RelPath, "secret policy"); err != nil {
 		// Still record the row as withheld below: that hides the document from
 		// list_files and status. The flag keeps its done marker blank, so the
 		// next scan retries the retirement (see finalizeSecretExcluded).
 		s.secretWithholdFailedThisDoc = true
 	}
-
-	doc.Status = string(model.DocumentStatusSecretExcluded)
-	doc.SkipReason = model.SkipReasonSecretExcluded
-	doc.Title = ""
-	doc.ErrorMessage = ""
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
 		s.getLogger().Printf("secret policy: record secret_excluded for %s failed: %v", doc.RelPath, err)
 		s.secretWithholdFailedThisDoc = true
 	}
 
+	s.creditSecretExcludedSkip(doc)
+}
+
+// withholdInDerivationPass withholds a document in the two-phase derivation
+// pass. doc already carries the secret_excluded status.
+//
+// The order differs from the other passes: the row is written FIRST, and the
+// representations are retired after it. In this pass the done marker is
+// already stamped and must stay stamped, so no blank marker can make the next
+// scan retry. Each order must therefore leave a state from which the next
+// derivation pass retries on its own:
+//
+//   - the row write fails: nothing changed. The document is still `ok` with
+//     its transcript, and the text that matched was not persisted. The next
+//     derivation pass finds the translation missing, derives it again and
+//     withholds again. Retiring first would leave an `ok` row with no
+//     representation: under the first-track selection no later pass reads it
+//     again, so it would stay unsearchable with no error and no retry.
+//   - the row is written and the retirement fails: the row is
+//     `secret_excluded`, and deriveDocument retires the live representations
+//     of such a row on every derivation pass.
+//
+// Both failures set secretWithholdFailedThisDoc, and deriveDocument returns
+// them as an error.
+func (s *Service) withholdInDerivationPass(ctx context.Context, doc model.Document) {
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		s.getLogger().Printf("secret policy: record secret_excluded for %s failed: %v", doc.RelPath, err)
+		s.secretWithholdFailedThisDoc = true
+		return
+	}
+	if err := s.retireRepresentationsForPath(ctx, doc.RelPath, "secret policy"); err != nil {
+		s.secretWithholdFailedThisDoc = true
+	}
 	s.creditSecretExcludedSkip(doc)
 }
 

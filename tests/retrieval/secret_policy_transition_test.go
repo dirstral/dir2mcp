@@ -79,7 +79,7 @@ func TestSecretPolicyTransition_BroaderChangeHidesEverythingBeforeTheScan(t *tes
 	if _, err := f.store.ResetForSecretPolicy(ctx, active.Identity(), active.Secret, active.Allow, true); err != nil {
 		t.Fatalf("ResetForSecretPolicy: %v", err)
 	}
-	if err := f.store.UpsertDocument(ctx, model.Document{RelPath: "clean.md", DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
+	if err := f.store.UpsertDocument(model.WithSecretPolicyIdentity(ctx, active.Identity()), model.Document{RelPath: "clean.md", DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
 		t.Fatalf("UpsertDocument: %v", err)
 	}
 	if got := f.searchIDs(t); got != "[3]" {

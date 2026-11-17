@@ -15,7 +15,7 @@ import (
 //
 // open_file publishes a bounded answer: max_chars is clamped to 50000 runes.
 // The caller reads the source once, bounded by ingest.max_file_mb, and checks
-// all of it against the secret policy (see openFileFromResolvedPath). The
+// all of it against the secret policy (see readCheckedSource). The
 // selectors below then stream over those bytes and retain at most one read
 // budget, so the answer itself never costs more than one budget, and no line,
 // page or transcript selection builds a second copy of the source.

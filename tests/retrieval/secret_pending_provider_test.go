@@ -32,6 +32,8 @@ type providerPendingStore struct {
 	*store.SQLiteStore
 	chunks  map[uint64]providerChunk
 	pendErr error
+	// beforePending runs once, just before the next pending lookup answers.
+	beforePending func()
 }
 
 func (s *providerPendingStore) ChunkTaskByID(_ context.Context, chunkID uint64) (model.ChunkTask, string, error) {
@@ -61,6 +63,10 @@ func (s *providerPendingStore) EmbeddedChunksByPath(_ context.Context, relPath s
 func (s *providerPendingStore) SecretReevalPendingPaths(ctx context.Context, relPaths []string) (map[string]struct{}, error) {
 	if s.pendErr != nil {
 		return nil, s.pendErr
+	}
+	if hook := s.beforePending; hook != nil {
+		s.beforePending = nil
+		hook()
 	}
 	return s.SQLiteStore.SecretReevalPendingPaths(ctx, relPaths)
 }
@@ -137,7 +143,7 @@ func newProviderFixture(t *testing.T) *providerFixture {
 		t.Fatalf("ResetForSecretPolicy: %v", err)
 	}
 	for _, rel := range []string{"b.md", "c.md"} {
-		if err := st.UpsertDocument(ctx, model.Document{RelPath: rel, DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
+		if err := st.UpsertDocument(model.WithSecretPolicyIdentity(ctx, "v2:test"), model.Document{RelPath: rel, DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
 			t.Fatalf("UpsertDocument(%s): %v", rel, err)
 		}
 	}
@@ -265,5 +271,39 @@ func TestSecretPending_RelatedFailedLookupEmbedsNothing(t *testing.T) {
 	defer f.embedder.mu.Unlock()
 	if len(f.embedder.texts) != 0 {
 		t.Fatalf("the embedder received %d text(s) while the pending lookup failed", len(f.embedder.texts))
+	}
+}
+
+// TestSecretPending_RelatedRejectsASeedThatChangedDuringTheRequest runs the
+// race in order. Related reads the seed text of b.md. Then, before its
+// pending check, a broader policy marks the document and a scan replaces it
+// and clears the mark. The pending check passes, but the text that Related
+// holds was evaluated only under the earlier policy, so it must not reach the
+// embedder.
+func TestSecretPending_RelatedRejectsASeedThatChangedDuringTheRequest(t *testing.T) {
+	for name, q := range map[string]model.RelatedQuery{
+		"chunk_id seed": {SourceChunkID: 3, K: 3, Index: "text", ExcludeSameDocument: true},
+		"rel_path seed": {SourceRelPath: "b.md", K: 3, Index: "text"},
+	} {
+		f := newProviderFixture(t)
+		ctx := context.Background()
+		f.store.beforePending = func() {
+			if _, err := f.store.ResetForSecretPolicy(ctx, "v2:later", []string{`BLUEHERON`, `bridge`}, nil, true); err != nil {
+				t.Fatalf("ResetForSecretPolicy: %v", err)
+			}
+			replaced := model.Document{RelPath: "b.md", DocType: "md", Status: "ok", ContentHash: "h3"}
+			if err := f.store.UpsertDocument(model.WithSecretPolicyIdentity(ctx, "v2:later"), replaced); err != nil {
+				t.Fatalf("UpsertDocument: %v", err)
+			}
+		}
+		if _, err := f.svc.Related(ctx, q); !errors.Is(err, model.ErrForbidden) {
+			t.Errorf("%s: err = %v, want ErrForbidden for a seed that changed during the request", name, err)
+		}
+		f.embedder.mu.Lock()
+		n := len(f.embedder.texts)
+		f.embedder.mu.Unlock()
+		if n != 0 {
+			t.Errorf("%s: the embedder received %d seed text(s) that only the earlier policy evaluated", name, n)
+		}
 	}
 }

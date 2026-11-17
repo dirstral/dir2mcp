@@ -143,7 +143,9 @@ func TestSecretPending_BroaderSetHidesTheWholeDocument(t *testing.T) {
 
 	// The scan decides clean.md again: its row gets a content hash, which
 	// clears the mark, and the document is served again.
-	if err := f.store.UpsertDocument(ctx, model.Document{RelPath: "clean.md", DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
+	requireUnreleasedByOtherWriters(t, f)
+	// The scan that screens with the recorded policy decides the document.
+	if err := f.store.UpsertDocument(model.WithSecretPolicyIdentity(ctx, "v2:test"), model.Document{RelPath: "clean.md", DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
 		t.Fatalf("UpsertDocument: %v", err)
 	}
 	if got := f.searchIDs(t); got != "[3]" {
@@ -160,6 +162,27 @@ func TestSecretPending_BroaderSetHidesTheWholeDocument(t *testing.T) {
 	}
 	if got := f.searchIDs(t); got != "[3]" {
 		t.Fatalf("hits after an unfinalized upsert of split.md = %s, want [3]", got)
+	}
+}
+
+// requireUnreleasedByOtherWriters writes clean.md with no policy identity and
+// with the identity of an earlier policy. Neither write may release the
+// document: nothing shows that the current policy evaluated it. The row must
+// keep an empty content hash, so the next scan reads it again.
+func requireUnreleasedByOtherWriters(t *testing.T, f *pendingFixture) {
+	t.Helper()
+	ctx := context.Background()
+	for _, writer := range []context.Context{ctx, model.WithSecretPolicyIdentity(ctx, "v2:earlier")} {
+		if err := f.store.UpsertDocument(writer, model.Document{RelPath: "clean.md", DocType: "md", Status: "ok", ContentHash: "h2"}); err != nil {
+			t.Fatalf("UpsertDocument: %v", err)
+		}
+		if got := f.searchIDs(t); got != "[]" {
+			t.Fatalf("hits after a write that the current policy did not evaluate = %s, want []", got)
+		}
+		doc, err := f.store.GetDocumentByPath(ctx, "clean.md")
+		if err != nil || doc.ContentHash != "" {
+			t.Fatalf("a document that stays marked kept content hash %q (%v); the next scan would skip it", doc.ContentHash, err)
+		}
 	}
 }
 

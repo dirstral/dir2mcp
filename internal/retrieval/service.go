@@ -2713,8 +2713,17 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
-	if content, truncated, handled, err := s.openFileFromMetadata(ctx, normalizedRel, span, maxChars, secretPatterns, kind); handled {
-		return content, truncated, err
+	// A page or time span of a document whose searchable text is DERIVED (a
+	// PDF, an image, audio, video, an office document) is served from the
+	// stored chunks of that derived representation (OCR page, transcript
+	// excerpt). Ingest screened the derived text in full, and the check here
+	// covers the slice (SPEC §15.4). A text-native source is not that case:
+	// the whole-source rule applies to it, so its metadata selection runs
+	// below, after the whole source is read and checked.
+	if hasDerivedText(normalizedRel) {
+		if content, truncated, handled, err := s.openFileFromMetadata(ctx, normalizedRel, span, maxChars, secretPatterns, kind); handled {
+			return content, truncated, err
+		}
 	}
 
 	// Symlink resolution and in-root containment are local-filesystem concerns.
@@ -2740,7 +2749,25 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return s.openBinaryDocText(ctx, corpusFS, stateDir, resolvedAbs, normalizedRel, secretPatterns, kind, maxChars)
 	}
 
-	return s.openFileFromResolvedPath(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
+	return s.openTextNativeFile(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
+}
+
+// openTextNativeFile answers open_file from a source that is read as text. It
+// reads the source once and checks all of it before any selection. For a
+// text-native path, the selection from the stored chunks (a page or time
+// span) runs only after that check; a document with derived text was served
+// from its stored chunks earlier, in openFile.
+func (s *Service) openTextNativeFile(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, span model.Span, maxChars int) (string, bool, error) {
+	data, err := s.readCheckedSource(ctx, corpusFS, resolvedAbs, relPath, secretPatterns)
+	if err != nil {
+		return "", false, err
+	}
+	if !hasDerivedText(relPath) {
+		if content, truncated, handled, err := s.openFileFromMetadata(ctx, relPath, span, maxChars, secretPatterns, kind); handled {
+			return content, truncated, err
+		}
+	}
+	return selectCheckedSpan(data, kind, span, maxChars)
 }
 
 // openBinaryDocText answers open_file for a binary document type
@@ -2861,6 +2888,24 @@ func isVideoExt(ext string) bool {
 func isMediaDocExt(relPath string) bool {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext) || isVideoExt(ext)
+}
+
+// hasDerivedText reports whether the searchable text of relPath is a derived
+// representation, not the source bytes: OCR text of a PDF or an image, a
+// transcript of audio or video, text extracted from an office document. A
+// page or time span of such a document comes from the stored chunks of that
+// representation. Every other path is text-native: its source bytes are its
+// text, and the whole-source check applies before any selection (SPEC §15.4).
+func hasDerivedText(relPath string) bool {
+	if isMediaDocExt(relPath) {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
+	case ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".odp", ".ods", ".rtf", ".epub":
+		return true
+	default:
+		return false
+	}
 }
 
 // isBinaryDocType reports whether relPath has an extension whose contents are
@@ -3160,7 +3205,8 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 	return out, truncated, true, nil
 }
 
-// openFileFromResolvedPath serves the raw source of a text-native document.
+// readCheckedSource is the read behind every answer for a text-native
+// document.
 //
 // It reads the WHOLE source, bounded by the ingest.max_file_mb cap, and runs the
 // secret matcher (SPEC §7.2) over all of it before it selects or returns any
@@ -3175,27 +3221,35 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 // is refused here with FILE_TOO_LARGE (corpusfs.ErrObjectTooLarge, §14.4). The
 // read stops at cap+1 bytes, so memory and bandwidth stay bounded by the cap
 // (#690, #830); the span selection then retains at most one read budget.
-func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, span model.Span, maxChars int) (string, bool, error) {
+//
+// It returns the bytes it checked; every slice of the answer comes from them
+// or is checked again (SPEC §15.4).
+func (s *Service) readCheckedSource(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher) ([]byte, error) {
 	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
 
 	capBytes := s.sourceReadCapBytes()
 	data, err := io.ReadAll(io.LimitReader(&ctxReader{ctx: ctx, r: rc}, capBytes+1))
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	if int64(len(data)) > capBytes {
-		return "", false, fmt.Errorf("%w: %s (cap %d bytes)", corpusfs.ErrObjectTooLarge, relPath, capBytes)
+		return nil, fmt.Errorf("%w: %s (cap %d bytes)", corpusfs.ErrObjectTooLarge, relPath, capBytes)
 	}
 	// A secret outranks an unsatisfiable span, as the buffered path did: the
 	// check runs before the span is selected.
 	if secretPatterns.Match(data) {
-		return "", false, model.ErrForbidden
+		return nil, model.ErrForbidden
 	}
+	return data, nil
+}
 
+// selectCheckedSpan selects the requested span from bytes that
+// readCheckedSource checked.
+func selectCheckedSpan(data []byte, kind string, span model.Span, maxChars int) (string, bool, error) {
 	selection, selErr := selectSpan(bytes.NewReader(data), kind, span, openFileReadBudgetBytes(maxChars))
 	if selErr != nil {
 		return "", false, selErr

@@ -46,3 +46,28 @@ func TestSecretAllowPatterns_DefaultRoundTrips(t *testing.T) {
 		t.Fatalf("config file = %q, want %q", fromFile.SecretAllowPatterns, want)
 	}
 }
+
+// TestInlineList_CommaInsideAQuotedItem pins that an inline list is split
+// only at a comma outside a quoted scalar. A regular expression with `{20,}`
+// in a quoted item stays one item, for every list key.
+func TestInlineList_CommaInsideAQuotedItem(t *testing.T) {
+	yaml := "security:\n" +
+		`  secret_allow_patterns: ['https://example\.com/\?(page_token=[A-Z]{20,})', "feature_[a-z]{2,4}=x"]` + "\n" +
+		`  secret_patterns: ['MYCORP-[0-9]{4,}', plain-[a-z]+, 'it''s, quoted']` + "\n"
+	file := filepath.Join(testutil.TempDir(t), ".dir2mcp.yaml")
+	if err := os.WriteFile(file, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile(file)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	wantAllow := []string{`https://example\.com/\?(page_token=[A-Z]{20,})`, `feature_[a-z]{2,4}=x`}
+	if !reflect.DeepEqual(cfg.SecretAllowPatterns, wantAllow) {
+		t.Errorf("secret_allow_patterns = %q, want %q", cfg.SecretAllowPatterns, wantAllow)
+	}
+	wantSecret := []string{`MYCORP-[0-9]{4,}`, `plain-[a-z]+`, `it's, quoted`}
+	if !reflect.DeepEqual(cfg.SecretPatterns, wantSecret) {
+		t.Errorf("secret_patterns = %q, want %q", cfg.SecretPatterns, wantSecret)
+	}
+}

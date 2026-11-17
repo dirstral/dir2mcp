@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"database/sql"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,4 +223,67 @@ type markerTranslator struct{}
 
 func (markerTranslator) Generate(_ context.Context, prompt string) (string, error) {
 	return strings.ReplaceAll(numberedEcho(fencedPayload(prompt)), ": translated:", ": BLUEHERON-2026 "), nil
+}
+
+const (
+	blockWithholdTrigger = `CREATE TRIGGER block_withhold BEFORE UPDATE OF status ON documents
+		WHEN NEW.status = 'secret_excluded' BEGIN SELECT RAISE(ABORT, 'blocked by test'); END`
+	unblockWithholdTrigger = `DROP TRIGGER block_withhold`
+)
+
+// TestSecretPolicy_TwoPhaseDerivationStatusFailureIsRetried makes the
+// secret_excluded row write fail in the two-phase derivation pass. The
+// translated transcript matches a secret pattern. The failed pass must leave
+// the document as it was (indexed, with its transcript), not as an `ok` row
+// with no representation that no later pass reads again, and it must report
+// an error. The next scan's derivation pass withholds the document.
+func TestSecretPolicy_TwoPhaseDerivationStatusFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	mustWriteFile(t, filepath.Join(root, "audio", "one.mp3"), []byte("fake-audio-one"))
+	dbPath := filepath.Join(stateDir, "meta.sqlite")
+	st := store.NewSQLiteStore(dbPath)
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := config.Config{
+		RootDir:            root,
+		StateDir:           stateDir,
+		STTProvider:        "off",
+		MediaBatchTwoPhase: true,
+		SecretPatterns:     []string{`BLUEHERON-[0-9]{4}`},
+	}
+	scan := func() string {
+		t.Helper()
+		var logs syncBuffer
+		svc := mustNewIngestService(t, cfg, st)
+		svc.SetLogger(log.New(&logs, "", 0))
+		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro line\n[00:02] second line"})
+		svc.SetSTTIdentity("whisper", "whisper-large-v3")
+		svc.SetTranscriptLanguage("de")
+		svc.SetTranslator(markerTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
+		_ = svc.Run(context.Background())
+		return logs.String()
+	}
+
+	execStateDB(t, dbPath, blockWithholdTrigger)
+	logs := scan()
+	execStateDB(t, dbPath, unblockWithholdTrigger)
+	if !strings.Contains(logs, "record secret_excluded for audio/one.mp3 failed") {
+		t.Fatalf("the blocked row write was not reported; log:\n%s", logs)
+	}
+	requireStatus(t, st, "audio/one.mp3", model.DocumentStatusOK)
+	reps, err := st.ActiveRepresentations(context.Background(), "audio/one.mp3")
+	if err != nil {
+		t.Fatalf("ActiveRepresentations: %v", err)
+	}
+	if len(reps) == 0 {
+		t.Fatal("the failed withholding retired the representations of a document that is still `ok`; no later pass reads it again")
+	}
+
+	scan()
+	requireWithheldAndRetired(t, st, "audio/one.mp3")
 }
