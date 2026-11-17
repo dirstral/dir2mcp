@@ -311,7 +311,9 @@ that start with `#` and blank lines are skipped. Files that a line covers are
 processed first, in the order of the lines; every other file follows in
 relative-path order. A line that is exactly `*` stands for those other files
 and places them where it stands: put `*` first to process files added since
-the list was made (new uploads) before the listed ones. The list changes only
+the list was made (new uploads) before the listed ones. That holds only for a
+new file that no line covers: a new file under a listed directory keeps that
+directory's place. The list changes only
 the order: the same files are indexed and produce the same output.
 
 The list is read at the start of each scan, so you can regenerate it between
@@ -332,9 +334,11 @@ cd /path/to/corpus
   | sort -rn | cut -d' ' -f2-; } > priority.txt
 ```
 
-The `*` line first keeps uploads made after the list was built at the front.
-Regenerate the list now and then (a nightly job is enough) so those uploads
-also take their place in date order.
+The `*` line first keeps uploads made after the list was built at the front:
+each upload gets a new folder, which no line names yet. (An upload into a
+folder the list already names would keep that folder's place.) Regenerate the
+list now and then (a nightly job is enough) so those uploads also take their
+place in date order.
 
 ### Environment variables (overrides / secrets)
 
