@@ -28,7 +28,17 @@ both answer the non-retryable `MEDIA_NO_TEXT`:
   selected audio tracks, so there is no transcript. This holds for audio and
   video, and for each span kind (no span, lines, page, time). The tool does
   not return the retryable `OCR_NOT_READY` here, and it does not return empty
-  content. A no-speech track in a document that stays `ok` is not this case.
+  content.
+
+The same holds for a document that stays `status=ok` through another
+representation (recognition, for example) after every selected audio track was
+a no-speech result. Its transcript is absent, not pending. A call that would
+return the transcript returns `MEDIA_NO_TEXT`: the default call or a line span
+on an audio file, and a time span that no other representation answers. A call
+that another representation answers is answered from it, for example
+recognition text for a time span. A document in which one selected track has a
+transcript and another track holds no speech is not this case: the tool
+returns its transcript.
 
 A client must not retry on `MEDIA_NO_TEXT`. `OCR_NOT_READY` is the retryable
 answer: the text does not exist yet, and a later call can succeed.

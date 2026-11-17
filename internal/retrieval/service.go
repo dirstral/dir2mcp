@@ -2542,6 +2542,16 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return content, truncated, err
 	}
 
+	// SPEC §8.6.13, §15.4: a document that stays ok through another
+	// representation after every selected track was a no-speech result has no
+	// transcript, and none is pending. A call that another representation
+	// answers was answered above (recognition text for a time span). A call
+	// that would return the transcript gets the non-retryable MEDIA_NO_TEXT,
+	// never OCR_NOT_READY and never the empty cached transcript.
+	if s.wantsAbsentNoSpeechTranscript(ctx, normalizedRel, kind) {
+		return "", false, model.ErrMediaNoSpeech
+	}
+
 	// Symlink resolution and in-root containment are local-filesystem concerns.
 	// For an object-store backend (corpusFS set) there is no local path to
 	// EvalSymlinks — containment is enforced by the CorpusFS itself against the
@@ -2641,6 +2651,49 @@ func (s *Service) isNoSpeechSkippedDoc(ctx context.Context, relPath string) bool
 	return !doc.Deleted &&
 		strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped)) &&
 		strings.TrimSpace(doc.SkipReason) == model.SkipReasonNoSpeech
+}
+
+// noSpeechTranscriptChecker is the optional store capability that reports
+// whether every selected audio track of a document was a no-speech result, so
+// its transcript is absent and not pending (SPEC §8.6.13). A store without it
+// leaves open_file as it was.
+type noSpeechTranscriptChecker interface {
+	NoSpeechTranscriptAbsent(ctx context.Context, relPath string) (bool, error)
+}
+
+// wantsAbsentNoSpeechTranscript reports whether this open_file call asks for
+// the transcript of a document that is status="ok" and whose every selected
+// track was a no-speech result. The calls that would return a transcript are
+// the default call and a line span on an audio document, and a time span on
+// an audio or video document that no other representation answered. A page
+// span, and the default call on a video, never return a transcript, so they
+// keep their other answers. It is conservative: a missing row, a status other
+// than ok, a store without the capability or a lookup error returns false.
+func (s *Service) wantsAbsentNoSpeechTranscript(ctx context.Context, relPath, kind string) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	checker, ok := store.(noSpeechTranscriptChecker)
+	if !ok || store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil || doc.Deleted || !strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusOK)) {
+		return false
+	}
+	docType := strings.ToLower(strings.TrimSpace(doc.DocType))
+	switch {
+	case kind == "time" && (docType == "audio" || docType == "video"):
+	case (kind == "" || kind == "lines") && docType == "audio":
+	default:
+		return false
+	}
+	absent, err := checker.NoSpeechTranscriptAbsent(ctx, relPath)
+	if err != nil {
+		s.logf("open_file: no-speech transcript lookup for %q failed: %v", relPath, err)
+		return false
+	}
+	return absent
 }
 
 // chunkModalityChecker is the optional store capability used to classify a
