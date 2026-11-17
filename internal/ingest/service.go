@@ -2293,9 +2293,14 @@ func (s *Service) scanPass(ctx context.Context, pass processPass, discovered []D
 		}
 
 		if err != nil {
-			if countCorpus {
-				s.addErrors(1)
-			}
+			// A failure is counted in every pass. The scanned and skipped
+			// counters describe the corpus and are counted once, but an error
+			// that the derivation pass returns is a new failure of this run (a
+			// withholding that did not complete, a store failure), not a second
+			// count of one the first pass reported: the derivation pass skips a
+			// document that the first pass left in error. Without the count a
+			// scan reported zero errors while a withholding was incomplete.
+			s.addErrors(1)
 			// record that we saw the file even if processing failed so
 			// markMissingAsDeleted does not treat it as removed
 			seen[f.RelPath] = struct{}{}

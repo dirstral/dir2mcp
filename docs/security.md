@@ -32,6 +32,25 @@ document. Its status is `secret_excluded`, and `search`, `ask` and
 `open_file` do not return it. For ingest, a list in your config replaces the
 defaults.
 
+What "the raw bytes" means depends on the document type:
+
+- **Text, code, markdown, data and HTML files:** ingest checks every byte.
+  These bytes are the searchable text.
+- **Every other type (PDF, image, office document, audio, video):** ingest
+  checks only the first 64 KiB of the raw bytes. The rest of the file is not
+  checked as bytes. Do not conclude that dir2mcp finds a credential anywhere
+  in such a file: bytes after the first 64 KiB that never become text (for
+  example metadata or an attachment inside a container) are not checked.
+  What ingest checks in full is every text that it derives from the file:
+  extracted text, OCR text, the transcript, a subtitle sidecar, a
+  translation, an annotation. Only derived text becomes searchable.
+- **`ingest.media_identity`** does not change this for audio and video. With
+  `full`, ingest reads the whole file for its content hash, and checks the
+  first 64 KiB. With `sampled`, ingest reads three slices of a large file for
+  its identity, and checks the first 64 KiB of the first slice. In both
+  modes the transcript, the sidecar text and the translations are checked in
+  full.
+
 The defaults (SPEC §7.2, spec 0.96.0):
 
 | Rule | Pattern |
@@ -171,6 +190,12 @@ need to run `dir2mcp reindex`.
   document it writes is marked for the next scan. A marked document also stays
   marked through a later change, also one that can only match less, until a
   scan checks it against the lists that are current then.
+- **A tool uses text only from the document version that was checked.** The
+  search index can hold the snippet of an earlier version of a chunk. Before
+  `search`, `ask` and `related` return or send chunk text, they take the text
+  from the stored chunk, and they compare the document's status and content
+  hash before the read and after the check for marks. When the document
+  changed in between, its hits are left out of that request.
 - **A change that can only match less skips that read and hides nothing.**
   Only three changes count: a removed secret pattern, an added allow pattern,
   and the shipped narrowings of the `sk-`, `sk_` and `api_` rules. Any other

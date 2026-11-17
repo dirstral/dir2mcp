@@ -232,3 +232,55 @@ UPDATE documents
 	}
 	return cleared, nil
 }
+
+// DocumentGenerations returns, for each live document in relPaths, a value
+// that changes when the document is reset for a secret-policy change or
+// replaced by a scan: its status and its content hash. A policy reset clears
+// the hash, and a new version of the document has another one. Retrieval
+// reads it before and after it reads chunk text, and serves the text only
+// when both readings are equal (SPEC §7.2). A path with no live row is absent
+// from the result. The query uses one statement per 500 paths.
+func (s *SQLiteStore) DocumentGenerations(ctx context.Context, relPaths []string) (map[string]string, error) {
+	generations := make(map[string]string, len(relPaths))
+	if len(relPaths) == 0 {
+		return generations, nil
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+
+	const batch = 500
+	for start := 0; start < len(relPaths); start += batch {
+		end := start + batch
+		if end > len(relPaths) {
+			end = len(relPaths)
+		}
+		args := make([]interface{}, 0, end-start)
+		for _, p := range relPaths[start:end] {
+			args = append(args, p)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+		rows, err := db.QueryContext(ctx,
+			`SELECT rel_path, status, content_hash FROM documents
+			  WHERE deleted = 0 AND rel_path IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var relPath, status, hash string
+			if err := rows.Scan(&relPath, &status, &hash); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			generations[relPath] = status + "\x00" + hash
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+	}
+	return generations, nil
+}

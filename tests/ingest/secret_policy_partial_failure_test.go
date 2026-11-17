@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
@@ -188,18 +189,23 @@ func TestSecretPolicy_TwoPhaseDerivationRetireFailureIsRetried(t *testing.T) {
 		// the translated transcript matches.
 		SecretPatterns: []string{`BLUEHERON-[0-9]{4}`},
 	}
-	scan := func() {
+	scan := func() int64 {
 		t.Helper()
 		svc := mustNewIngestService(t, cfg, st)
+		state := appstate.NewIndexingState(appstate.ModeIncremental)
+		svc.SetIndexingState(state)
 		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro line\n[00:02] second line"})
 		svc.SetSTTIdentity("whisper", "whisper-large-v3")
 		svc.SetTranscriptLanguage("de")
 		svc.SetTranslator(markerTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
 		_ = svc.Run(context.Background())
+		return state.Snapshot().Errors
 	}
 
 	execStateDB(t, dbPath, blockRetireTrigger)
-	scan()
+	if errs := scan(); errs == 0 {
+		t.Error("the scan reported 0 errors while the withholding was incomplete (the retirement failed)")
+	}
 	execStateDB(t, dbPath, unblockRetireTrigger)
 	doc := requireStatus(t, st, "audio/one.mp3", model.DocumentStatusSecretExcluded)
 	if doc.ContentHash == "" {
@@ -213,7 +219,9 @@ func TestSecretPolicy_TwoPhaseDerivationRetireFailureIsRetried(t *testing.T) {
 		t.Fatal("the blocked retirement left no live representation; the test cannot show the retry")
 	}
 
-	scan()
+	if errs := scan(); errs != 0 {
+		t.Errorf("the scan that completed the withholding reported %d error(s), want 0", errs)
+	}
 	requireWithheldAndRetired(t, st, "audio/one.mp3")
 }
 
@@ -256,22 +264,27 @@ func TestSecretPolicy_TwoPhaseDerivationStatusFailureIsRetried(t *testing.T) {
 		MediaBatchTwoPhase: true,
 		SecretPatterns:     []string{`BLUEHERON-[0-9]{4}`},
 	}
-	scan := func() string {
+	scan := func() (string, int64) {
 		t.Helper()
 		var logs syncBuffer
 		svc := mustNewIngestService(t, cfg, st)
+		state := appstate.NewIndexingState(appstate.ModeIncremental)
+		svc.SetIndexingState(state)
 		svc.SetLogger(log.New(&logs, "", 0))
 		svc.SetTranscriber(&fakeTranscriber{text: "[00:00] intro line\n[00:02] second line"})
 		svc.SetSTTIdentity("whisper", "whisper-large-v3")
 		svc.SetTranscriptLanguage("de")
 		svc.SetTranslator(markerTranslator{}, "mistral", "mistral-small-2506", []string{"en"})
 		_ = svc.Run(context.Background())
-		return logs.String()
+		return logs.String(), state.Snapshot().Errors
 	}
 
 	execStateDB(t, dbPath, blockWithholdTrigger)
-	logs := scan()
+	logs, errs := scan()
 	execStateDB(t, dbPath, unblockWithholdTrigger)
+	if errs != 1 {
+		t.Errorf("the scan reported %d error(s) while the withholding was incomplete, want 1", errs)
+	}
 	if !strings.Contains(logs, "record secret_excluded for audio/one.mp3 failed") {
 		t.Fatalf("the blocked row write was not reported; log:\n%s", logs)
 	}
@@ -284,6 +297,8 @@ func TestSecretPolicy_TwoPhaseDerivationStatusFailureIsRetried(t *testing.T) {
 		t.Fatal("the failed withholding retired the representations of a document that is still `ok`; no later pass reads it again")
 	}
 
-	scan()
+	if _, errs := scan(); errs != 0 {
+		t.Errorf("the scan that completed the withholding reported %d error(s), want 0", errs)
+	}
 	requireWithheldAndRetired(t, st, "audio/one.mp3")
 }

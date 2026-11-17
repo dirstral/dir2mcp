@@ -2531,8 +2531,8 @@ func (s *Service) generateGroundedAnswer(
 	// quotes every member the budget affords, and only a member it quoted is
 	// citable (issue #890); see moments.go.
 	moments := groupMoments(hits)
-	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
-	prompt, usedIdx, contextSection := s.buildScreenedRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	promptHits, texts := s.promptContext(ctx, hits, moments, maxContextChars)
+	prompt, usedIdx, contextSection := s.buildScreenedRAGPrompt(question, promptHits, moments, texts, systemPrompt, maxContextChars, compressor)
 	// Report a partial reasoning window. The citation list cannot show it: it
 	// reports provenance, not how much of the retrieved evidence the model read
 	// (issue #891). An aggregate answer built on a partial window is a sample,
@@ -3287,11 +3287,151 @@ type secretReevalPendingStore interface {
 //
 // A store error is returned, not ignored: the result cannot be proven safe.
 func (s *Service) screenServedHits(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
-	hits, err := s.dropSecretReevalPending(ctx, hits)
+	// The hits are bound to the document generation that the checks below
+	// see (see documentGenerations): the generation is read first, and
+	// dropChangedGenerations reads it again after the checks.
+	before, err := s.documentGenerations(ctx, hits)
 	if err != nil {
 		return nil, err
 	}
-	return s.screenSecretHits(ctx, hits), nil
+	hits, err = s.dropSecretReevalPending(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	return s.dropChangedGenerations(ctx, s.screenSecretHits(ctx, hits), before)
+}
+
+// documentGenerationStore is the optional store capability that reports the
+// generation of documents (status and content hash).
+type documentGenerationStore interface {
+	DocumentGenerations(ctx context.Context, relPaths []string) (map[string]string, error)
+}
+
+// documentGenerations reads the generation of each hit's document. It is the
+// first half of the generation binding (SPEC §7.2, spec 0.96.0).
+//
+// The pending mark is looked up by path, at one moment. A broader policy can
+// mark a document after a hit was read, and a scan can replace the document
+// and clear the mark before the lookup: the path is then clean, but the hit
+// text belongs to the earlier generation, which the new policy never
+// evaluated, and a credential split across two such hits passes the per-hit
+// screen. So every path that sends or returns chunk text reads the generation
+// before it reads the text, and again after the pending check
+// (dropChangedGenerations, unservablePaths). A policy reset clears the
+// content hash and a replacement has another one, so a hit whose document
+// changed in between is not used. The text itself is read from the store
+// inside that window (screenSecretHits refreshes each snippet from the stored
+// chunk), so no text of an earlier generation is served.
+//
+// A nil map means the store cannot report generations; the binding is then
+// skipped, as the pending check is for such a store.
+func (s *Service) documentGenerations(ctx context.Context, hits []model.SearchHit) (map[string]string, error) {
+	s.metaMu.RLock()
+	st := s.store
+	s.metaMu.RUnlock()
+	gs, ok := st.(documentGenerationStore)
+	if !ok || len(hits) == 0 {
+		return nil, nil
+	}
+	gens, err := gs.DocumentGenerations(ctx, hitPaths(hits))
+	if err != nil {
+		return nil, fmt.Errorf("secret policy: read the document generations: %w", err)
+	}
+	if gens == nil {
+		gens = map[string]string{}
+	}
+	return gens, nil
+}
+
+// hitPaths returns the distinct document paths of hits.
+func hitPaths(hits []model.SearchHit) []string {
+	paths := make([]string, 0, len(hits))
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		if _, dup := seen[hit.RelPath]; dup || hit.RelPath == "" {
+			continue
+		}
+		seen[hit.RelPath] = struct{}{}
+		paths = append(paths, hit.RelPath)
+	}
+	return paths
+}
+
+// changedGenerationPaths reads the generations again and returns the paths
+// whose generation differs from before. A nil before (no capability) changes
+// nothing.
+func (s *Service) changedGenerationPaths(ctx context.Context, hits []model.SearchHit, before map[string]string) (map[string]struct{}, error) {
+	if before == nil || len(hits) == 0 {
+		return nil, nil
+	}
+	after, err := s.documentGenerations(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	changed := map[string]struct{}{}
+	for _, path := range hitPaths(hits) {
+		b, hadBefore := before[path]
+		a, hasAfter := after[path]
+		if hadBefore != hasAfter || a != b {
+			changed[path] = struct{}{}
+		}
+	}
+	return changed, nil
+}
+
+// dropChangedGenerations is the second half of the generation binding for a
+// result set: it leaves out every hit whose document changed since before was
+// read.
+func (s *Service) dropChangedGenerations(ctx context.Context, hits []model.SearchHit, before map[string]string) ([]model.SearchHit, error) {
+	changed, err := s.changedGenerationPaths(ctx, hits, before)
+	if err != nil {
+		return nil, err
+	}
+	if len(changed) == 0 {
+		return hits, nil
+	}
+	kept := hits[:0]
+	for _, hit := range hits {
+		if _, gone := changed[hit.RelPath]; gone {
+			continue
+		}
+		kept = append(kept, hit)
+	}
+	s.logf("security: left out the hits of %d document(s) that changed during the request", len(changed))
+	return kept, nil
+}
+
+// unservablePaths returns the paths of hits whose text must not be used after
+// it was read: documents that wait for re-evaluation now, and documents whose
+// generation changed since before was read. It is the second half of the
+// generation binding for a path that sends chunk text to a provider (the
+// reranker, the ask prompt).
+func (s *Service) unservablePaths(ctx context.Context, hits []model.SearchHit, before map[string]string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	if len(hits) == 0 {
+		return out, nil
+	}
+	kept, err := s.dropSecretReevalPending(ctx, append([]model.SearchHit(nil), hits...))
+	if err != nil {
+		return nil, err
+	}
+	servable := make(map[string]struct{}, len(kept))
+	for _, hit := range kept {
+		servable[hit.RelPath] = struct{}{}
+	}
+	for _, hit := range hits {
+		if _, ok := servable[hit.RelPath]; !ok {
+			out[hit.RelPath] = struct{}{}
+		}
+	}
+	changed, err := s.changedGenerationPaths(ctx, hits, before)
+	if err != nil {
+		return nil, err
+	}
+	for path := range changed {
+		out[path] = struct{}{}
+	}
+	return out, nil
 }
 
 // dropSecretReevalPending leaves out every hit of a document that waits for a
@@ -3401,9 +3541,22 @@ func (s *Service) screenSecretHits(ctx context.Context, hits []model.SearchHit) 
 			continue
 		}
 		if fetcher != nil && hit.ChunkID != 0 {
-			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil && matchesAsIsOrTrimmed(matcher, task.Text) {
-				dropped++
-				continue
+			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil {
+				if matchesAsIsOrTrimmed(matcher, task.Text) {
+					dropped++
+					continue
+				}
+				// Serve the snippet of the stored chunk, not the one read
+				// with the hit. The index can hold the snippet of an earlier
+				// generation of the chunk; the stored one is the text that
+				// the generation binding covers (see documentGenerations).
+				if current := task.Metadata.Snippet; current != "" && current != hit.Snippet {
+					if matchesAsIsOrTrimmed(matcher, current) {
+						dropped++
+						continue
+					}
+					hit.Snippet = current
+				}
 			}
 		}
 		kept = append(kept, hit)
@@ -4032,16 +4185,34 @@ func (s *Service) rerankSafeCandidates(ctx context.Context, hits []model.SearchH
 // The returned candidates keep their order. A candidate left out here is left
 // out of the result as well, as the final screen would do.
 func (s *Service) rerankDocsNotSecret(ctx context.Context, cand []model.SearchHit) ([]model.SearchHit, []string) {
+	// Generation binding (see documentGenerations): read the generations,
+	// read the texts, then leave out every candidate whose document is
+	// pending now or changed in between. On a lookup error no text is sent.
+	before, err := s.documentGenerations(ctx, cand)
+	if err != nil {
+		s.logf("rerank: no candidate text is sent, the document generation lookup failed: %v", err)
+		return nil, nil
+	}
 	docs, raw := s.rerankDocs(ctx, cand)
+	unservable, err := s.unservablePaths(ctx, cand, before)
+	if err != nil {
+		s.logf("rerank: no candidate text is sent, the secret-policy lookup failed: %v", err)
+		return nil, nil
+	}
 	s.metaMu.RLock()
 	matcher := s.secretMatcher
 	s.metaMu.RUnlock()
-	if !matcher.Enabled() {
-		return cand, docs
-	}
 	keptHits := make([]model.SearchHit, 0, len(cand))
 	keptDocs := make([]string, 0, len(docs))
 	for i, doc := range docs {
+		if _, gone := unservable[cand[i].RelPath]; gone {
+			continue
+		}
+		if !matcher.Enabled() {
+			keptHits = append(keptHits, cand[i])
+			keptDocs = append(keptDocs, doc)
+			continue
+		}
 		// The stored text is checked as it is, before any normalization:
 		// trimming changes what an anchored allow pattern can cover, so a check
 		// of the trimmed text alone can release a match that the stored text
@@ -4897,6 +5068,36 @@ func collapseSpaces(s string) string {
 // mandatory injection guard here, at the one place that also writes the
 // document fence, so the fence and the rule that explains it cannot separate
 // (issue #885).
+// promptContext reads the chunk texts for the prompt and binds them to the
+// current document generation (see documentGenerations). The hits were
+// screened when search returned them, but the texts are read from the store
+// now, and the prompt goes to a generation provider. A document that became
+// pending, or changed, between the generation reading and the end of the text
+// read gives the prompt no text: its full text and its snippet are blanked in
+// the returned copy of the hits. When a lookup fails, no hit gives any text.
+func (s *Service) promptContext(ctx context.Context, hits []model.SearchHit, moments []moment, maxContextChars int) ([]model.SearchHit, []string) {
+	before, err := s.documentGenerations(ctx, hits)
+	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
+	var unservable map[string]struct{}
+	if err == nil {
+		unservable, err = s.unservablePaths(ctx, hits, before)
+	}
+	if err != nil {
+		s.logf("security: the ask prompt carries no context, a secret-policy lookup failed: %v", err)
+	}
+	if err == nil && len(unservable) == 0 {
+		return hits, texts
+	}
+	promptHits := append([]model.SearchHit(nil), hits...)
+	for i := range promptHits {
+		if _, gone := unservable[promptHits[i].RelPath]; gone || err != nil {
+			promptHits[i].Snippet = ""
+			texts[i] = ""
+		}
+	}
+	return promptHits, texts
+}
+
 // buildScreenedRAGPrompt builds the prompt and checks the context section it
 // is about to send against the secret policy (SPEC §7.2, spec 0.96.0). Each
 // text was checked in contextTexts, but the prompt cuts or compresses a text
