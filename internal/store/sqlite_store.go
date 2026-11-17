@@ -3435,6 +3435,34 @@ func (s *SQLiteStore) ExplainEmbeddedChunkPageForTest(ctx context.Context, index
 	return plan, rows.Err()
 }
 
+// ListActiveRelPaths returns the relative path of every document that is not
+// deleted, in one query (#1176). The scan uses it to know which documents it
+// may tombstone. A walk with ListFiles pages by OFFSET, which steps over every
+// earlier row again on each page: on 444,000 documents that took about 50
+// minutes. It reads through the query-only pool, like the other SELECT-only
+// walks.
+func (s *SQLiteStore) ListActiveRelPaths(ctx context.Context) ([]string, error) {
+	db, err := s.ensureReadDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+	rows, err := db.QueryContext(ctx, `SELECT rel_path FROM documents WHERE deleted = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var rel string
+		if err := rows.Scan(&rel); err != nil {
+			return nil, err
+		}
+		out = append(out, rel)
+	}
+	return out, rows.Err()
+}
+
 // ListEmbeddedChunkMetadata pages through embedded ("ok") chunks using keyset
 // (seek) pagination: afterChunkID is an exclusive lower bound on chunk_id (pass 0
 // to start), and callers carry the last chunk_id of each page forward as the next
