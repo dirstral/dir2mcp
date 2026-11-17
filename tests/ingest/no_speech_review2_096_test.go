@@ -644,3 +644,55 @@ func TestNoSpeech_TranslateWithAFailedWindowIsNotCachedAsEmpty(t *testing.T) {
 		})
 	}
 }
+
+// TestNoSpeech_SettleOutsideScanLeavesTheScanState: the MCP transcribe tool
+// decodes outside a scan. When its decode finds no speech it calls
+// SettleNoSpeechOutsideScan, which must leave what a scan leaves: the earlier
+// transcript and the summary derived from it are retired, the no-speech
+// record holds the STT identity, and a document with no other representation
+// is skipped as no_speech and keeps its content_hash.
+func TestNoSpeech_SettleOutsideScanLeavesTheScanState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
+	st := newRealStore(t)
+	cfg := hierarchicalConfig(testutil.TempDir(t))
+	cfg.RootDir = root
+	cfg.STTProvider = "off"
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] the budget talkwordzq is here\n[00:03] second line of the talk"})
+	svc.SetSTTIdentity("whisper", "large-v3")
+	svc.SetTranscriptLanguage("en")
+	svc.SetSummarizer(&fakeSummarizer{out: "summarywordzq of the talk"}, "mistral", "mistral-small-latest")
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if types := activeRepTypes(t, st, "talk.mp3"); !types[ingest.RepTypeTranscript] || !types[model.SummaryRepType] {
+		t.Fatalf("the scan must index a transcript and its summary, got %v", types)
+	}
+	before := mustGetDoc(t, st, "talk.mp3")
+
+	if err := svc.SettleNoSpeechOutsideScan(ctx, before); err != nil {
+		t.Fatalf("SettleNoSpeechOutsideScan: %v", err)
+	}
+	if types := activeRepTypes(t, st, "talk.mp3"); len(types) != 0 {
+		t.Errorf("live representations = %v, want none: the transcript and its summary are retired", types)
+	}
+	for _, word := range []string{"talkwordzq", "summarywordzq"} {
+		if hits, _ := st.SearchBM25(ctx, word, 5, ""); len(hits) != 0 {
+			t.Errorf("%q still gives %d lexical hit(s)", word, len(hits))
+		}
+	}
+	if _, ok := noSpeechRecord(t, st, "talk.mp3"); !ok {
+		t.Error("no no-speech record was stored")
+	}
+	doc := mustGetDoc(t, st, "talk.mp3")
+	if doc.Status != "skipped" || doc.SkipReason != model.SkipReasonNoSpeech {
+		t.Errorf("status=%q skip_reason=%q, want skipped/no_speech", doc.Status, doc.SkipReason)
+	}
+	if doc.ContentHash == "" || doc.ContentHash != before.ContentHash {
+		t.Errorf("content_hash = %q, was %q: the row must keep it so the next scan does not decode again", doc.ContentHash, before.ContentHash)
+	}
+}

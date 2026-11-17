@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -416,4 +417,79 @@ func (s *Service) noSpeechIdentityStale(ctx context.Context, existing model.Docu
 	s.getLogger().Printf("STT model changed for %s (no speech found with %q, configured %q); decoding it again (SPEC §8.6.13)",
 		existing.RelPath, recorded, active)
 	return true
+}
+
+// ReadOrComputeTranscriptOutcome is ReadOrComputeTranscript for a caller that
+// must tell a no-speech result from other empty text (the MCP transcribe
+// tools, SPEC §8.6.13). noSpeech is true when the decode, new or cached,
+// found no speech; the text is then empty and err is nil.
+func (s *Service) ReadOrComputeTranscriptOutcome(ctx context.Context, doc model.Document, content []byte, language string) (text string, noSpeech bool, err error) {
+	text, _, _, _, err = s.readOrComputeTranscriptWithWords(ctx, doc, content, language, doc.RelPath)
+	noSpeech, err = splitNoSpeech(err)
+	if err != nil || noSpeech {
+		return "", noSpeech, err
+	}
+	return text, false, nil
+}
+
+// TranscriptCached reports whether the transcript cache holds an entry for
+// the content and language under the active STT derivation identity, the key
+// that readOrComputeTranscriptWithWords reads. A cached no-speech result is an
+// entry too (an empty text with its marker). A caller uses it to say whether a
+// read sent a provider request.
+func (s *Service) TranscriptCached(content []byte, language string) bool {
+	path := filepath.Join(s.cfg.StateDir, "cache", "transcribe", s.transcriptCacheKey(content)+TranscriptLangSuffix(language)+".txt")
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// SettleNoSpeechOutsideScan leaves a document whose first audio track was a
+// no-speech result in the state that a scan writes (SPEC §8.6.13). It serves
+// the MCP transcribe tool, which decodes outside a scan:
+//
+//   - an earlier transcript of the track is retired with its chunks, its
+//     translations and the summaries derived from it;
+//   - the no-speech record of the path holds the active STT derivation
+//     identity;
+//   - a document that keeps another searchable representation stays as it is,
+//     and a document with none is recorded as status="skipped" with
+//     skip_reason="no_speech". The row keeps its content_hash, so the next
+//     scan does not decode the recording again.
+//
+// A retirement or a record write that fails is returned, as in a scan.
+func (s *Service) SettleNoSpeechOutsideScan(ctx context.Context, doc model.Document) error {
+	tc := trackContext{audioIndex: 0}
+	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
+		return err
+	}
+	if err := s.recordNoSpeechIdentity(ctx, doc.RelPath); err != nil {
+		return err
+	}
+	if s.hasIndexedRepresentations(ctx, doc.RelPath) {
+		return nil
+	}
+	if doc.Status == string(model.DocumentStatusSkipped) && doc.SkipReason == model.SkipReasonNoSpeech {
+		return nil
+	}
+	doc.ErrorMessage = ""
+	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonNoSpeech)
+	return nil
+}
+
+// SettleSpeechOutsideScan is the counterpart of SettleNoSpeechOutsideScan for
+// a decode outside a scan that holds speech. The no-speech record of an
+// earlier decode no longer describes the recording, so it is deleted, as a
+// scan does at the start of each derivation. A row that an earlier decode
+// recorded as status="skipped" with skip_reason="no_speech" becomes
+// status="ok": the document has a transcript now.
+func (s *Service) SettleSpeechOutsideScan(ctx context.Context, doc model.Document) {
+	s.clearNoSpeechIdentity(ctx, doc.RelPath)
+	if doc.Status != string(model.DocumentStatusSkipped) || doc.SkipReason != model.SkipReasonNoSpeech {
+		return
+	}
+	doc.Status = string(model.DocumentStatusOK)
+	doc.SkipReason = ""
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		s.getLogger().Printf("stt: record %s as indexed after a decode with speech: %v", doc.RelPath, err)
+	}
 }
