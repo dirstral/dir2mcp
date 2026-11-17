@@ -294,6 +294,42 @@ the guard must be the last rule the model reads.
 The setup wizard's `legal` and `code` profiles are domain rules of this kind, and they
 gain the guard the same way.
 
+### Which files are processed first (`ingest.priority_list`)
+
+By default each scan processes files in relative-path order. To process some
+files first, for example the newest videos of a large backlog, name them in a
+list file:
+
+```yaml
+ingest:
+  priority_list: priority.txt   # relative to the corpus root; default: empty
+```
+
+The file holds one corpus-relative path per line, with `/` separators. A line
+can name a file or a directory; a directory covers every file under it. Lines
+that start with `#` and blank lines are skipped. Files that a line covers are
+processed first, in the order of the lines; every other file follows in
+relative-path order. The list changes only the order: the same files are
+indexed and produce the same output.
+
+The list is read at the start of each scan, so you can regenerate it between
+runs. A missing or unreadable list, and a line that is absolute or contains
+`..`, is logged as a warning and the scan goes on without it. The environment
+variable `DIR2MCP_INGEST_PRIORITY_LIST` overrides the key.
+
+For an archive whose paths carry no date, a list of folders sorted newest first
+works well. In a hash tree where each video has its own folder, that folder's
+own date changes whenever a file in it is written (write-back included), but
+the date of the folder one level up records when the video arrived, even after
+a re-encode changed the file dates. For a tree whose video folders sit 20
+levels deep:
+
+```bash
+cd /path/to/corpus
+find . -mindepth 19 -maxdepth 19 -type d -printf '%T@ %P\n' \
+  | sort -rn | cut -d' ' -f2- > priority.txt
+```
+
 ### Environment variables (overrides / secrets)
 
 Sensitive keys and temporary runtime overrides are supplied via environment variables. They take
