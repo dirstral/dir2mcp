@@ -41,6 +41,18 @@ func TestWellFormedEmptySTT(t *testing.T) {
 		// text (absent, empty or only whitespace). An empty array is well-formed.
 		{`{"text":"","words":[]}`, true},
 		{`{"text":"","segments":[{"text":"","words":[]}]}`, true},
+		// A words field that is present and not an array is malformed, at the
+		// top level and inside a segment. A null counts as an absent field.
+		{`{"text":"","words":{}}`, false},
+		{`{"text":"","words":"hello"}`, false},
+		{`{"text":"","words":7}`, false},
+		{`{"text":"","words":true}`, false},
+		{`{"text":"","segments":[{"text":"","words":{}}]}`, false},
+		{`{"text":"","segments":[{"text":"","words":"hello"}]}`, false},
+		{`{"text":"","segments":[{"text":"","words":7}]}`, false},
+		{`{"text":"","segments":[{"text":"","words":false}]}`, false},
+		{`{"text":"","words":null}`, true},
+		{`{"text":"","segments":[{"text":"","words":null}]}`, true},
 		{`{"text":" ","words":[{"word":"hello","start":0,"end":1}]}`, false},
 		{`{"text":"","words":[{"word":"hello","start":0,"end":1}]}`, false},
 		{`{"segments":[],"words":[{"word":""}]}`, false},

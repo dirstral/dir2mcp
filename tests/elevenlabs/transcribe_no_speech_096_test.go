@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/elevenlabs"
@@ -34,6 +35,8 @@ func TestElevenLabsTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 		"text":       `{"language_code":"eng","language_probability":0.2,"text":"","words":[]}`,
 		"transcript": `{"transcript":""}`,
 		"segments":   `{"segments":[]}`,
+		// A null words field counts as absent.
+		"null words": `{"text":"","words":null,"segments":[{"text":"","words":null}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			text, err := elevenLabsSTTClient(body).Transcribe(context.Background(), "music.mp3", []byte("audio"))
@@ -54,11 +57,25 @@ func TestElevenLabsTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 		`{"segments":[{"start":1.0}]}`, `{"segments":[{"start_ms":1000}]}`,
 		// Timed words with no text (SPEC 0.96.0 §8.2).
 		`{"text":" ","words":[{"text":"hello","start":0,"end":1}]}`,
+		// A words field that is present and not an array.
+		`{"text":"","words":{}}`,
+		`{"text":"","segments":[{"text":"","words":7}]}`,
 	} {
 		_, err := elevenLabsSTTClient(body).Transcribe(context.Background(), "x.mp3", []byte("audio"))
 		var pe *model.ProviderError
 		if !errors.As(err, &pe) || pe.Code != "ELEVENLABS_FAILED" || pe.Retryable {
 			t.Fatalf("%s: want non-retryable ELEVENLABS_FAILED, got %v", body, err)
 		}
+	}
+}
+
+// TestElevenLabsTranscribe_SegmentTextWithWordsIsSpeech: the timed-words rule
+// needs no text anywhere in the response. A segment that holds text makes the
+// response well-formed speech, also with no top-level text.
+func TestElevenLabsTranscribe_SegmentTextWithWordsIsSpeech(t *testing.T) {
+	body := `{"segments":[{"start":0,"end":1,"text":"hello","words":[{"text":"hello","start":0,"end":1}]}]}`
+	text, err := elevenLabsSTTClient(body).Transcribe(context.Background(), "talk.mp3", []byte("audio"))
+	if err != nil || !strings.Contains(text, "hello") {
+		t.Fatalf("want the segment text and no error, got (%q, %v)", text, err)
 	}
 }

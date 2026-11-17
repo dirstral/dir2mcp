@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/mistral"
@@ -30,6 +31,8 @@ func TestTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 	for name, body := range map[string]string{
 		"text and segments": `{"model":"voxtral-mini-latest","text":"","language":null,"segments":[]}`,
 		"text only":         `{"text":""}`,
+		// A null words field counts as absent.
+		"null words": `{"text":"","words":null,"segments":[{"text":"","words":null}]}`,
 		// §8.2: an absent text field counts as empty.
 		"segments only": `{"segments":[]}`,
 	} {
@@ -49,11 +52,25 @@ func TestTranscribe_MalformedResponseStaysAnError(t *testing.T) {
 		`{"model":"voxtral-mini-latest"}`, `{"text":null,"segments":[]}`, `{"text":"","segments":{}}`,
 		// Timed words with no text (SPEC 0.96.0 §8.2).
 		`{"text":" ","words":[{"word":"hello","start":0,"end":1}]}`,
+		// A words field that is present and not an array.
+		`{"text":"","words":{}}`,
+		`{"text":"","segments":[{"text":"","words":"hello"}]}`,
 	} {
 		_, err := voxtralClient(t, body).Transcribe(context.Background(), "x.mp3", []byte("audio"))
 		var pe *model.ProviderError
 		if !errors.As(err, &pe) || pe.Code != "MISTRAL_FAILED" || pe.Retryable {
 			t.Fatalf("%s: want non-retryable MISTRAL_FAILED, got %v", body, err)
 		}
+	}
+}
+
+// TestTranscribe_SegmentTextWithWordsIsSpeech: the timed-words rule needs no
+// text anywhere in the response. A segment that holds text makes the response
+// well-formed speech, also with no top-level text.
+func TestTranscribe_SegmentTextWithWordsIsSpeech(t *testing.T) {
+	body := `{"segments":[{"start":0,"end":1,"text":"hello","words":[{"word":"hello","start":0,"end":1}]}]}`
+	text, err := voxtralClient(t, body).Transcribe(context.Background(), "talk.mp3", []byte("audio"))
+	if err != nil || !strings.Contains(text, "hello") {
+		t.Fatalf("want the segment text and no error, got (%q, %v)", text, err)
 	}
 }

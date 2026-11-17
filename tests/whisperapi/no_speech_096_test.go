@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -30,9 +31,11 @@ func whisperServer(t *testing.T, body string) *httptest.Server {
 // successful decode that found no speech. It is not WHISPER_FAILED.
 func TestTranscribe_WellFormedEmptyIsNoSpeech(t *testing.T) {
 	for name, body := range map[string]string{
-		"verbose_json":        noSpeechBody,
-		"text only":           `{"text":""}`,
-		"segments only":       `{"segments":[]}`,
+		"verbose_json":  noSpeechBody,
+		"text only":     `{"text":""}`,
+		"segments only": `{"segments":[]}`,
+		// A null words field counts as absent.
+		"null words":          `{"text":"","words":null,"segments":[{"text":"","words":null}]}`,
 		"blank segment texts": `{"text":"  ","segments":[{"start":0,"end":3,"text":" "}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -78,8 +81,11 @@ func TestTranscribe_WordsWithoutTextStayAnError(t *testing.T) {
 		"whitespace text, top-level words": `{"text":" ","words":[{"word":"hello","start":0,"end":1}]}`,
 		"absent text, top-level words":     `{"segments":[],"words":[{"word":"hello","start":0,"end":1}]}`,
 		// Every entry counts, also a blank one: the rule is "at least one entry".
-		"blank word entries": `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":""}]}`,
-		"segment words":      `{"text":"","segments":[{"start":0,"end":1,"text":"","words":[{"word":"hi","start":0,"end":1}]}]}`,
+		// A words field that is present and not an array.
+		"words object":         `{"text":"","words":{}}`,
+		"segment words string": `{"text":"","segments":[{"text":"","words":"hello"}]}`,
+		"blank word entries":   `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":""}]}`,
+		"segment words":        `{"text":"","segments":[{"start":0,"end":1,"text":"","words":[{"word":"hi","start":0,"end":1}]}]}`,
 		// Blank segment words must not hide a spoken top-level word.
 		"blank segment words, spoken top-level word": `{"text":"","segments":[{"text":"","words":[{"word":" "}]}],"words":[{"word":"hello","start":0,"end":1}]}`,
 	} {
@@ -145,5 +151,17 @@ func TestTranscribe_EmptyWordArraysAreNoSpeech(t *testing.T) {
 	res, err := c.TranscribeStructured(context.Background(), "x.m4a", []byte("audio"))
 	if err != nil || res.Text != "" {
 		t.Fatalf("want an empty result and no error, got (%q, %v)", res.Text, err)
+	}
+}
+
+// TestTranscribe_SegmentTextWithWordsIsSpeech: the timed-words rule needs no
+// text anywhere in the response. A segment that holds text makes the response
+// well-formed speech, also with no top-level text.
+func TestTranscribe_SegmentTextWithWordsIsSpeech(t *testing.T) {
+	body := `{"segments":[{"start":0,"end":1,"text":"hello","words":[{"word":"hello","start":0,"end":1}]}]}`
+	c := newClient(whisperServer(t, body).URL, "")
+	res, err := c.TranscribeStructured(context.Background(), "talk.m4a", []byte("audio"))
+	if err != nil || !strings.Contains(res.Text, "hello") {
+		t.Fatalf("want the segment text and no error, got (%q, %v)", res.Text, err)
 	}
 }
