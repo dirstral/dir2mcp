@@ -13,24 +13,37 @@ import (
 
 // priorityList is the parsed ingest.priority_list (SPEC §7.1): each entry is a
 // corpus-relative file or directory path, ranked by the line it first appears
-// on.
+// on. A "*" line ranks every file no other line covers (wildcard, -1 when the
+// list has none).
 type priorityList struct {
-	rank    map[string]int
-	entries int
-	bad     int
-	badLine string
+	rank     map[string]int
+	wildcard int
+	entries  int
+	bad      int
+	badLine  string
 }
+
+// priorityWildcard is the list line that stands for every file no other line
+// covers.
+const priorityWildcard = "*"
 
 // parsePriorityList reads one corpus-relative path per line. Blank lines and
 // lines that start with "#" are skipped. An absolute entry or one with a ".."
 // segment is counted as bad and dropped. A repeated entry keeps its first rank.
 func parsePriorityList(data []byte) priorityList {
-	pl := priorityList{rank: map[string]int{}}
+	pl := priorityList{rank: map[string]int{}, wildcard: -1}
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == priorityWildcard {
+			if pl.wildcard < 0 {
+				pl.wildcard = pl.entries
+			}
+			pl.entries++
 			continue
 		}
 		entry, ok := cleanPriorityEntry(line)
@@ -70,7 +83,8 @@ func cleanPriorityEntry(line string) (string, bool) {
 }
 
 // rankOf is the best (lowest) rank of an entry that covers relPath: the file
-// itself or any directory above it. ok is false when no entry covers it.
+// itself or any directory above it, or else the "*" line. ok is false when
+// nothing covers it.
 func (pl priorityList) rankOf(relPath string) (int, string, bool) {
 	best, bestEntry, found := math.MaxInt, "", false
 	consider := func(key string) {
@@ -83,6 +97,9 @@ func (pl priorityList) rankOf(relPath string) (int, string, bool) {
 		if relPath[i] == '/' {
 			consider(relPath[:i])
 		}
+	}
+	if !found && pl.wildcard >= 0 {
+		return pl.wildcard, priorityWildcard, true
 	}
 	return best, bestEntry, found
 }
@@ -113,7 +130,7 @@ func (s *Service) orderForProcessing(discovered []DiscoveredFile) []DiscoveredFi
 	}
 
 	ranks := make([]int, len(discovered))
-	used := make(map[string]struct{}, len(pl.rank))
+	used := make(map[string]struct{}, len(pl.rank)+1)
 	listed := 0
 	for i, f := range discovered {
 		r, entry, ok := pl.rankOf(filepath.ToSlash(f.RelPath))
@@ -134,7 +151,11 @@ func (s *Service) orderForProcessing(discovered []DiscoveredFile) []DiscoveredFi
 	for i, j := range idx {
 		out[i] = discovered[j]
 	}
-	logger.Printf("ingest.priority_list: %d of %d files listed first (%d entries; %d placed no file)",
-		listed, len(discovered), len(pl.rank), len(pl.rank)-len(used))
+	entries := len(pl.rank)
+	if pl.wildcard >= 0 {
+		entries++
+	}
+	logger.Printf("ingest.priority_list: %d of %d files placed by the list (%d entries; %d placed no file)",
+		listed, len(discovered), entries, entries-len(used))
 	return out
 }
