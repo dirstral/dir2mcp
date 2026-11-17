@@ -8,7 +8,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
-// SPEC §7.2 (spec 0.96.0): the generic bearer-token rule stays broad, and
+// SPEC §7.2 (spec 0.97.0): the generic bearer-token rule stays broad, and
 // security.secret_allow_patterns releases known benign keys. An allow match
 // cancels only a generic token match that it covers; a match of any other rule
 // is never cancelled.
@@ -157,7 +157,7 @@ func TestSecretAllow_CancelsOnlyTheGenericTokenRule(t *testing.T) {
 }
 
 // TestSecretAllow_FirstCaptureGroupIsTheCover pins the cover rule (SPEC §7.2,
-// spec 0.96.0): with a capture group, only the first group cancels and the
+// spec 0.97.0): with a capture group, only the first group cancels and the
 // rest of the match is required context; with no group, the whole match
 // cancels; (?:...) groups do not narrow the cover; a first group that took no
 // part in the match cancels nothing.
@@ -247,7 +247,7 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	defaults := shipped.Policy()
-	old := secretmatch.PreSpec0960DefaultPolicy()
+	old := secretmatch.PreSpec0970DefaultPolicy()
 
 	inDefaults := map[string]bool{}
 	for _, p := range defaults.Secret {
@@ -262,7 +262,7 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 			t.Errorf("narrowing %q is not a shipped default", narrowed)
 		}
 		if !inOld[previous] {
-			t.Errorf("narrowed pattern %q is not a pre-0.96.0 default", previous)
+			t.Errorf("narrowed pattern %q is not a pre-0.97.0 default", previous)
 		}
 	}
 	if !inDefaults[secretmatch.GenericTokenPattern] {
@@ -270,7 +270,7 @@ func TestSecretPolicy_Narrowing(t *testing.T) {
 	}
 
 	if !secretmatch.IsNarrower(old, defaults) {
-		t.Error("the spec 0.96.0 defaults must count as narrower than the pre-0.96.0 defaults")
+		t.Error("the spec 0.97.0 defaults must count as narrower than the pre-0.97.0 defaults")
 	}
 	with := func(p secretmatch.Policy, secret, allow []string) secretmatch.Policy {
 		return secretmatch.Policy{
@@ -327,7 +327,7 @@ func TestSecretPolicy_NeedsIndexedReevaluation(t *testing.T) {
 		{"removed allow pattern", rec(narrower), defaults, true},
 		{"unrecorded corpus, shipped defaults", secretmatch.Recorded{}, defaults, true},
 		{"unrecorded corpus, custom policy", secretmatch.Recorded{}, custom, true},
-		{"unrecorded corpus, lists from another source", secretmatch.Recorded{Policy: secretmatch.PreSpec0960DefaultPolicy(), Known: true}, defaults, true},
+		{"unrecorded corpus, lists from another source", secretmatch.Recorded{Policy: secretmatch.PreSpec0970DefaultPolicy(), Known: true}, defaults, true},
 		{"recorded lists unreadable", secretmatch.Recorded{Identity: "v2:other"}, defaults, true},
 	}
 	for _, tc := range cases {
@@ -340,7 +340,7 @@ func TestSecretPolicy_NeedsIndexedReevaluation(t *testing.T) {
 // TestSecretPolicy_NoDeclaredNarrowingOfTheGenericRule pins that the generic
 // bearer-token default is never the old side or the new side of a declared
 // narrowing: an allow pattern cancels only its matches, so a replacement of
-// that rule can leave matches that nothing cancels (SPEC §7.2, spec 0.96.0).
+// that rule can leave matches that nothing cancels (SPEC §7.2, spec 0.97.0).
 func TestSecretPolicy_NoDeclaredNarrowingOfTheGenericRule(t *testing.T) {
 	for narrowed, previous := range secretmatch.NarrowedSecretPatterns() {
 		if narrowed == secretmatch.GenericTokenPattern || previous == secretmatch.GenericTokenPattern {

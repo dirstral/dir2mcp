@@ -12,7 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.96.0): a document that waits for re-evaluation is released
+// SPEC §7.2 (spec 0.97.0): a document that waits for re-evaluation is released
 // only by a write that the CURRENT policy evaluated. A scan that started under
 // an earlier policy can finish after a broader policy is recorded; its writes
 // must not release anything. And a document that an unfinished pass has not

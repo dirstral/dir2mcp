@@ -51,7 +51,7 @@ What "the raw bytes" means depends on the document type:
   modes the transcript, the sidecar text and the translations are checked in
   full.
 
-The defaults (SPEC §7.2, spec 0.96.0):
+The defaults (SPEC §7.2, spec 0.97.0):
 
 | Rule | Pattern |
 | --- | --- |
@@ -261,7 +261,7 @@ again, so a document that fails, or that a stopped scan did not reach, is
 processed again on the next scan and stays hidden until then. If the clear
 itself fails, the scan fails and records nothing.
 
-A corpus with no recorded lists was indexed by a version before spec 0.96.0.
+A corpus with no recorded lists was indexed by a version before spec 0.97.0.
 For such a corpus the earlier lists are unknown. dir2mcp does not assume the
 default lists, and it does not use the effective-config snapshot
 (`<state>/.dir2mcp.yaml.snapshot`) as a record: every command that loads the

@@ -2139,7 +2139,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	// A changed pattern set (a binary upgrade with new defaults, or an operator
 	// edit) must reach documents withheld under the old set, which the
 	// incremental gates would otherwise never re-read, and indexed documents
-	// that the new set matches (SPEC §7.2, spec 0.96.0). Both are applied here,
+	// that the new set matches (SPEC §7.2, spec 0.97.0). Both are applied here,
 	// before any document is visited.
 	//
 	// Every document write of this scan carries the identity of the policy the

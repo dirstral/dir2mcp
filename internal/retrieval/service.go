@@ -1809,7 +1809,7 @@ const secretScreenRefillRounds = 3
 // hit that it removes. When the screen removed hits, fewer than k remain and
 // the pool was full, it retrieves a wider pool and tries again, up to
 // secretScreenRefillRounds times, so a credential that ranks first does not
-// cost the caller a result (SPEC §7.2, spec 0.96.0).
+// cost the caller a result (SPEC §7.2, spec 0.97.0).
 func (s *Service) searchScreenedPool(ctx context.Context, query model.SearchQuery, k, poolK int) ([]model.SearchHit, error) {
 	for round := 0; ; round++ {
 		hits, err := s.searchWithSummaryRefill(ctx, query, poolK)
@@ -1830,7 +1830,7 @@ func (s *Service) searchScreenedPool(ctx context.Context, query model.SearchQuer
 		// Leave out every hit of a document that waits for re-evaluation against
 		// a broader secret policy, and any hit whose text matches the secret
 		// pattern set, so a credential that a changed set finds is not served (and
-		// not placed in an ask prompt) before the scan retires it (spec 0.96.0).
+		// not placed in an ask prompt) before the scan retires it (spec 0.97.0).
 		floored := len(hits)
 		hits, err = s.screenServedHits(ctx, hits)
 		if err != nil {
@@ -2685,7 +2685,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, err
 	}
 	// A document that waits for re-evaluation against a broader secret policy
-	// is withheld whole until the scan reads it again (SPEC §7.2, spec 0.96.0).
+	// is withheld whole until the scan reads it again (SPEC §7.2, spec 0.97.0).
 	if pending, err := s.secretReevalPending(ctx, normalizedRel); err != nil {
 		return "", false, err
 	} else if pending {
@@ -3282,7 +3282,7 @@ func selectCheckedSpan(matcher *secretmatch.Matcher, data []byte, kind string, s
 // MatchesSecret reports whether text matches the secret pattern set that
 // open_file enforces: the built-in baseline plus the operator's
 // security.secret_patterns. Every tool that returns indexed text applies this
-// one set (spec 0.96.0), so a credential that open_file refuses is not served
+// one set (spec 0.97.0), so a credential that open_file refuses is not served
 // through another tool. The MCP annotate/transcribe gate uses it too.
 func (s *Service) MatchesSecret(text string) bool {
 	s.metaMu.RLock()
@@ -3298,7 +3298,7 @@ type secretReevalPendingStore interface {
 }
 
 // screenServedHits applies both serve-time secret rules to a result set
-// (SPEC §7.2, spec 0.96.0):
+// (SPEC §7.2, spec 0.97.0):
 //
 //   - A document that waits for re-evaluation against a broader pattern set
 //     is withheld whole: none of its hits is returned. A credential can cross
@@ -3329,7 +3329,7 @@ type documentGenerationStore interface {
 }
 
 // documentGenerations reads the generation of each hit's document. It is the
-// first half of the generation binding (SPEC §7.2, spec 0.96.0).
+// first half of the generation binding (SPEC §7.2, spec 0.97.0).
 //
 // The pending mark is looked up by path, at one moment. A broader policy can
 // mark a document after a hit was read, and a scan can replace the document
@@ -3529,7 +3529,7 @@ func (s *Service) secretReevalPending(ctx context.Context, relPath string) (bool
 }
 
 // screenSecretHits leaves out every hit whose text matches the secret pattern
-// set (SPEC §7.2, spec 0.96.0). After the effective set changes, a background
+// set (SPEC §7.2, spec 0.97.0). After the effective set changes, a background
 // pass retires the chunks that the new set matches. Until the pass reaches a
 // document, its chunks stay in the index, so the screen runs on every result
 // that search, ask and related return.
@@ -4073,7 +4073,7 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 		pool = defaultRerankCandidatePool
 	}
 	// A hosted reranker receives the candidate text, so the serve-time secret
-	// rules run before it (SPEC §7.2, spec 0.96.0). See rerankSafeCandidates.
+	// rules run before it (SPEC §7.2, spec 0.97.0). See rerankSafeCandidates.
 	safe, err := s.rerankSafeCandidates(ctx, hits)
 	if err != nil {
 		s.logf("rerank: skipped, the secret-policy pending lookup failed: %v", err)
@@ -4785,7 +4785,7 @@ func matchesAsIsOrTrimmed(matcher *secretmatch.Matcher, text string) bool {
 // generator produced one. Each snippet is trimmed and cut to 300 characters,
 // and both steps can change what an allow pattern covers, so the snippet is
 // checked against the secret policy in the form the answer carries (SPEC §7.2,
-// spec 0.96.0). A snippet that matches is left out of the answer.
+// spec 0.97.0). A snippet that matches is left out of the answer.
 func buildFallbackAnswer(question string, hits []model.SearchHit, matcher *secretmatch.Matcher) string {
 	if len(hits) == 0 {
 		return "No relevant context found in the indexed corpus."
@@ -4891,7 +4891,7 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 			// The hits passed screenSecretHits in search. The text is read
 			// again here, so test it again at the prompt boundary: a chunk
 			// rewritten between the two reads never reaches the generator
-			// (spec 0.96.0).
+			// (spec 0.97.0).
 			// Both the stored text and the trimmed text that the prompt takes
 			// are checked: a trim changes what an anchored allow pattern can
 			// cover, so the trimmed text can match where the stored one does
@@ -5120,7 +5120,7 @@ func (s *Service) promptContext(ctx context.Context, hits []model.SearchHit, mom
 }
 
 // buildScreenedRAGPrompt builds the prompt and checks the context section it
-// is about to send against the secret policy (SPEC §7.2, spec 0.96.0). Each
+// is about to send against the secret policy (SPEC §7.2, spec 0.97.0). Each
 // text was checked in contextTexts, but the prompt cuts or compresses a text
 // to its budget, and a cut can change what an allow pattern covers. When the
 // placed context matches, the prompt is built again from the snippets alone

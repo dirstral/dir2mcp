@@ -802,7 +802,7 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE emitted_artifacts ADD COLUMN output_root TEXT NOT NULL DEFAULT ''`,
 		// secret_reeval_pending marks a live document that waits for a
 		// secret-policy re-evaluation against a broader pattern set (SPEC
-		// §7.2, spec 0.96.0). Retrieval returns no part of such a document.
+		// §7.2, spec 0.97.0). Retrieval returns no part of such a document.
 		// ResetForSecretPolicy sets it; UpsertDocument clears it when the row
 		// gets a content hash again.
 		`ALTER TABLE documents ADD COLUMN secret_reeval_pending INTEGER NOT NULL DEFAULT 0`,
@@ -1122,7 +1122,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 	// otherwise). Title intentionally uses the CASE-preserve pattern because
 	// title can be extracted *after* the first upsert; error_message has no
 	// such two-phase write, so the always-replace semantics are correct.
-	// Secret-policy re-evaluation mark (SPEC §7.2, spec 0.96.0). The writer's
+	// Secret-policy re-evaluation mark (SPEC §7.2, spec 0.97.0). The writer's
 	// context carries the identity of the policy it screened this document with
 	// (model.WithSecretPolicyIdentity). The statement compares it with the
 	// identity the store records now, inside the one statement, so a policy

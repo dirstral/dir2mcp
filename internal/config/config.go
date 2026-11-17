@@ -2026,7 +2026,7 @@ func Default() Config {
 			// run of key chars keeps this from matching ordinary hyphenated
 			// prose (issue #443). The leading boundary requires `sk-` to start
 			// a word, so a transliterated URL slug such as `...krasnoyarsk-...`
-			// or `...pusk-soyuz-...` is not a key (SPEC §7.2, 0.96.0).
+			// or `...pusk-soyuz-...` is not a key (SPEC §7.2, 0.97.0).
 			`(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}`,
 			// Generic provider-key assignment, e.g. "MISTRAL_API_KEY=<32 alnum>",
 			// "COHERE_API_KEY: ...", "GEMINI_API_KEY=...". Requires an

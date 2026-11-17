@@ -75,7 +75,7 @@ func BenchmarkSecretMatch_ManyAllowedLinks(b *testing.B) {
 }
 
 // TestSecretMatch_OverlappingMatchAfterACancelledOne pins the every-start rule
-// (SPEC §7.2, spec 0.96.0): a generic token match that starts inside a
+// (SPEC §7.2, spec 0.97.0): a generic token match that starts inside a
 // cancelled match is judged on its own.
 func TestSecretMatch_OverlappingMatchAfterACancelledOne(t *testing.T) {
 	m := defaultMatcher(t)

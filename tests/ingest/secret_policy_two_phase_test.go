@@ -17,7 +17,7 @@ import (
 )
 
 // TestSecretPolicy_TwoPhaseRechecksExistingTranslations pins SPEC §7.2 (spec
-// 0.96.0) under the two-phase split (§8.6.11). After a broader policy change,
+// 0.97.0) under the two-phase split (§8.6.11). After a broader policy change,
 // the transcription pass re-reads a media document and stamps its content hash,
 // which clears the pending mark. The derivation pass keeps a translation that
 // already exists under the current derivation identity, so without a fix an

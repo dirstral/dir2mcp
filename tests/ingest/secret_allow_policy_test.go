@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// security.secret_allow_patterns at ingest (SPEC §7.2, spec 0.96.0): the
+// security.secret_allow_patterns at ingest (SPEC §7.2, spec 0.97.0): the
 // upgrade path releases a document that only the redirect link withheld,
 // without a read of every indexed document; the allow list applies to derived
 // text; and a corpus with no recorded policy under a custom list is read again
@@ -187,7 +187,7 @@ func TestSecretAllow_ConfigOnlyCommandDoesNotSuppressThePass(t *testing.T) {
 }
 
 // TestSecretAllow_UnrecordedCustomPolicyReadsIndexed covers a corpus indexed
-// before spec 0.96.0 under a custom list. That list is not recorded and cannot
+// before spec 0.97.0 under a custom list. That list is not recorded and cannot
 // be known, so the first scan reads every indexed document again.
 func TestSecretAllow_UnrecordedCustomPolicyReadsIndexed(t *testing.T) {
 	t.Parallel()
@@ -237,7 +237,7 @@ func TestSecretAllow_AppliesToDerivedText(t *testing.T) {
 }
 
 // TestSecretAllow_ReplacedGenericRuleNeedsThePass pins SPEC §7.2 (spec
-// 0.96.0): the test for "can only match less" is on the matches that stay
+// 0.97.0): the test for "can only match less" is on the matches that stay
 // after cancellation, not on one list alone. An allow pattern cancels only a
 // match of the generic bearer-token default. When a custom token pattern
 // replaces that default, also a narrower one, its matches have no allow

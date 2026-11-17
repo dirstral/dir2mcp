@@ -19,7 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 / §15.4 (spec 0.96.0): open_file checks the WHOLE source against
+// SPEC §7.2 / §15.4 (spec 0.97.0): open_file checks the WHOLE source against
 // the secret policy before it returns any byte, so its decision is exactly the
 // decision secretmatch.Matcher.Match makes on the whole text. The cases below
 // broke earlier designs that judged the source in read windows.
@@ -214,7 +214,7 @@ func (f *changingCorpusFS) Localize(context.Context, string) (string, func(), er
 	return "", func() {}, errors.New("changingCorpusFS: Localize not implemented")
 }
 
-// TestOpenFile_SliceComesFromTheCheckedBytes pins SPEC §15.4 (spec 0.96.0):
+// TestOpenFile_SliceComesFromTheCheckedBytes pins SPEC §15.4 (spec 0.97.0):
 // the slice that open_file returns comes from the same bytes that the secret
 // check covered. The source is read once per call, for every span kind of a
 // text source. A source that changes after that read cannot put unchecked

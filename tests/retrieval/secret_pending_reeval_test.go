@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.96.0): until the re-evaluation pass has read a document
+// SPEC §7.2 (spec 0.97.0): until the re-evaluation pass has read a document
 // again under a BROADER secret policy, no tool returns any part of it. A
 // credential can cross a chunk boundary, and then no single excerpt matches,
 // so the excerpt screen alone would serve both halves. A change that can only

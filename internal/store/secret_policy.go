@@ -11,7 +11,7 @@ import (
 
 // SecretPolicyIdentitySetting is the settings key that records the identity of
 // the effective security.secret_patterns set the corpus is evaluated against
-// (SPEC §7.2, spec 0.96.0). It lives in the same `settings` table as
+// (SPEC §7.2, spec 0.97.0). It lives in the same `settings` table as
 // pipeline_output_identity, so it survives a restart and costs one read per
 // scan.
 const SecretPolicyIdentitySetting = "secret_policy_identity"
