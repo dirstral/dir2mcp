@@ -95,6 +95,16 @@ func NarrowedSecretPatterns() map[string]string {
 // Any other change, also one that is stricter in fact (for example `X-[0-9]+`
 // edited to `X-[0-9]{4}`), counts as broader: only the declared narrowings are
 // known to be narrower.
+//
+// The test is on the matches that stay after cancellation, not on one list
+// alone (SPEC §7.2). An allow pattern cancels only a match of the generic
+// bearer-token default. So a pattern that replaces that default, also a
+// narrower one, leaves matches that no allow pattern cancels: text that the
+// previous policy released can match now. The rules above cover this: the
+// replacement is not in previous, so the change is broader. For the same
+// reason NarrowedSecretPatterns must never declare a narrowing of the generic
+// default. Removing a secret pattern removes its matches and cancels nothing
+// less, and an added allow pattern only cancels more, so both are narrower.
 func IsNarrower(previous, active Policy) bool {
 	known := make(map[string]struct{}, len(previous.Secret))
 	for _, p := range previous.Secret {
@@ -123,33 +133,37 @@ func IsNarrower(previous, active Policy) bool {
 	return true
 }
 
-// Recorded is the previous secret policy: the one a store recorded at its last
-// transition, or, for a corpus that an older release indexed and that has no
-// record, the lists that the run before held in its effective-config snapshot
-// (config.PreviousSecretPolicy). Identity is empty when the store has no
-// record. Known is false when the previous lists cannot be established.
+// Recorded is the secret policy that the store recorded at the last policy
+// transition of a scan: the policy the corpus was last evaluated against.
+// Identity is empty when the store has no record (a corpus that a release
+// before spec 0.96.0 indexed). Known is false when the recorded lists cannot
+// be established.
 type Recorded struct {
 	Identity string
 	Policy   Policy
 	Known    bool
 }
 
-// NeedsIndexedReevaluation reports whether a move from the previous policy to
+// NeedsIndexedReevaluation reports whether a move from the recorded policy to
 // the active one can match more, so that every indexed document must be read
 // again (and is withheld until then, SPEC §7.2). Ingest decides its reset with
 // it, and retrieval decides with it whether a transition that ingest has not
 // applied yet must hide the indexed documents.
 //
-// The active configuration says nothing about the previous one, so an
-// unknown previous policy counts as broader: a corpus indexed under a custom
-// list that left out a default rule must be read again. A move that the
-// previous lists prove narrower hides nothing.
+// Only a record that a scan wrote counts as the previous policy. With no
+// record the previous policy is unknown, and an unknown policy counts as
+// broader: the pass runs. Nothing else can stand in for the record. The
+// active configuration says nothing about the previous one, and the
+// effective-config snapshot is rewritten by every command that loads the
+// config, also by one that does not scan, so it can hold lists that never
+// evaluated the corpus. A move that the recorded lists prove narrower
+// (IsNarrower) hides nothing.
 func NeedsIndexedReevaluation(previous Recorded, active Policy) bool {
-	if previous.Identity != "" && previous.Identity == active.Identity() {
-		return false
-	}
-	if !previous.Known {
+	if previous.Identity == "" || !previous.Known {
 		return true
+	}
+	if previous.Identity == active.Identity() {
+		return false
 	}
 	return !IsNarrower(previous.Policy, active)
 }

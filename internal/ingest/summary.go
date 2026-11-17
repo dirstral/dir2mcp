@@ -286,6 +286,10 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 	// A summary is model output: check it like any derived text before it is
 	// persisted. A match withholds the document, as for any derived text.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindSummary, summaryText) {
+		// An entry that an earlier run cached (under an earlier policy, or
+		// before the check ran ahead of the cache write) is removed, so the
+		// rejected text does not stay on disk.
+		s.removeSummaryCacheEntry(sourceText)
 		return errSummaryOutputSecret
 	}
 
@@ -413,6 +417,12 @@ func (s *Service) readOrComputeSummary(ctx context.Context, sourceText string) (
 		return "", err
 	}
 	out := strings.ReplaceAll(strings.ReplaceAll(generated, "\r\n", "\n"), "\r", "\n")
+	// A summary that matches the secret policy is never written to the cache.
+	// The caller checks the same text and withholds the document; a cache
+	// entry would keep the rejected text on disk after that (SPEC §7.2).
+	if s.derivedTextHasSecret(out) || s.derivedTextHasSecret(strings.TrimSpace(out)) {
+		return out, nil
+	}
 	if err := statefs.MkdirAll(cacheDir); err != nil {
 		s.getLogger().Printf("hierarchical retrieval: create summary cache dir failed (continuing uncached): %v", err)
 		return out, nil
@@ -421,6 +431,14 @@ func (s *Service) readOrComputeSummary(ctx context.Context, sourceText string) (
 		s.getLogger().Printf("hierarchical retrieval: write summary cache failed (continuing uncached): %v", err)
 	}
 	return out, nil
+}
+
+// removeSummaryCacheEntry deletes the cache entry for sourceText, if any.
+func (s *Service) removeSummaryCacheEntry(sourceText string) {
+	cachePath := filepath.Join(s.cfg.StateDir, "cache", "summary", s.summaryCacheKey(sourceText)+".txt")
+	if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.getLogger().Printf("hierarchical retrieval: remove a rejected summary cache entry failed: %v", err)
+	}
 }
 
 // generateSummaryText runs the configured generator over the built-in (general,

@@ -2,10 +2,7 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,42 +103,27 @@ func TestSecretPolicyTransition_NarrowerChangeHidesNothing(t *testing.T) {
 }
 
 // TestSecretPolicyTransition_UnrecordedCorpus covers a corpus that an older
-// release indexed: the store records no policy. With no provenance, the
-// previous policy is unknown, so every indexed document is withheld until the
-// scan marks them. With the provenance that the effective-config snapshot
-// kept (the old defaults), the move to the shipped defaults is a narrowing,
-// so nothing is hidden.
+// release indexed: the store records no policy. The previous policy is
+// unknown, so every indexed document is withheld until the scan marks them.
+// The effective-config snapshot in the state directory does not count: every
+// command that loads the config rewrites it, also one that does not scan.
 func TestSecretPolicyTransition_UnrecordedCorpus(t *testing.T) {
 	defaults := config.Default()
-	t.Run("no provenance", func(t *testing.T) {
-		f := newPendingFixture(t)
-		f.svc.SetStateDir(testutil.TempDir(t))
-		if err := f.svc.SetSecretPolicy(defaults.SecretPatterns, defaults.SecretAllowPatterns); err != nil {
-			t.Fatalf("SetSecretPolicy: %v", err)
-		}
-		if got := f.searchIDs(t); got != "[]" {
-			t.Fatalf("hits with an unknown previous policy = %s, want []", got)
-		}
-	})
-	t.Run("provenance of the old defaults", func(t *testing.T) {
-		f := newPendingFixture(t)
-		stateDir := testutil.TempDir(t)
-		old := secretmatch.PreSpec0960DefaultPolicy()
-		raw, err := json.Marshal(config.SecretPolicyProvenance{Secret: old.Secret, Allow: []string{}, Source: config.EffectiveConfigSnapshotFile})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(stateDir, config.SecretPolicyProvenanceFile), raw, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		f.svc.SetStateDir(stateDir)
-		if err := f.svc.SetSecretPolicy(defaults.SecretPatterns, defaults.SecretAllowPatterns); err != nil {
-			t.Fatalf("SetSecretPolicy: %v", err)
-		}
-		if got := f.searchIDs(t); got != "[1 2 3]" {
-			t.Fatalf("hits after a proven narrowing = %s, want [1 2 3]", got)
-		}
-	})
+	f := newPendingFixture(t)
+	stateDir := testutil.TempDir(t)
+	cfg := defaults
+	cfg.RootDir = testutil.TempDir(t)
+	cfg.StateDir = stateDir
+	if _, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{}); err != nil {
+		t.Fatalf("SaveEffectiveSnapshot: %v", err)
+	}
+	f.svc.SetStateDir(stateDir)
+	if err := f.svc.SetSecretPolicy(defaults.SecretPatterns, defaults.SecretAllowPatterns); err != nil {
+		t.Fatalf("SetSecretPolicy: %v", err)
+	}
+	if got := f.searchIDs(t); got != "[]" {
+		t.Fatalf("hits with no recorded policy = %s, want []", got)
+	}
 }
 
 // TestSecretPolicyTransition_EverySetterUpdatesTheIngestPolicy pins that the

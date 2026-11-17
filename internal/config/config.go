@@ -2545,12 +2545,6 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 	if err := statefs.MkdirAllHardened(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("create snapshot directory: %w", err)
 	}
-	// Keep the secret lists of the snapshot this write replaces, once, as the
-	// provenance of the previous secret policy (SPEC §7.2). Without it, a
-	// corpus that an older release indexed has an unknown previous policy.
-	if err := captureSecretPolicyProvenance(cfg.StateDir); err != nil {
-		return "", fmt.Errorf("record the previous secret policy: %w", err)
-	}
 	if err := statefs.WriteFile(path, raw); err != nil {
 		return "", fmt.Errorf("write snapshot file %s: %w", path, err)
 	}
@@ -4940,7 +4934,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 		b.WriteByte('\n')
 		for _, value := range values {
 			b.WriteString("  - ")
-			b.WriteString(value)
+			b.WriteString(quoteYAMLListItem(value))
 			b.WriteByte('\n')
 		}
 	}
@@ -5220,6 +5214,46 @@ func scalarStartsAt(line string, i int) bool {
 		return spaced && (n == 1 || prev[n-2] == ' ' || prev[n-2] == '\t')
 	}
 	return false
+}
+
+// quoteYAMLListItem writes one list item so that unquoteYAMLScalar and the
+// list parser read back the same value byte for byte. A value of plain name
+// characters only (letters, digits, `_`, `.`, `/`, `-`, not at the start
+// for `-`) is written as it is, so a generated config stays easy to
+// read. Every other value is written as a single-quoted YAML scalar, with a
+// doubled single quote for an embedded one: a value that begins and ends with a
+// quote character keeps those quotes, and a `#`, a comma, a brace, a colon or
+// a space is not read as YAML syntax. A plain item with outer quotes lost them
+// on reload; for a secret or allow pattern that changes what the pattern
+// matches.
+func quoteYAMLListItem(value string) string {
+	if plainYAMLListItem(value) {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// plainYAMLListItem reports whether value can be written with no quotes.
+func plainYAMLListItem(value string) bool {
+	if value == "" || value[0] == '-' {
+		return false
+	}
+	// A word that a standard YAML parser reads as null or as a boolean is
+	// quoted, so every parser reads a string.
+	switch strings.ToLower(value) {
+	case "null", "true", "false", "yes", "no", "on", "off":
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_', c == '.', c == '/', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func unquoteYAMLScalar(value string) string {

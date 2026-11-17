@@ -1314,9 +1314,8 @@ type secretPolicyRecordStore interface {
 // policy withholds. A move that the previous lists prove narrower hides
 // nothing.
 //
-// The previous policy is the one the store recorded, or, for a corpus that an
-// older release indexed, the provenance that the effective-config snapshot
-// kept (config.PreviousSecretPolicy). With neither, it is unknown and counts
+// The previous policy is the one a scan recorded in the store. With no
+// record (a corpus that an older release indexed) it is unknown and counts
 // as broader.
 //
 // A service without the configured lists (no secret setter called) or a store
@@ -1326,7 +1325,6 @@ func (s *Service) secretPolicyTransitionPending(ctx context.Context) (bool, erro
 	s.metaMu.RLock()
 	active, known := s.ingestPolicy, s.ingestPolicyKnown
 	st := s.store
-	stateDir := s.stateDir
 	s.metaMu.RUnlock()
 	if !known {
 		return false, nil
@@ -1339,33 +1337,24 @@ func (s *Service) secretPolicyTransitionPending(ctx context.Context) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("secret policy: read the recorded secret policy identity: %w", err)
 	}
-	previous, err := previousSecretPolicy(ctx, rs, identity, active, stateDir)
+	previous, err := recordedSecretPolicy(ctx, rs, identity, active)
 	if err != nil {
 		return false, err
 	}
 	return secretmatch.NeedsIndexedReevaluation(previous, active), nil
 }
 
-// previousSecretPolicy reads the previous policy for the transition check: the
-// recorded lists when the store records an identity that differs from the
-// active one, else the snapshot provenance when the store records none.
-func previousSecretPolicy(ctx context.Context, rs secretPolicyRecordStore, identity string, active secretmatch.Policy, stateDir string) (secretmatch.Recorded, error) {
+// recordedSecretPolicy reads the policy the store recorded, for the
+// transition check. The lists are read only when the recorded identity
+// differs from the active one. With no recorded identity the previous policy
+// is unknown.
+func recordedSecretPolicy(ctx context.Context, rs secretPolicyRecordStore, identity string, active secretmatch.Policy) (secretmatch.Recorded, error) {
 	previous := secretmatch.Recorded{Identity: identity}
-	switch {
-	case identity == active.Identity():
+	if identity == "" {
 		return previous, nil
-	case identity == "":
-		if strings.TrimSpace(stateDir) == "" {
-			return previous, nil
-		}
-		prov, ok, err := config.PreviousSecretPolicy(stateDir)
-		if err != nil {
-			return previous, fmt.Errorf("secret policy: read the previous secret policy: %w", err)
-		}
-		if ok {
-			previous.Policy = secretmatch.Policy{Secret: prov.Secret, Allow: prov.Allow}
-			previous.Known = true
-		}
+	}
+	if identity == active.Identity() {
+		previous.Policy, previous.Known = active, true
 		return previous, nil
 	}
 	secret, secretKnown, err := rs.SecretPolicyPatterns(ctx)
@@ -2767,7 +2756,7 @@ func (s *Service) openTextNativeFile(ctx context.Context, corpusFS corpusfs.Corp
 			return content, truncated, err
 		}
 	}
-	return selectCheckedSpan(data, kind, span, maxChars)
+	return selectCheckedSpan(secretPatterns, data, kind, span, maxChars)
 }
 
 // openBinaryDocText answers open_file for a binary document type
@@ -3047,8 +3036,7 @@ func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.Co
 		if secretPatterns.MatchString(text) {
 			return "", false, model.ErrForbidden
 		}
-		out, truncated := truncateRunesWithFlag(text, maxChars)
-		return out, truncated, nil
+		return checkedOutput(secretPatterns, text, false, maxChars)
 	}
 	return "", false, model.ErrOCRNotReady
 }
@@ -3194,15 +3182,47 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 	}
 	normalizedSpan := span
 	normalizedSpan.Kind = kind
+	// Generation binding (see documentGenerations): openFile checked the
+	// withholding state before this read, and a broader policy can mark the
+	// document, or a scan can replace it, while the stored chunks are read.
+	// So the generation is read before the chunks, and the pending check and
+	// the generation are read again after them.
+	bound := []model.SearchHit{{RelPath: normalizedRel}}
+	before, err := s.documentGenerations(ctx, bound)
+	if err != nil {
+		return "", false, true, err
+	}
 	fromMeta, ok := s.sliceFromMetadata(ctx, normalizedRel, normalizedSpan)
 	if !ok {
 		return "", false, false, nil
 	}
+	unservable, err := s.unservablePaths(ctx, bound, before)
+	if err != nil {
+		return "", false, true, err
+	}
+	if _, gone := unservable[normalizedRel]; gone {
+		return "", false, true, model.ErrForbidden
+	}
 	if secretPatterns.MatchString(fromMeta) {
 		return "", false, true, model.ErrForbidden
 	}
-	out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
-	return out, truncated, true, nil
+	out, truncated, err := checkedOutput(secretPatterns, fromMeta, false, maxChars)
+	return out, truncated, true, err
+}
+
+// checkedOutput cuts text to maxChars and checks the text that the tool is
+// about to return (SPEC §7.2: the allow list applies to the text a tool
+// returns). The whole source was checked before, but a selection or a cut can
+// remove the context or the end of an allow cover (for example the `;ok` of
+// the allow pattern `token=A+;ok`), and the returned text then holds a generic
+// token match that nothing covers. Such an answer is refused. alreadyCut
+// carries a truncation that an earlier selection made.
+func checkedOutput(matcher *secretmatch.Matcher, text string, alreadyCut bool, maxChars int) (string, bool, error) {
+	out, cut := truncateRunesWithFlag(text, maxChars)
+	if matchesAsIsOrTrimmed(matcher, out) {
+		return "", false, model.ErrForbidden
+	}
+	return out, alreadyCut || cut, nil
 }
 
 // readCheckedSource is the read behind every answer for a text-native
@@ -3222,8 +3242,9 @@ func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string
 // read stops at cap+1 bytes, so memory and bandwidth stay bounded by the cap
 // (#690, #830); the span selection then retains at most one read budget.
 //
-// It returns the bytes it checked; every slice of the answer comes from them
-// or is checked again (SPEC §15.4).
+// It returns the bytes it checked. Every slice of the answer comes from them,
+// and the slice is checked again in the form the tool returns it, because a
+// selection or a cut can split an allow cover (checkedOutput, SPEC §15.4).
 func (s *Service) readCheckedSource(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher) ([]byte, error) {
 	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
@@ -3248,14 +3269,14 @@ func (s *Service) readCheckedSource(ctx context.Context, corpusFS corpusfs.Corpu
 }
 
 // selectCheckedSpan selects the requested span from bytes that
-// readCheckedSource checked.
-func selectCheckedSpan(data []byte, kind string, span model.Span, maxChars int) (string, bool, error) {
+// readCheckedSource checked, and checks the selected text again in the form
+// the tool returns it (checkedOutput).
+func selectCheckedSpan(matcher *secretmatch.Matcher, data []byte, kind string, span model.Span, maxChars int) (string, bool, error) {
 	selection, selErr := selectSpan(bytes.NewReader(data), kind, span, openFileReadBudgetBytes(maxChars))
 	if selErr != nil {
 		return "", false, selErr
 	}
-	out, outTruncated := truncateRunesWithFlag(selection.text, maxChars)
-	return out, selection.truncated || outTruncated, nil
+	return checkedOutput(matcher, selection.text, selection.truncated, maxChars)
 }
 
 // MatchesSecret reports whether text matches the secret pattern set that

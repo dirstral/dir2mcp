@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
@@ -82,7 +81,7 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 	if recorded == active {
 		return nil
 	}
-	previous, err := recordedSecretPolicy(ctx, policyStore, recorded, s.cfg.StateDir)
+	previous, err := recordedSecretPolicy(ctx, policyStore, recorded)
 	if err != nil {
 		return err
 	}
@@ -102,22 +101,13 @@ func (s *Service) beginSecretPolicyReevaluation(ctx context.Context, matcher *se
 }
 
 // recordedSecretPolicy reads the policy the corpus was last evaluated
-// against. When the store records none (a corpus that a release before spec
-// 0.96.0 indexed), it falls back to the provenance that the effective-config
-// snapshot kept (config.PreviousSecretPolicy). With neither, the previous
-// policy is unknown, and secretmatch.NeedsIndexedReevaluation reads every
-// indexed document again.
-func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded, stateDir string) (secretmatch.Recorded, error) {
+// against: the record that the scan path writes with its reset. When the
+// store records none (a corpus that a release before spec 0.96.0 indexed),
+// the previous policy is unknown, and secretmatch.NeedsIndexedReevaluation
+// reads every indexed document again.
+func recordedSecretPolicy(ctx context.Context, policyStore secretPolicyStore, recorded string) (secretmatch.Recorded, error) {
 	out := secretmatch.Recorded{Identity: recorded}
 	if recorded == "" {
-		prov, ok, err := config.PreviousSecretPolicy(stateDir)
-		if err != nil {
-			return out, fmt.Errorf("secret policy: read the previous secret policy: %w", err)
-		}
-		if ok {
-			out.Policy = secretmatch.Policy{Secret: prov.Secret, Allow: prov.Allow}
-			out.Known = true
-		}
 		return out, nil
 	}
 	secret, secretKnown, err := policyStore.SecretPolicyPatterns(ctx)

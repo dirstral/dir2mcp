@@ -279,3 +279,43 @@ func TestOpenFile_TextNativeMetadataSpanChecksTheWholeSource(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenFile_ReturnedTextIsCheckedAfterTheCut pins SPEC §7.2 for the text
+// that open_file returns. The allow pattern `token=A+;ok` covers the
+// assignment only together with its `;ok` end. The whole source holds that
+// end, so the whole-source check passes. A cut to max_chars inside the value
+// removes it: the returned text then holds a generic token match with no
+// cover, and the call must be refused. A cut after the cover is served.
+func TestOpenFile_ReturnedTextIsCheckedAfterTheCut(t *testing.T) {
+	tok := "to" + "ken"
+	allow := []string{tok + `=A+;ok`}
+	secret := []string{secretmatch.GenericTokenPattern}
+	const maxChars = 200
+	// The cut at 200 characters falls after 25 A's, before ";ok".
+	pad := strings.Repeat("x", maxChars-len(tok)-1-25-1) + " "
+	body := pad + tok + "=" + strings.Repeat("A", 30) + ";ok and more text after the cover\n"
+	m, err := secretmatch.Compile(secret, allow)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if m.MatchString(body) || !m.MatchString(body[:maxChars]) {
+		t.Fatal("the fixture must pass as a whole and match once cut to 200 characters")
+	}
+
+	root := testutil.TempDir(t)
+	writeRootFile(t, root, "docs/cut.txt", []byte(body))
+	svc := openFileService(t, root, secret, allow)
+	if out, err := svc.OpenFile(context.Background(), "docs/cut.txt", model.Span{}, maxChars); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("OpenFile cut inside the allow cover = (%q, %v), want ErrForbidden", out, err)
+	}
+	out, err := svc.OpenFile(context.Background(), "docs/cut.txt", model.Span{}, maxChars+40)
+	if err != nil || !strings.Contains(out, ";ok") {
+		t.Fatalf("OpenFile cut after the allow cover = (%q, %v), want the text with its cover", out, err)
+	}
+
+	// The same cut on a stored page slice of a document with derived text.
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/scan.pdf", Snippet: body, Span: model.Span{Kind: "page", Page: 1}})
+	if out, err := svc.OpenFile(context.Background(), "docs/scan.pdf", model.Span{Kind: "page", Page: 1}, maxChars); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("OpenFile page slice cut inside the allow cover = (%q, %v), want ErrForbidden", out, err)
+	}
+}

@@ -325,15 +325,26 @@ func TestSecretPolicy_NeedsIndexedReevaluation(t *testing.T) {
 		{"removed secret pattern", rec(custom), defaults, false},
 		{"added allow pattern", rec(defaults), narrower, false},
 		{"removed allow pattern", rec(narrower), defaults, true},
-		{"unrecorded corpus, no provenance, shipped defaults", secretmatch.Recorded{}, defaults, true},
-		{"unrecorded corpus, no provenance, custom policy", secretmatch.Recorded{}, custom, true},
-		{"unrecorded corpus, provenance of the old defaults", secretmatch.Recorded{Policy: secretmatch.PreSpec0960DefaultPolicy(), Known: true}, defaults, false},
-		{"unrecorded corpus, provenance of a custom list", secretmatch.Recorded{Policy: secretmatch.Policy{Secret: []string{`BLUEHERON-[0-9]+`}}, Known: true}, defaults, true},
+		{"unrecorded corpus, shipped defaults", secretmatch.Recorded{}, defaults, true},
+		{"unrecorded corpus, custom policy", secretmatch.Recorded{}, custom, true},
+		{"unrecorded corpus, lists from another source", secretmatch.Recorded{Policy: secretmatch.PreSpec0960DefaultPolicy(), Known: true}, defaults, true},
 		{"recorded lists unreadable", secretmatch.Recorded{Identity: "v2:other"}, defaults, true},
 	}
 	for _, tc := range cases {
 		if got := secretmatch.NeedsIndexedReevaluation(tc.recorded, tc.active); got != tc.want {
 			t.Errorf("%s: NeedsIndexedReevaluation = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestSecretPolicy_NoDeclaredNarrowingOfTheGenericRule pins that the generic
+// bearer-token default is never the old side or the new side of a declared
+// narrowing: an allow pattern cancels only its matches, so a replacement of
+// that rule can leave matches that nothing cancels (SPEC §7.2, spec 0.96.0).
+func TestSecretPolicy_NoDeclaredNarrowingOfTheGenericRule(t *testing.T) {
+	for narrowed, previous := range secretmatch.NarrowedSecretPatterns() {
+		if narrowed == secretmatch.GenericTokenPattern || previous == secretmatch.GenericTokenPattern {
+			t.Errorf("declared narrowing %q of %q involves the generic token rule", narrowed, previous)
 		}
 	}
 }

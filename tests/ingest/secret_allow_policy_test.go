@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -53,11 +55,13 @@ const (
 	scopeAll          = "withheld and indexed documents"
 )
 
-// TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed is the upgrade
-// path: a document withheld only for its redirect link is released by the
-// default allow list on the next scan. The change can only match less, so the
-// indexed documents are not read again and nothing is hidden.
-func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) {
+// TestSecretAllow_UpgradeReleasesRedirectAndReadsIndexed is the upgrade path:
+// a document withheld only for its redirect link is released by the default
+// allow list on the next scan. The store of the older release recorded no
+// policy, so the previous policy is unknown: the scan reads every indexed
+// document again. After that scan the policy is recorded, and a change that
+// can only match less reads only the withheld documents.
+func TestSecretAllow_UpgradeReleasesRedirectAndReadsIndexed(t *testing.T) {
 	t.Parallel()
 	root := testutil.TempDir(t)
 	stateDir := testutil.TempDir(t)
@@ -69,16 +73,15 @@ func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) 
 	requireStatus(t, st, "redirect.md", model.DocumentStatusSecretExcluded)
 	requireSearchable(t, st, "clean.md")
 	forgetSecretPolicyIdentity(t, st, dbPath)
-	keepOldBinarySnapshot(t, policyConfig(root, stateDir, config.Default().SecretPatterns), preSpec0960SecretPatterns)
 
 	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "redirect.md")
 	requireSearchable(t, st, "clean.md")
-	if !strings.Contains(logs, scopeWithheldOnly) || strings.Contains(logs, scopeAll) {
-		t.Fatalf("the upgrade re-read more than the withheld documents; log:\n%s", logs)
+	if !strings.Contains(logs, scopeAll) {
+		t.Fatalf("the upgrade from an unrecorded policy did not re-read the indexed documents; log:\n%s", logs)
 	}
 	if n := pendingMarks(t, dbPath); n != 0 {
-		t.Fatalf("%d document(s) were hidden by a change that can only match less", n)
+		t.Fatalf("%d document(s) still wait for re-evaluation after the scan", n)
 	}
 
 	// Adding an operator allow pattern is also a narrowing change.
@@ -103,13 +106,12 @@ func TestSecretAllow_UpgradeReleasesRedirectWithoutReadingIndexed(t *testing.T) 
 	}
 }
 
-// TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed covers a
-// corpus that an older release indexed, with no recorded policy and no
-// snapshot provenance. The shipped defaults are active now, but that says
+// TestSecretAllow_UnrecordedPolicyReadsIndexed covers a corpus that an older
+// release indexed, with no recorded policy. The shipped defaults are active now, but that says
 // nothing about the list the corpus was indexed under: here it left the AWS
 // rule out. So the first scan reads every indexed document again and
 // withholds the unchanged key document.
-func TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed(t *testing.T) {
+func TestSecretAllow_UnrecordedPolicyReadsIndexed(t *testing.T) {
 	t.Parallel()
 	root := testutil.TempDir(t)
 	stateDir := testutil.TempDir(t)
@@ -126,13 +128,62 @@ func TestSecretAllow_UnrecordedPolicyWithoutProvenanceReadsIndexed(t *testing.T)
 
 	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	if !strings.Contains(logs, scopeAll) {
-		t.Fatalf("an unrecorded policy with no provenance did not re-read the indexed documents; log:\n%s", logs)
+		t.Fatalf("an unrecorded policy did not re-read the indexed documents; log:\n%s", logs)
 	}
 	requireSearchable(t, st, "clean.md")
 	requireWithheldAndRetired(t, st, "keys.md")
 	if n := pendingMarks(t, dbPath); n != 0 {
 		t.Fatalf("%d document(s) still wait for re-evaluation after the scan", n)
 	}
+}
+
+// TestSecretAllow_ConfigOnlyCommandDoesNotSuppressThePass covers the upgrade
+// of a corpus that was indexed under a custom list with no AWS rule. Before
+// the first scan of this release, a command that only loads the config
+// rewrites the effective-config snapshot with the NEW lists. The snapshot then
+// holds lists that never evaluated the corpus, so it must not stand in for
+// the previous policy: the first scan reads every indexed document again and
+// withholds the unchanged key document.
+func TestSecretAllow_ConfigOnlyCommandDoesNotSuppressThePass(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "clean.md"), "The quarterly report covers delivery and revenue.\n")
+	writeFile(t, filepath.Join(root, "keys.md"), "Deploy key AK"+"IA2ZZZZZZZZZZZZZZQ for the build.\n")
+	st, dbPath := newPolicyStore(t)
+
+	old := policyConfig(root, stateDir, []string{`BLUEHERON-[0-9]{4}`})
+	old.SecretAllowPatterns = []string{}
+	runPolicyScan(t, old, st)
+	requireSearchable(t, st, "keys.md")
+	forgetSecretPolicyIdentity(t, st, dbPath)
+
+	// The operator edits the config, and a config-only command of the OLDER
+	// release writes its snapshot: `secret_patterns` holds the new list, and
+	// no scan ran under it.
+	next := policyConfig(root, stateDir, config.Default().SecretPatterns)
+	var snapshot strings.Builder
+	snapshot.WriteString("secret_patterns:\n")
+	for _, p := range next.SecretPatterns {
+		snapshot.WriteString("  - '" + strings.ReplaceAll(p, "'", "''") + "'\n")
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, config.EffectiveConfigSnapshotFile), []byte(snapshot.String()), 0o600); err != nil {
+		t.Fatalf("write the older release's snapshot: %v", err)
+	}
+	// Then config-only commands of this release load the config and save the
+	// snapshot again, before any scan.
+	for i := 0; i < 2; i++ {
+		if _, err := config.SaveEffectiveSnapshot(next, config.SecretSourceMetadata{}); err != nil {
+			t.Fatalf("SaveEffectiveSnapshot: %v", err)
+		}
+	}
+
+	logs := runLoggedPolicyScan(t, next, st)
+	if !strings.Contains(logs, scopeAll) {
+		t.Fatalf("a config-only command before the first scan suppressed the pass; log:\n%s", logs)
+	}
+	requireSearchable(t, st, "clean.md")
+	requireWithheldAndRetired(t, st, "keys.md")
 }
 
 // TestSecretAllow_UnrecordedCustomPolicyReadsIndexed covers a corpus indexed
@@ -183,4 +234,61 @@ func TestSecretAllow_AppliesToDerivedText(t *testing.T) {
 	runPolicyScan(t, policyConfig(root, stateDir, config.Default().SecretPatterns), st)
 	requireSearchable(t, st, "link.mp3")
 	requireStatus(t, st, "cred.mp3", model.DocumentStatusSecretExcluded)
+}
+
+// TestSecretAllow_ReplacedGenericRuleNeedsThePass pins SPEC §7.2 (spec
+// 0.96.0): the test for "can only match less" is on the matches that stay
+// after cancellation, not on one list alone. An allow pattern cancels only a
+// match of the generic bearer-token default. When a custom token pattern
+// replaces that default, also a narrower one, its matches have no allow
+// pattern to cancel them. So the change needs the pass: a document with a
+// redirect link, which the old set released, is read again and withheld.
+func TestSecretAllow_ReplacedGenericRuleNeedsThePass(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	stateDir := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "redirect.md"), redirectNote())
+	writeFile(t, filepath.Join(root, "clean.md"), "The quarterly report covers delivery and revenue.\n")
+	st, dbPath := newPolicyStore(t)
+
+	defaults := config.Default().SecretPatterns
+	runPolicyScan(t, policyConfig(root, stateDir, defaults), st)
+	requireSearchable(t, st, "redirect.md")
+
+	// Every string the custom pattern matches, the generic default matches too.
+	custom := `(?i)_token=[A-Za-z0-9_.-]{20,}`
+	replaced := make([]string, 0, len(defaults))
+	found := false
+	for _, p := range defaults {
+		if p == secretmatch.GenericTokenPattern {
+			replaced = append(replaced, custom)
+			found = true
+			continue
+		}
+		replaced = append(replaced, p)
+	}
+	if !found {
+		t.Fatal("the shipped defaults do not hold the generic token rule")
+	}
+	old, err := secretmatch.Compile(defaults, config.DefaultSecretAllowPatterns())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := secretmatch.Compile(replaced, config.DefaultSecretAllowPatterns())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secretmatch.IsNarrower(old.Policy(), next.Policy()) {
+		t.Fatal("a replaced generic token rule must not count as a change that can only match less")
+	}
+
+	logs := runLoggedPolicyScan(t, policyConfig(root, stateDir, replaced), st)
+	if !strings.Contains(logs, scopeAll) {
+		t.Fatalf("the replaced generic rule did not start the pass; log:\n%s", logs)
+	}
+	requireWithheldAndRetired(t, st, "redirect.md")
+	requireSearchable(t, st, "clean.md")
+	if n := pendingMarks(t, dbPath); n != 0 {
+		t.Fatalf("%d document(s) still wait for re-evaluation after the scan", n)
+	}
 }

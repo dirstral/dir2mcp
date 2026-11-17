@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -209,5 +210,78 @@ func TestSecretGeneration_AskPromptAfterAReplacement(t *testing.T) {
 	requireNoOldGeneration(t, "the ask prompt", f.gen.lastPrompt)
 	if strings.Contains(f.gen.lastPrompt, genCleanTxt) {
 		t.Fatalf("the ask prompt holds the text of clean.md, which changed during the request:\n%s", f.gen.lastPrompt)
+	}
+}
+
+// TestSecretGeneration_OpenFileMetadataSliceIsBound: open_file checks the
+// withholding state, then reads a page slice from the stored chunks. A
+// broader policy that is recorded between the two steps (with or without a
+// replacement that clears the mark again) must refuse the call.
+func TestSecretGeneration_OpenFileMetadataSliceIsBound(t *testing.T) {
+	for name, replace := range map[string]bool{"marked": false, "marked and replaced": true} {
+		f := newGenerationFixture(t)
+		ctx := context.Background()
+		if err := f.store.UpsertDocument(model.WithSecretPolicyIdentity(ctx, "v2:first"), model.Document{RelPath: "scan.pdf", DocType: "pdf", Status: "ok", ContentHash: "h1"}); err != nil {
+			t.Fatalf("UpsertDocument: %v", err)
+		}
+		span := model.Span{Kind: "page", Page: 1}
+		f.svc.SetChunkMetadata(9, model.SearchHit{RelPath: "scan.pdf", Snippet: "page one text", Span: span})
+		f.svc.SetRootDir(testutil.TempDir(t))
+
+		out, err := f.svc.OpenFile(ctx, "scan.pdf", span, 200)
+		if err != nil || out != "page one text" {
+			t.Fatalf("%s: OpenFile before the change = (%q, %v), want the page", name, out, err)
+		}
+
+		// Lookup 1 of this call is the check in openFile; lookup 2 runs after
+		// the stored chunks are read.
+		f.store.lookups = 0
+		f.store.hookAt = 2
+		f.store.atPendingLookup = func() {
+			if _, err := f.store.ResetForSecretPolicy(ctx, "v2:later", []string{`BLUEHERON`, `page one`}, nil, true); err != nil {
+				t.Fatalf("ResetForSecretPolicy: %v", err)
+			}
+			if replace {
+				if err := f.store.UpsertDocument(model.WithSecretPolicyIdentity(ctx, "v2:later"), model.Document{RelPath: "scan.pdf", DocType: "pdf", Status: "ok", ContentHash: "h2"}); err != nil {
+					t.Fatalf("UpsertDocument: %v", err)
+				}
+			}
+		}
+		if out, err := f.svc.OpenFile(ctx, "scan.pdf", span, 200); !errors.Is(err, model.ErrForbidden) {
+			t.Errorf("%s: OpenFile = (%q, %v), want ErrForbidden for a document that changed during the call", name, out, err)
+		}
+		if f.store.lookups < 2 {
+			t.Errorf("%s: only %d pending lookup(s) ran; the slice was not checked again", name, f.store.lookups)
+		}
+	}
+}
+
+// TestSecretGeneration_ResetOfAnUnfinalizedDocumentChangesTheGeneration: a
+// live `ok` row with no content hash (a document that is not finalized) keeps
+// its status and hash through a broader reset. The pending mark is part of
+// the generation, so the reset is still seen.
+func TestSecretGeneration_ResetOfAnUnfinalizedDocumentChangesTheGeneration(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.UpsertDocument(ctx, model.Document{RelPath: "wip.md", DocType: "md", Status: "ok"}); err != nil {
+		t.Fatalf("UpsertDocument: %v", err)
+	}
+	before, err := st.DocumentGenerations(ctx, []string{"wip.md"})
+	if err != nil {
+		t.Fatalf("DocumentGenerations: %v", err)
+	}
+	if _, err := st.ResetForSecretPolicy(ctx, "v2:later", []string{`BLUEHERON`}, nil, true); err != nil {
+		t.Fatalf("ResetForSecretPolicy: %v", err)
+	}
+	after, err := st.DocumentGenerations(ctx, []string{"wip.md"})
+	if err != nil {
+		t.Fatalf("DocumentGenerations: %v", err)
+	}
+	if before["wip.md"] == "" || before["wip.md"] == after["wip.md"] {
+		t.Fatalf("generation before = %q, after = %q; a broader reset must change it", before["wip.md"], after["wip.md"])
 	}
 }

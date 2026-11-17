@@ -180,8 +180,9 @@ need to run `dir2mcp reindex`.
 - **Document summaries use checked text only.** Before dir2mcp sends a
   representation to the summary model, it checks the text against the active
   lists, and it checks the summary that comes back. A match in either sends
-  nothing more and keeps no summary: the document is withheld as
-  `secret_excluded`, as for any derived text that matches.
+  nothing more and keeps no summary, also not in the summary cache: the
+  document is withheld as `secret_excluded`, as for any derived text that
+  matches.
 - **Between the change and the start of the scan, no tool returns any indexed
   document.** The scan records the new lists and marks the documents at its
   start. A server can answer before that (`up` starts to serve before its
@@ -214,9 +215,11 @@ need to run `dir2mcp reindex`.
   Only three changes count: a removed secret pattern, an added allow pattern,
   and the shipped narrowings of the `sk-`, `sk_` and `api_` rules. Any other
   edit counts as a change that can match more, also one that is stricter in
-  fact. The spec 0.96.0 defaults can only match less than the earlier
-  defaults, so an upgrade with the default lists reads only the withheld
-  documents again.
+  fact. The test is on the matches that stay after an allow pattern cancels
+  some, not on one list alone. An allow pattern cancels only a match of the
+  generic token rule. If you replace that rule with your own token pattern,
+  also a narrower one, no allow pattern cancels its matches, so the change
+  can match more and the scan reads every indexed document again.
 
 The check does not use the stored chunks. A chunk can lose bytes that the raw
 scan sees (for example a trimmed trailing newline), and chunks can overlap, so
@@ -237,7 +240,10 @@ effect when it answers:
   when the index holds page or time chunks for a text file: the whole file is
   checked first. For a document whose text is derived (a PDF, an image, audio,
   video, an office document), a page or a transcript excerpt comes from the
-  stored chunks, and the check covers that excerpt. The read is
+  stored chunks, and the check covers that excerpt. The text that `open_file`
+  returns is checked once more after it is cut to `max_chars`: a cut can
+  remove the end of an allow match, and the call then returns `FORBIDDEN`.
+  The read is
   bounded by `ingest.max_file_mb`. A
   source over that cap returns `FILE_TOO_LARGE`: ingest never checked or
   indexed it.
@@ -256,16 +262,17 @@ processed again on the next scan and stays hidden until then. If the clear
 itself fails, the scan fails and records nothing.
 
 A corpus with no recorded lists was indexed by a version before spec 0.96.0.
-dir2mcp does not assume that it used the default lists: your config shows the
-lists of this run, not of the earlier one. Earlier versions wrote the lists
-into the effective-config snapshot (`<state>/.dir2mcp.yaml.snapshot`) on each
-start. Before the first 0.96.0 run replaces that snapshot, dir2mcp keeps its
-lists once in `<state>/secret-policy-previous.json`. When those lists show
-that the move can only match less (for example the earlier defaults to the
-new defaults), dir2mcp reads only the withheld documents again and hides
-nothing. With no such file, or when the move can match more, the earlier
-lists count as unknown or broader: dir2mcp reads every indexed document
-again, and withholds each one until the scan has decided it.
+For such a corpus the earlier lists are unknown. dir2mcp does not assume the
+default lists, and it does not use the effective-config snapshot
+(`<state>/.dir2mcp.yaml.snapshot`) as a record: every command that loads the
+config rewrites that file, also a command that does not scan, so it can hold
+lists that never checked the corpus. So the first scan after the upgrade
+reads every indexed document again, and no tool returns a document until that
+scan has decided it. This takes one full read of the corpus (OCR,
+transcription and translation come from their caches). Documents come back
+one by one as the scan decides them. After that scan the lists are recorded,
+and a later change that can only match less reads only the withheld
+documents.
 
 ### What a support bundle discloses
 

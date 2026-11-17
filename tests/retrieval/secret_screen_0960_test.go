@@ -73,9 +73,12 @@ func TestSecretScreen_SearchLeavesOutAMatchingHit(t *testing.T) {
 	}
 }
 
+// The pattern matches only the snippet of chunk 2 ("beta deployment notes"):
+// its stored text is longer, so the anchored pattern does not match it. Only
+// the snippet check can leave the hit out.
 func TestSecretScreen_SearchLeavesOutAMatchingSnippet(t *testing.T) {
 	svc := newScreenService(t, nil)
-	if err := svc.SetSecretPatterns([]string{`beta deployment`}); err != nil {
+	if err := svc.SetSecretPatterns([]string{`^beta deployment notes$`}); err != nil {
 		t.Fatalf("SetSecretPatterns: %v", err)
 	}
 	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "deployment notes", K: 5, Index: "text"})

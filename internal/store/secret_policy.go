@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -235,8 +236,11 @@ UPDATE documents
 
 // DocumentGenerations returns, for each live document in relPaths, a value
 // that changes when the document is reset for a secret-policy change or
-// replaced by a scan: its status and its content hash. A policy reset clears
-// the hash, and a new version of the document has another one. Retrieval
+// replaced by a scan: its status, its content hash and its pending mark. A
+// policy reset clears the hash and sets the mark, and a new version of the
+// document has another hash. The mark is part of the value because a live
+// row with an empty hash (a document that is not finalized) keeps its status
+// and hash through a reset; only the mark shows that reset. Retrieval
 // reads it before and after it reads chunk text, and serves the text only
 // when both readings are equal (SPEC §7.2). A path with no live row is absent
 // from the result. The query uses one statement per 500 paths.
@@ -263,18 +267,19 @@ func (s *SQLiteStore) DocumentGenerations(ctx context.Context, relPaths []string
 		}
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
 		rows, err := db.QueryContext(ctx,
-			`SELECT rel_path, status, content_hash FROM documents
+			`SELECT rel_path, status, content_hash, secret_reeval_pending FROM documents
 			  WHERE deleted = 0 AND rel_path IN (`+placeholders+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var relPath, status, hash string
-			if err := rows.Scan(&relPath, &status, &hash); err != nil {
+			var pending int
+			if err := rows.Scan(&relPath, &status, &hash, &pending); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
-			generations[relPath] = status + "\x00" + hash
+			generations[relPath] = fmt.Sprintf("%s\x00%s\x00%d", status, hash, pending)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()

@@ -162,6 +162,15 @@ func (s *Service) seedDocumentGeneration(ctx context.Context, relPath string) (s
 	if st == nil || relPath == "" {
 		return "", nil
 	}
+	// A store that reports generations includes the pending mark in them, so
+	// a reset of a document that has no content hash yet is seen too.
+	if gs, ok := st.(documentGenerationStore); ok {
+		gens, err := gs.DocumentGenerations(ctx, []string{relPath})
+		if err != nil {
+			return "", fmt.Errorf("related: read the seed document: %w", err)
+		}
+		return gens[relPath], nil
+	}
 	doc, err := st.GetDocumentByPath(ctx, relPath)
 	if err != nil {
 		if errors.Is(err, model.ErrNotFound) || errors.Is(err, os.ErrNotExist) {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
@@ -109,30 +108,6 @@ func forgetSecretPolicyIdentity(t *testing.T, st *store.SQLiteStore, dbPath stri
 	}
 	if recorded != "" {
 		t.Fatalf("SecretPolicyIdentity after delete = %q, want empty", recorded)
-	}
-}
-
-// keepOldBinarySnapshot writes the effective-config snapshot that a release
-// before spec 0.96.0 left in the state directory (it records secret_patterns
-// and no allow list), then saves the new snapshot the way every command does
-// at config load. The save keeps the old lists as the provenance of the
-// previous secret policy (config.PreviousSecretPolicy).
-func keepOldBinarySnapshot(t *testing.T, cfg config.Config, oldSecret []string) {
-	t.Helper()
-	var b strings.Builder
-	b.WriteString("root_dir: " + cfg.RootDir + "\nsecret_patterns:\n")
-	for _, p := range oldSecret {
-		b.WriteString("  - '" + strings.ReplaceAll(p, "'", "''") + "'\n")
-	}
-	if err := os.WriteFile(filepath.Join(cfg.StateDir, config.EffectiveConfigSnapshotFile), []byte(b.String()), 0o600); err != nil {
-		t.Fatalf("write old snapshot: %v", err)
-	}
-	if _, err := config.SaveEffectiveSnapshot(cfg, config.SecretSourceMetadata{}); err != nil {
-		t.Fatalf("SaveEffectiveSnapshot: %v", err)
-	}
-	prov, ok, err := config.PreviousSecretPolicy(cfg.StateDir)
-	if err != nil || !ok || len(prov.Secret) != len(oldSecret) || len(prov.Allow) != 0 {
-		t.Fatalf("PreviousSecretPolicy = (%+v, %v, %v), want the old lists and no allow list", prov, ok, err)
 	}
 }
 

@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,17 +84,7 @@ func TestSecretPolicy_TwoPhaseRechecksExistingTranslations(t *testing.T) {
 	if doc.SkipReason != model.SkipReasonSecretExcluded {
 		t.Errorf("skip_reason = %q, want %q", doc.SkipReason, model.SkipReasonSecretExcluded)
 	}
-	if liveTranslation() {
-		t.Error("a translation that the new pattern matches is still live")
-	}
-	reps, err := st.ActiveRepresentations(ctx, rel)
-	if err == nil {
-		for _, rep := range reps {
-			if strings.Contains(rep.MetaJSON, "translat") {
-				t.Errorf("live representation %d still carries translation metadata", rep.RepID)
-			}
-		}
-	}
+	requireWithheldAndRetired(t, st, rel)
 }
 
 // codenameTranslator is fakeTranslator with one word of its output replaced by
@@ -216,6 +208,38 @@ func TestSecretPolicy_SummaryMatchWithholdsTheDocument(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 		requireWithheldAndRetired(t, st, "notes.txt")
+		// The rejected summary is not in the summary cache.
+		requireNoCachedText(t, filepath.Join(cfg.StateDir, "cache", "summary"), "BLUEHERON")
+	})
+
+	t.Run("summary output cached by an earlier run", func(t *testing.T) {
+		root := testutil.TempDir(t)
+		writeFile(t, filepath.Join(root, "notes.txt"), "the report covers the regional budget and the new bridge")
+		st := newRealStore(t)
+		cfg := hierarchicalConfig(testutil.TempDir(t))
+		cfg.RootDir = root
+		cfg.STTProvider = "off"
+		// First run: the codename is not a secret yet, so the summary is cached.
+		first := mustNewIngestService(t, cfg, st)
+		first.SetSummarizer(&codenameSummarizer{}, "mistral", "mistral-small-latest")
+		if err := first.Run(ctx); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		cacheDir := filepath.Join(cfg.StateDir, "cache", "summary")
+		entries, err := os.ReadDir(cacheDir)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("the first run cached no summary (%v); the test proves nothing", err)
+		}
+		// The pattern arrives. The cached summary matches: the document is
+		// withheld and the entry is removed.
+		cfg.SecretPatterns = append(append([]string(nil), config.Default().SecretPatterns...), codename)
+		second := mustNewIngestService(t, cfg, st)
+		second.SetSummarizer(&codenameSummarizer{}, "mistral", "mistral-small-latest")
+		if err := second.Run(ctx); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		requireWithheldAndRetired(t, st, "notes.txt")
+		requireNoCachedText(t, cacheDir, "BLUEHERON")
 	})
 
 	t.Run("summary source", func(t *testing.T) {
@@ -271,4 +295,25 @@ func TestSecretPolicy_SummaryMatchWithholdsTheDocument(t *testing.T) {
 		sum.mu.Unlock()
 		requireWithheldAndRetired(t, st, "media/clip.mp3")
 	})
+}
+
+// requireNoCachedText fails when a file in dir holds text.
+func requireNoCachedText(t *testing.T, dir, text string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if strings.Contains(string(raw), text) {
+			t.Errorf("cache entry %s holds the rejected text", e.Name())
+		}
+	}
 }
