@@ -3827,11 +3827,28 @@ var sideParsedTopLevelBlocks = map[string]bool{
 	"carbon":    true,
 }
 
-// sideParsedKeyPrefixes are the nested maps decoded separately that DO arrive
+// sideParsedKeys are the nested maps decoded separately that DO arrive
 // prefixed, because they sit under the registered `media` section (#574, #566).
-var sideParsedKeyPrefixes = []string{
-	"media.translate.glossary.",
-	"media.stt.language_providers.",
+// The flat parser sees one of them in two shapes. In block form it sees each
+// child key under the map key (media.stt.language_providers.ru). In flow form
+// (`language_providers: {ru: gigaam}`) it sees the map key itself with the
+// whole flow map as a scalar value. Both shapes are read by the yaml.v3 pass,
+// so neither is an unrecognized key.
+var sideParsedKeys = []string{
+	"media.translate.glossary",
+	"media.stt.language_providers",
+}
+
+// isSideParsedKey reports whether a yaml.v3 pass reads key: the map key
+// itself or a key below it. A sibling that only shares the leading text
+// (media.stt.language_providerz) does not match.
+func isSideParsedKey(key string) bool {
+	for _, mapKey := range sideParsedKeys {
+		if key == mapKey || strings.HasPrefix(key, mapKey+".") {
+			return true
+		}
+	}
+	return false
 }
 
 // scalarKeyIsRecognized reports whether any setter claims key.
@@ -3842,10 +3859,8 @@ var sideParsedKeyPrefixes = []string{
 // in #624. Every fileConfig field is a pointer, so applying the key to a fresh
 // fileConfig and finding it unchanged proves nothing assigned it.
 func scalarKeyIsRecognized(key, value string) bool {
-	for _, prefix := range sideParsedKeyPrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
+	if isSideParsedKey(key) {
+		return true
 	}
 	var probe fileConfig
 	if err := setFileScalarValue(&probe, key, value); err != nil {
@@ -4201,8 +4216,7 @@ func isMapSectionKey(key string) bool {
 	// sub-entries as a section so children prefix into that namespace
 	// (media.stt.language_providers.<lang>) — a guaranteed no-op — instead of
 	// leaking a language code up to a real media.stt.<key>.
-	if key == "media.translate.glossary" || strings.HasPrefix(key, "media.translate.glossary.") ||
-		key == "media.stt.language_providers" || strings.HasPrefix(key, "media.stt.language_providers.") {
+	if isSideParsedKey(key) {
 		return true
 	}
 	switch key {
