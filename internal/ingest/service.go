@@ -494,6 +494,18 @@ type Service struct {
 	// re-scoped per archive member in generateRepresentations.
 	recognizeIncompleteThisDoc bool
 
+	// trackRetryPendingThisDoc records that a selected audio track of the
+	// document currently being processed failed with a transport or provider
+	// error while the document stays ok through another track (SPEC 0.96.0
+	// §8.6.13, §7.6). It withholds the #402 done marker, so the next scan
+	// processes the document again, also with an unchanged content_hash. The
+	// tracks that succeeded are read from the transcript cache on that scan, so
+	// only the failed track is decoded again. A quality-gate refusal, a
+	// language refusal and a no-speech result do not set it: their outcome is
+	// stored, and a new run reads the same result. Same per-document lifecycle
+	// as recognizeIncompleteThisDoc.
+	trackRetryPendingThisDoc bool
+
 	// pendingNoSpeechSkip records that the transcript path of the document
 	// currently being processed found no speech in the whole recording (SPEC
 	// 0.96.0) and that the document has no media chunks. The no_speech skip is
@@ -2590,6 +2602,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// Same authoritative per-document reset for the #894 incomplete-recognition
 	// flag, which withholds the done marker for one document only.
 	s.recognizeIncompleteThisDoc = false
+	s.trackRetryPendingThisDoc = false
 	s.pendingNoSpeechSkip = false
 	s.noSpeechSkippedThisDoc = false
 	// Open the per-document secret scope (#681) at the same authoritative point,
@@ -2818,6 +2831,15 @@ func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, 
 		// them all), so the ONLY thing left to make the next scan retry is to leave
 		// the #402 done marker unstamped — the same mechanism the #413 guard uses for
 		// an out-of-band soft error, applied without the error status.
+		return nil
+	}
+	if s.trackRetryPendingThisDoc {
+		// SPEC 0.96.0 §8.6.13: a selected track failed with a provider error and
+		// another track kept the document ok. The document stays ok and
+		// searchable. Leave the done marker unstamped so the next scan decodes
+		// the failed track again. The good tracks are read from the cache.
+		s.getLogger().Printf("media.stt.tracks: %s stays ok with a failed audio track; "+
+			"the failed track is decoded again on the next scan (§8.6.13)", doc.RelPath)
 		return nil
 	}
 	if s.noSpeechSkippedThisDoc {
@@ -4500,6 +4522,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// members processed after it.
 	s.quarantinedThisDoc = false
 	s.recognizeIncompleteThisDoc = false
+	s.trackRetryPendingThisDoc = false
 	s.pendingNoSpeechSkip = false
 	s.noSpeechSkippedThisDoc = false
 	if s.repGen == nil {
@@ -5808,6 +5831,10 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 				return producedAny, "", terr
 			}
 			// A provider/transient transcription failure is scoped to this track.
+			// It is not stored, so the document is processed again on the next
+			// scan until the track produces a transcript or a no-speech result
+			// (§8.6.13). A refusal below is stored and does not set this flag.
+			s.trackRetryPendingThisDoc = true
 			failed++
 			if firstFailErr == nil {
 				firstFailErr = terr
