@@ -85,6 +85,11 @@ func (c *SQLiteCache) ensureDB(ctx context.Context) (*sql.DB, error) {
 	for _, pragma := range []string{
 		`PRAGMA busy_timeout=5000;`,
 		`PRAGMA journal_mode=WAL;`,
+		// A cache needs no per-commit fsync: in WAL mode NORMAL keeps the file
+		// consistent, and a crash can only lose the last few signatures, which
+		// the next walk reads again. FULL synced every StoreDir and capped a
+		// parallel NFS walk (#1159) at ~200 directories a second.
+		`PRAGMA synchronous=NORMAL;`,
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
