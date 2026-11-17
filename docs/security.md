@@ -73,6 +73,20 @@ key to start a word, so the `sk-` inside a URL slug such as
 `task_sk_...` do not match. For the `sk_` and `api_` rule, an underscore
 before the prefix does not start a word.
 
+This boundary has a cost, a known miss: a key that directly follows an
+underscore (`backup_sk_<32 characters>`, `backup_sk-<20 characters>`) matches
+no default. One left boundary cannot tell `task_sk_` from `backup_sk_`. The
+same key after a space, a quote or `=` matches. If you store keys under such
+names, add a pattern for them to `security.secret_patterns`, with the
+defaults, for example:
+
+```yaml
+security:
+  secret_patterns:
+    # ... the defaults ...
+    - 'backup_sk[_-][A-Za-z0-9-]{20,}'
+```
+
 ### Allowed matches (`security.secret_allow_patterns`)
 
 The generic token rule also matches values that carry no credential, such as

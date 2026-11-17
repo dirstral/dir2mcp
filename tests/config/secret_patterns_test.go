@@ -137,3 +137,40 @@ func TestDefaultSecretPatterns_Boundaries_0_96_0(t *testing.T) {
 		})
 	}
 }
+
+// TestDefaultSecretPatterns_KnownMissAfterAnUnderscore pins the known miss
+// that SPEC §7.2 (spec 0.96.0) and the docs state: the left boundary of the
+// `sk_`/`api_` rule and of the `sk-` rule cannot tell `task_sk_` from
+// `backup_sk_`, so a key that directly follows an underscore matches no
+// default. The same key after a space or `=` matches. The operator pattern
+// that the docs give as an example closes the miss.
+func TestDefaultSecretPatterns_KnownMissAfterAnUnderscore(t *testing.T) {
+	patterns := config.Default().SecretPatterns
+	skUnder := "s" + "k_" + synthLowerRun(32)
+	skDash := "s" + "k-" + synthRun(20)
+
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"sk_ key after an underscore", "backup_" + skUnder, false},
+		{"sk- key after an underscore", "backup_" + skDash, false},
+		{"sk_ key after a space", "backup " + skUnder, true},
+		{"sk_ key after =", "BACKUP=" + skUnder, true},
+		{"sk- key after a space", "backup " + skDash, true},
+		{"sk- key after =", "BACKUP=" + skDash, true},
+	}
+	for _, tc := range cases {
+		if got := anyMatch(t, patterns, tc.input); got != tc.want {
+			t.Errorf("%s: default secret patterns match %q = %v, want %v", tc.name, tc.input, got, tc.want)
+		}
+	}
+
+	withOperatorPattern := append(append([]string(nil), patterns...), `backup_sk[_-][A-Za-z0-9-]{20,}`)
+	for _, input := range []string{"backup_" + skUnder, "backup_" + skDash} {
+		if !anyMatch(t, withOperatorPattern, input) {
+			t.Errorf("the operator pattern from the docs does not match %q", input)
+		}
+	}
+}
