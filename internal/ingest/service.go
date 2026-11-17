@@ -1350,6 +1350,7 @@ func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options := DefaultDiscoverOptions()
 	options.UseGitIgnore = cfg.IngestGitignore
 	options.FollowSymlinks = cfg.IngestFollowSymlinks
+	options.Workers = cfg.IngestDiscoveryWorkers
 	// One resolved list for the scan, the watcher, and the S3 lister (#773).
 	options.ExcludeDirs = append([]string(nil), cfg.IngestExcludeDirs...)
 	// One resolver for the cap as well (#682), so discovery, the source reads, the
@@ -2177,17 +2178,21 @@ func (s *Service) runScan(ctx context.Context) error {
 	// identity/cache state (§7.6/§8.6.7) so an interrupted transcription pass does
 	// not force re-transcription of completed assets. Default (off) is the single
 	// pass below, byte-identical to before the split existed.
+	//
+	// Each pass processes the files in the order ingest.priority_list sets
+	// (SPEC §7.1): listed files first, then the rest in relative-path order.
+	ordered := s.orderForProcessing(discovered)
 	if s.cfg.MediaBatchTwoPhase {
-		if err := s.scanPass(ctx, passTranscription, discovered, compiledSecrets, forceReindex, seen); err != nil {
+		if err := s.scanPass(ctx, passTranscription, ordered, compiledSecrets, forceReindex, seen); err != nil {
 			return err
 		}
-		if err := s.scanPass(ctx, passDerivation, discovered, compiledSecrets, forceReindex, seen); err != nil {
+		if err := s.scanPass(ctx, passDerivation, ordered, compiledSecrets, forceReindex, seen); err != nil {
 			return err
 		}
 		return s.finishScan(ctx, existing, seen)
 	}
 
-	if err := s.scanPass(ctx, passSingle, discovered, compiledSecrets, forceReindex, seen); err != nil {
+	if err := s.scanPass(ctx, passSingle, ordered, compiledSecrets, forceReindex, seen); err != nil {
 		return err
 	}
 	return s.finishScan(ctx, existing, seen)
@@ -4072,7 +4077,24 @@ func contentSample(content []byte) []byte {
 	return content[:secretScanSampleBytes]
 }
 
+// activeRelPathLister is a store that lists the active documents' paths in one
+// query (#1176), instead of the OFFSET-paged ListFiles walk below.
+type activeRelPathLister interface {
+	ListActiveRelPaths(ctx context.Context) ([]string, error)
+}
+
 func (s *Service) listActiveDocuments(ctx context.Context) (map[string]struct{}, error) {
+	if lister, ok := s.store.(activeRelPathLister); ok {
+		paths, err := lister.ListActiveRelPaths(ctx)
+		if err != nil {
+			return nil, err
+		}
+		active := make(map[string]struct{}, len(paths))
+		for _, p := range paths {
+			active[p] = struct{}{}
+		}
+		return active, nil
+	}
 	active := make(map[string]struct{})
 	const pageSize = 500
 
