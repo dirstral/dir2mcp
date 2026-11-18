@@ -2488,7 +2488,7 @@ func isMetaSpanKind(kind string) bool {
 // openFile implements dir2mcp_open_file (SPEC §15.4). It resolves relPath
 // inside the corpus root, returns MEDIA_NO_TEXT for a media-only document,
 // serves a page/time span from the stored chunk metadata, serves a binary
-// document type (PDF, image, audio) from its OCR/transcript text only
+// document type (PDF, image, audio, video) from its OCR/transcript text only
 // (openBinaryDocText, never the file bytes), and serves a text-native file
 // from its source bytes. It returns the content, a truncation flag and an
 // error from the model error set.
@@ -2547,12 +2547,13 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		}
 	}
 
-	// A binary document (PDF, image, audio) is never served from its file bytes,
-	// whatever the span (SPEC §15.4: the handler MUST NOT emit raw binary bytes,
-	// and PDFs/audio resolve through the OCR/transcript cache, never a direct
-	// file read). Text-native types (md, txt, code, html) keep the existing
-	// default of returning file bytes with line and page slicing.
-	if isBinaryDocType(normalizedRel) {
+	// A binary document (PDF, image, audio, video) is never served from its
+	// file bytes, whatever the span (SPEC §15.4: the handler MUST NOT emit raw
+	// binary bytes, and PDFs/audio/video resolve through the OCR/transcript
+	// cache, never a direct file read). Text-native types (md, txt, code, html)
+	// keep the existing default of returning file bytes with line and page
+	// slicing.
+	if isBinaryDocType(normalizedRel) || s.isSniffedVideoDoc(ctx, normalizedRel) {
 		return s.openBinaryDocText(ctx, corpusFS, stateDir, resolvedAbs, normalizedRel, secretPatterns, kind, maxChars)
 	}
 
@@ -2667,22 +2668,52 @@ func isVideoExt(ext string) bool {
 
 // isMediaDocExt reports whether relPath's extension is an embeddable media type
 // (SPEC 8.1.7). Used to gate the media-only store lookup so text/code files keep
-// their fast path. Covers every media format the pipeline can ingest; video has
-// no text fallback and is handled exclusively by the media-only guard
-// (MEDIA_NO_TEXT), while images/PDF/audio also have a text-serving path below.
+// their fast path. Covers every media format the pipeline can ingest. A
+// media-only document resolves to MEDIA_NO_TEXT; one with OCR/transcript text
+// takes the text-serving path below.
 func isMediaDocExt(relPath string) bool {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext) || isVideoExt(ext)
 }
 
 // isBinaryDocType reports whether relPath has an extension whose contents are
-// not human-readable as raw bytes but DO have a document-text representation
-// (PDF/image OCR, audio transcript). For these the default open_file response
-// serves the OCR/transcript cache rather than raw bytes. Video is excluded: it
-// has no text representation, so a media-only video resolves to MEDIA_NO_TEXT.
+// not human-readable as raw bytes but MAY have a document-text representation
+// (PDF/image OCR, audio or video transcript). For these the default open_file
+// response serves the OCR/transcript cache rather than raw bytes. A media-only
+// video (direct media chunks, no transcript) resolves to MEDIA_NO_TEXT before
+// this check. The extensions a video container shares with another format
+// (.ts, .mts, .mod) are not here: isSniffedVideoDoc decides them by the stored
+// doc_type, because a .ts is usually TypeScript.
 func isBinaryDocType(relPath string) bool {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
-	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext)
+	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext) || avutil.IsVideoContainerExt(ext)
+}
+
+// isSniffedVideoDoc reports whether relPath has an extension that a video
+// container shares with another format (.ts, .mts, .mod) and ingest stored it
+// as video. Such a file is binary: open_file serves its transcript and never
+// its bytes. It is conservative toward the text path: a nil store, a missing
+// row, a tombstone or a lookup error returns false, so a TypeScript file keeps
+// its raw-text read.
+func (s *Service) isSniffedVideoDoc(ctx context.Context, relPath string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	if !avutil.IsContentSniffedVideoExt(ext) {
+		return false
+	}
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	if store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			s.logf("open_file: doc-type lookup for %q failed: %v", relPath, err)
+		}
+		return false
+	}
+	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.DocType), "video")
 }
 
 // openSource opens the corpus document at relPath for streaming. When a
@@ -2831,9 +2862,10 @@ func openFileOCRCacheCandidates(stateDir, cacheKey, relPath string) []string {
 	case ext == ".pdf" || isImageExt(ext):
 		// PDF and image extraction both write extracted markdown to cache/ocr.
 		return []string{filepath.Join(stateDir, "cache", "ocr", cacheKey+".md")}
-	case isAudioExt(ext):
+	case isAudioExt(ext) || isVideoExt(ext):
 		// transcripts are written as <key>[<-lang>].txt; default-language
-		// transcripts have no suffix, so the unsuffixed file is preferred.
+		// transcripts have no suffix, so the unsuffixed file is preferred. A
+		// video transcript is keyed on the video bytes, as audio is.
 		out := []string{filepath.Join(stateDir, "cache", "transcribe", cacheKey+".txt")}
 		matches, err := filepath.Glob(filepath.Join(stateDir, "cache", "transcribe", cacheKey+"-*.txt"))
 		if err == nil {
@@ -2924,14 +2956,15 @@ func isSHA256Hex(s string) bool {
 
 // cacheIdentityForExt selects which active derivation identity governs relPath's
 // cache key: the OCR-extraction identity for PDF/image documents and the
-// transcript identity for audio, matching ingest's per-representation keying.
-// Any other extension (no OCR/transcript representation) folds in no identity.
+// transcript identity for audio and video, matching ingest's
+// per-representation keying. Any other extension (no OCR/transcript
+// representation) folds in no identity.
 func cacheIdentityForExt(relPath, ocrIdentity, transcriptIdentity string) string {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	switch {
 	case ext == ".pdf" || isImageExt(ext):
 		return ocrIdentity
-	case isAudioExt(ext):
+	case isAudioExt(ext) || isVideoExt(ext):
 		return transcriptIdentity
 	default:
 		return ""

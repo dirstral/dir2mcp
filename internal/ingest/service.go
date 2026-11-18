@@ -2427,7 +2427,7 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	// The cheap signal (ETag, or size and mtime) proves the bytes did not
 	// change, not that they classify the same way: a classifier upgrade
 	// (SPEC §7.3) can give the path a new type.
-	if storedTypeStale(existing.DocType, f.RelPath) {
+	if storedTypeStale(existing.DocType, f.RelPath) || s.storedCodeSniffsAsVideo(ctx, existing, f.RelPath) {
 		return false, nil
 	}
 	// Derivation-identity gate (spec §8.6.7): the ETag/fingerprint fast path
@@ -2454,10 +2454,9 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 //
 // The same holds for an extension that a video container shares with another
 // format (.ts, .mts, .mod, see SniffMediaDocType): a stored "video" came from
-// the content, so it matches the path. A .ts or .mts that an older classifier
-// stored as code failed on the raw-text path and holds status error, which
-// every fast path already refuses, so it is re-read. A .mod stored as
-// binary_ignored is stale too: only its bytes can show a program stream.
+// the content, so it matches the path. A .mod stored as binary_ignored is
+// stale: only its bytes can show a program stream. A .ts or .mts stored as
+// code matches the path here; storedCodeSniffsAsVideo checks its bytes.
 func storedTypeStale(storedType, relPath string) bool {
 	if storedType == "" {
 		return false
@@ -2480,6 +2479,26 @@ func storedTypeStale(storedType, relPath string) bool {
 		return storedType != "binary_ignored" && storedType != "text"
 	}
 	return storedType != pathType
+}
+
+// storedCodeSniffsAsVideo reports whether a .ts or .mts row stored as code is
+// a transport stream by its content (SniffMediaDocType), so the cheap-signal
+// fast path must not skip it. An older classifier stored every .ts as code.
+// A transport stream with a NUL byte in its first window then failed on the
+// raw-text path with status error, which no fast path skips. One with no NUL
+// byte there was decoded as legacy text and stored as code with status ok, so
+// its ETag alone would keep it code with its old chunks live. The check reads
+// only the sniff prefix (mediaSniffPrefixBytes), never the whole object. A read
+// error answers true: the full read path then decides, which is always safe.
+func (s *Service) storedCodeSniffsAsVideo(ctx context.Context, existing model.Document, relPath string) bool {
+	if existing.DocType != "code" || !needsMediaSniff(relPath, ClassifyDocType(relPath)) {
+		return false
+	}
+	prefix, err := s.readSourcePrefix(ctx, relPath, mediaSniffPrefixBytes)
+	if err != nil {
+		return true
+	}
+	return SniffMediaDocType("code", relPath, prefix) == "video"
 }
 
 // skipUnchangedDocument records the run-progress counters for a document whose

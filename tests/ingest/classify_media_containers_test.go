@@ -394,3 +394,53 @@ func TestMediaContainerFastPath_StoredVideoTsIsNotReRead(t *testing.T) {
 		t.Errorf("s3/MOV001.MOD doc_type = %q, want video", doc.DocType)
 	}
 }
+
+// TestMediaContainerFastPath_StoredCodeTsIsSniffed pins the ETag fast path for
+// a .ts row that an older classifier stored as code with status ok. A
+// transport stream with no NUL byte but with invalid UTF-8 took the raw-text
+// path as legacy text, so its row says code/ok. An unchanged ETag must not
+// keep it code: the scan sniffs the prefix and reprocesses it as video. A
+// TypeScript .ts stored as code also gets the prefix sniff, but it stays code
+// and is not processed again.
+func TestMediaContainerFastPath_StoredCodeTsIsSniffed(t *testing.T) {
+	stream := asciiHeaderTSBytes(5, 0, 2, 4)
+	if bytes.IndexByte(stream, 0) >= 0 {
+		t.Fatal("fixture must hold no NUL byte")
+	}
+	fs := newFakeRemoteFS()
+	fs.add("s3/legacy.ts", "etag-legacy", string(stream))
+	fs.add("s3/app.ts", "etag-app", typeScriptSource)
+
+	st := newRemoteScanStore()
+	st.seed(model.Document{
+		DocID: 1, RelPath: "s3/legacy.ts", DocType: "code", Status: "ok",
+		SizeBytes: int64(len(stream)), ETag: "etag-legacy",
+		ContentHash: ingest.ComputeContentHash(stream),
+	})
+	st.seed(model.Document{
+		DocID: 2, RelPath: "s3/app.ts", DocType: "code", Status: "ok",
+		SizeBytes: int64(len(typeScriptSource)), ETag: "etag-app",
+		ContentHash: ingest.ComputeContentHash([]byte(typeScriptSource)),
+	})
+
+	svc := mustNewIngestService(t, config.Config{RootDir: "/corpus"}, st)
+	svc.SetCorpusFS(fs)
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if doc, ok := st.get("s3/legacy.ts"); !ok || doc.DocType != "video" {
+		t.Errorf("s3/legacy.ts doc_type = %q, want video: a stored code row whose bytes sniff as a transport stream must be reprocessed", doc.DocType)
+	}
+	if doc, ok := st.get("s3/app.ts"); !ok || doc.DocType != "code" || doc.Status != "ok" {
+		t.Errorf("s3/app.ts type=%q status=%q, want code/ok", doc.DocType, doc.Status)
+	}
+	if got := fs.openCount("s3/app.ts"); got != 1 {
+		t.Errorf("s3/app.ts was opened %d time(s), want 1 (the prefix sniff only)", got)
+	}
+	st.mu.Lock()
+	appUpserts := st.upsertCalls["s3/app.ts"]
+	st.mu.Unlock()
+	if appUpserts != 0 {
+		t.Errorf("s3/app.ts was upserted %d time(s); an unchanged TypeScript .ts must keep the ETag fast path", appUpserts)
+	}
+}
