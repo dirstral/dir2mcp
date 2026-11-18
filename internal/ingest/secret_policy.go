@@ -2,12 +2,14 @@ package ingest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
+	"github.com/dirstral/dir2mcp/internal/store"
 )
 
 // Secret-policy re-evaluation (SPEC §7.2, spec 0.97.0).
@@ -183,8 +185,8 @@ type secretReevalPendingLister interface {
 }
 
 // retireUncheckedTranslations retires the translated transcripts of a document
-// that waits for a secret-policy re-evaluation, in the transcription pass of
-// the two-phase split (SPEC §7.2, §8.6.11).
+// that waits for a secret-policy re-evaluation, and the summaries made from
+// them, in the transcription pass of the two-phase split (SPEC §7.2, §8.6.11).
 //
 // That pass re-reads the document and checks its source transcript under the
 // new policy, then stamps the content hash, and the stamp clears the pending
@@ -229,20 +231,51 @@ func (s *Service) retireUncheckedTranslations(ctx context.Context, relPath strin
 		}
 		return fmt.Errorf("secret policy: list the representations of %s: %w", relPath, err)
 	}
-	var unchecked []int64
-	for _, rep := range reps {
-		if _, ok := translatedTranscriptLanguage(rep); ok {
-			unchecked = append(unchecked, rep.RepID)
-		}
-	}
+	unchecked := uncheckedTranslationOutputs(reps)
 	if len(unchecked) == 0 {
 		return nil
 	}
 	if _, err := retirer.SoftDeleteRepresentations(ctx, relPath, unchecked); err != nil {
 		return fmt.Errorf("secret policy: retire the unchecked translations of %s: %w", relPath, err)
 	}
-	s.getLogger().Printf("secret policy: retired %d translation(s) of %s; the derivation pass derives and checks them again", len(unchecked), relPath)
+	s.getLogger().Printf("secret policy: retired %d translation(s) and their summaries of %s; the derivation pass derives and checks them again", len(unchecked), relPath)
 	return nil
+}
+
+// uncheckedTranslationOutputs returns the rep_ids of the translated transcripts
+// in reps, and of every summary whose coverage.source_rep_id names one of them.
+// A summary made from a translation is as unchecked as the translation, and the
+// retirement of its source does not cascade to it. The summary step does not
+// make it again while its source is retired, so it must be retired here, before
+// the stamp clears the pending mark.
+func uncheckedTranslationOutputs(reps []store.RepresentationRow) []int64 {
+	translations := make(map[int64]struct{})
+	var out []int64
+	for _, rep := range reps {
+		if _, ok := translatedTranscriptLanguage(rep); ok {
+			translations[rep.RepID] = struct{}{}
+			out = append(out, rep.RepID)
+		}
+	}
+	if len(translations) == 0 {
+		return nil
+	}
+	for _, rep := range reps {
+		if !model.IsSummaryRepType(rep.RepType) {
+			continue
+		}
+		var meta model.SummaryMeta
+		if err := json.Unmarshal([]byte(rep.MetaJSON), &meta); err != nil {
+			// A summary whose source cannot be read may come from a
+			// translation: retire it, never keep unchecked text live.
+			out = append(out, rep.RepID)
+			continue
+		}
+		if _, ok := translations[meta.Coverage.SourceRepID]; ok {
+			out = append(out, rep.RepID)
+		}
+	}
+	return out
 }
 
 // withSecretPolicyIdentity attaches the identity of the policy that matcher

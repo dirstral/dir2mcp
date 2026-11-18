@@ -181,3 +181,75 @@ func TestSecretScreen_FallbackAnswerChecksTheTrimmedSnippet(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretScreen_FallbackAnswerChecksTheAssembledAnswer pins the last check
+// of the fallback answer (SPEC §7.2, spec 0.97.0). The answer adds a path
+// prefix, a question line and line breaks. These can stop an anchored allow
+// pattern from covering a snippet, or join a path and a snippet into a match.
+// Such a line is withheld, and an answer that still matches is replaced.
+func TestSecretScreen_FallbackAnswerChecksTheAssembledAnswer(t *testing.T) {
+	tok := "to" + "ken"
+	value := strings.Repeat("A", 24)
+	allow := []string{`^` + tok + `=A+$`}
+	ask := func(t *testing.T, question string, hits map[uint64]model.SearchHit) string {
+		t.Helper()
+		idx := index.NewHNSWIndex("")
+		text := map[uint64]string{}
+		for id, h := range hits {
+			addVec(t, idx, id, []float32{1, float32(id) / 10})
+			text[id] = h.Snippet
+		}
+		svc := retrieval.NewService(&fullTextStore{text: text}, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+			"mistral-embed": {1, 0},
+		}}, nil)
+		if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+			t.Fatalf("SetSecretPolicy: %v", err)
+		}
+		for id, h := range hits {
+			svc.SetChunkMetadata(id, h)
+		}
+		res, err := svc.Ask(context.Background(), question, model.SearchQuery{K: len(hits), Index: "text"})
+		if err != nil {
+			t.Fatalf("Ask: %v", err)
+		}
+		if len(res.Hits) == 0 {
+			t.Fatal("ask returned no hits; the test proves nothing")
+		}
+		return res.Answer
+	}
+
+	t.Run("anchored allow pattern loses its anchor", func(t *testing.T) {
+		answer := ask(t, "what do the notes say", map[uint64]model.SearchHit{
+			1: {ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: tok + "=" + value},
+			2: {ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "clean notes"},
+		})
+		if strings.Contains(answer, tok+"=AAAA") {
+			t.Fatalf("the fallback answer holds a snippet that matches in the answer:\n%s", answer)
+		}
+		if !strings.Contains(answer, "clean notes") {
+			t.Fatalf("the fallback answer lost the clean snippet:\n%s", answer)
+		}
+	})
+
+	t.Run("path and snippet join into a match", func(t *testing.T) {
+		answer := ask(t, "what do the notes say", map[uint64]model.SearchHit{
+			1: {ChunkID: 1, RelPath: "notes_" + tok, DocType: "md", Snippet: value},
+			2: {ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "clean notes"},
+		})
+		if strings.Contains(answer, value) {
+			t.Fatalf("the fallback answer joins a path and a snippet into a match:\n%s", answer)
+		}
+		if !strings.Contains(answer, "clean notes") {
+			t.Fatalf("the fallback answer lost the clean snippet:\n%s", answer)
+		}
+	})
+
+	t.Run("assembled answer still matches", func(t *testing.T) {
+		answer := ask(t, tok+"="+strings.Repeat("B", 24), map[uint64]model.SearchHit{
+			1: {ChunkID: 1, RelPath: "b.md", DocType: "md", Snippet: "clean notes"},
+		})
+		if strings.Contains(answer, tok+"=BBBB") {
+			t.Fatalf("the fallback answer matches the secret policy:\n%s", answer)
+		}
+	})
+}

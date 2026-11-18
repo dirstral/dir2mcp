@@ -268,12 +268,18 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 	// A match sends nothing, and the document is withheld like any document
 	// whose derived text matches: its representations and chunks are retired
 	// and the caller settles it as secret_excluded (settleProcessedDocument).
+	// The truncated text that goes to the provider is checked below as well.
 	// The pipeline normally withholds such a document before this step; this
 	// check covers a stored representation that it did not regenerate.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindSummary, fullText) {
 		return errSummarySourceSecret
 	}
 	sourceText := truncateSummarySource(fullText)
+	// The cut can drop the context an allow pattern needs (an allow match that
+	// ends past the cut), so the text that is sent is checked too.
+	if len(sourceText) < len(fullText) && s.screenDerivedSecrets(ctx, doc, derivedKindSummary, sourceText) {
+		return errSummarySourceSecret
+	}
 
 	summaryText, err := s.readOrComputeSummary(ctx, sourceText)
 	if err != nil {

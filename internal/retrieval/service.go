@@ -4786,6 +4786,11 @@ func matchesAsIsOrTrimmed(matcher *secretmatch.Matcher, text string) bool {
 // and both steps can change what an allow pattern covers, so the snippet is
 // checked against the secret policy in the form the answer carries (SPEC §7.2,
 // spec 0.97.0). A snippet that matches is left out of the answer.
+//
+// The line check sees the path prefix, and the assembled answer is checked
+// last. The prefixes and the line breaks can change what an allow pattern
+// covers (an anchored allow pattern stops matching), so an answer that still
+// matches is replaced with fallbackAnswerWithheld.
 func buildFallbackAnswer(question string, hits []model.SearchHit, matcher *secretmatch.Matcher) string {
 	if len(hits) == 0 {
 		return "No relevant context found in the indexed corpus."
@@ -4809,16 +4814,25 @@ func buildFallbackAnswer(question string, hits []model.SearchHit, matcher *secre
 		}
 		h := hits[p]
 		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
-		if matcher.MatchString(snippet) {
-			snippet = "(snippet withheld)"
-		}
 		if snippet == "" {
 			snippet = "(no snippet)"
 		}
-		lines = append(lines, fmt.Sprintf("- %s: %s", h.RelPath, snippet))
+		line := fmt.Sprintf("- %s: %s", h.RelPath, snippet)
+		if matcher.MatchString(snippet) || matcher.MatchString(line) {
+			line = fmt.Sprintf("- %s: (snippet withheld)", h.RelPath)
+		}
+		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	answer := strings.Join(lines, "\n")
+	if matcher.MatchString(answer) {
+		return fallbackAnswerWithheld
+	}
+	return answer
 }
+
+// fallbackAnswerWithheld replaces a fallback answer whose assembled text
+// matches the secret policy. It names no text.
+const fallbackAnswerWithheld = "The retrieved context is withheld because it matches the secret policy."
 
 // ragMinDocShareChars is the smallest share of the context budget the builder
 // divides that budget into, and it is what bounds the document count now

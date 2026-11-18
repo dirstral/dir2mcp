@@ -474,7 +474,8 @@ to start a word, so a URL slug such as `krasnoyarsk-...` is not a key. Known
 miss: a key that directly follows an underscore (`backup_sk_<32 characters>`,
 `backup_sk-<20 characters>`) matches no default, because one left boundary
 cannot tell `task_sk_` from `backup_sk_`. If you store keys under such names,
-add a pattern for them, for example `'backup_sk[_-][A-Za-z0-9-]{20,}'`.
+add a pattern for them to `security.secret_patterns`, together with the
+defaults, for example `'backup_sk[_-][A-Za-z0-9-]{20,}'`.
 
 `secret_allow_patterns` lists text that looks like a credential but is not
 one. Each allow match has a cover: the text of the first capture group of the
