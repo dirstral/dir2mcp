@@ -451,7 +451,7 @@ PDFs and images are converted to text by an **extractor**, selected with `ingest
 | `auto` (default) | Prefer the local `docling` CLI; else a reachable `docling-serve`; else Mistral OCR; else a functional `pandoc` (born-digital formats only); else disabled. |
 | `docling` | Local docling CLI only (fails if not on `PATH`). |
 | `docling-serve` | docling-serve HTTP only; requires a reachable `serve_url` (no fallback). |
-| `libreoffice` | The libreoffice engine only: legacy Word `.doc` (needs `soffice` and `pandoc`; no fallback, so every other format is a coverage gap). See [legacy Word .doc](#legacy-word-doc-libreoffice-engine). |
+| `libreoffice` | The libreoffice engine only: legacy Word `.doc` (needs `soffice` and `pandoc`; no fallback, so every other extractable format is a coverage gap). HTML is not a gap: it keeps its unconditional `raw_text` baseline. See [legacy Word .doc](#legacy-word-doc-libreoffice-engine). |
 | `mistral` | Mistral OCR only (requires `MISTRAL_API_KEY`). |
 | `off` | No extraction (PDFs/images contribute no extracted text). |
 
@@ -468,7 +468,7 @@ An extractor counts as *available* only when it can actually **run**, not merely
 **Troubleshooting:**
 - *`OCR: disabled`* — no extractor is available, and no functional pandoc either: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`. Until then, each PDF and image is a durable skip (`skip_reason=unsupported_format`), and the `Coverage` section names them. Plain text and code still index.
 - *`OCR: pandoc (no docling/OCR; ...)`* — the cascade found no docling and no Mistral OCR, so pandoc became the primary. `.docx/.odt/.rtf/.epub` are covered; PDFs and images are not, and the `Coverage` section names them.
-- *Legacy `.doc` files are skipped as `unsupported_format`*: no engine reads `.doc` until both `soffice` (LibreOffice) and `pandoc` are on `PATH`. The `doctor` and `up` coverage hint names the binary that is missing. After you install them, the next incremental run indexes the skipped `.doc` files; no `--force` or reindex is necessary.
+- *Legacy `.doc` files are skipped as `unsupported_format`*: no engine reads `.doc` until three conditions are true. Both `soffice` (LibreOffice) and `pandoc` are on `PATH`. `ingest.extractor` is `auto` or `libreoffice`: a pin to `mistral`, `pandoc` or another engine keeps the libreoffice engine off, even with both binaries installed. A work directory outside the corpus root is usable: the system temporary directory or the user cache directory (set `TMPDIR` when both are inside the root). The `doctor` and `up` coverage hint names each step that is still necessary. After you complete them, the next incremental run indexes the skipped `.doc` files; no `--force` or reindex is necessary.
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
 - *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
 - *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.

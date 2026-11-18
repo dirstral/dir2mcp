@@ -4925,6 +4925,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	var b strings.Builder
 	writeScalar := func(key, value string) {
 		value = strings.ReplaceAll(value, "\n", "\\n")
+		if yamlScalarNeedsQuote(value) {
+			value = strconv.Quote(value)
+		}
 		b.WriteString(key)
 		b.WriteString(": ")
 		b.WriteString(value)
@@ -5172,6 +5175,26 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	// never written to disk (env/keychain/.env.local-only, SPEC §16.1.1).
 
 	return []byte(b.String()), nil
+}
+
+// yamlScalarNeedsQuote reports whether marshalConfigYAML must write value as a
+// double-quoted scalar so that the loader reads back the same string. A plain
+// value loses text when it holds a comment start (`#` at the start or after a
+// space or tab), loses edge whitespace to trimming, loses an opening quote to
+// unquoteYAMLScalar, or turns into a list when it opens with `[`. An empty
+// value stays plain.
+func yamlScalarNeedsQuote(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.TrimSpace(value) != value {
+		return true
+	}
+	switch value[0] {
+	case '#', '"', '\'', '[':
+		return true
+	}
+	return strings.Contains(value, " #") || strings.Contains(value, "\t#")
 }
 
 // unquoteYAMLScalar trims value and strips matching single/double

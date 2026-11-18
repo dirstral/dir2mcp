@@ -146,3 +146,35 @@ func TestLibreOfficeConfig_TimeoutEnvNonIntegerWarns(t *testing.T) {
 		}
 	})
 }
+
+// SaveFile writes ingest.libreoffice.command so LoadFile reads back the same
+// command. A plain YAML value loses everything after ` #` to the comment rule,
+// so a path such as "/opt/LibreOffice #1/program/soffice" must be quoted.
+func TestLibreOfficeConfig_CommandRoundTripsThroughSaveFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{"ordinary path", "/usr/bin/soffice"},
+		{"space and hash", "/opt/LibreOffice #1/program/soffice"},
+		{"leading hash", "#soffice"},
+		{"leading quote", "'soffice'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+			cfg := config.Default()
+			cfg.IngestLibreOfficeCommand = tc.command
+			if err := config.SaveFile(path, cfg); err != nil {
+				t.Fatalf("SaveFile failed: %v", err)
+			}
+			loaded, err := config.LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile failed: %v", err)
+			}
+			if loaded.IngestLibreOfficeCommand != tc.command {
+				t.Fatalf("IngestLibreOfficeCommand = %q after round trip, want %q", loaded.IngestLibreOfficeCommand, tc.command)
+			}
+		})
+	}
+}

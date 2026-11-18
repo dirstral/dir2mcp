@@ -3,6 +3,7 @@ package tests
 import (
 	"bufio"
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,9 @@ import (
 // loRecordingSoffice logs the work, profile and output directories with their
 // `ls -ld` lines to $LO_TEST_LOG, then writes the .docx like soffice does. The
 // directories are gone after the extraction, so the stub records them while
-// they exist.
+// they exist. The profile arrives as a percent-encoded file URL, so the stub
+// logs that URL path as given (the test decodes it) and inspects the mode of
+// the real profile directory, $work/profile.
 const loRecordingSoffice = loStubPath + `case "$1" in --version) echo 'LibreOffice 7.6'; exit 0;; esac
 out=""; prev=""; last=""; profile=""
 for a in "$@"; do
@@ -37,7 +40,7 @@ work=$(dirname "$out")
   echo "profile $profile"
   echo "out $out"
   echo "mode $(ls -ld "$work" | cut -c1-10)"
-  echo "mode $(ls -ld "$profile" | cut -c1-10)"
+  echo "mode $(ls -ld "$work/profile" | cut -c1-10)"
   echo "mode $(ls -ld "$out" | cut -c1-10)"
 } >> "$LO_TEST_LOG"
 printf 'FAKEDOCX' > "$out/$(basename "$last" .doc).docx"
@@ -105,7 +108,9 @@ func TestLibreOfficeEngine_TempDirInsideRootUsesCacheDir(t *testing.T) {
 	cfg := config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off", IngestExtractor: "auto", IngestLibreOfficeTimeoutSec: 30}
 	st := newRealStore(t)
 	stubs := loStubDir(t, map[string]string{"pandoc": loRecordingPandoc, "soffice": loRecordingSoffice})
-	cacheHome := testutil.TempDir(t)
+	// The space makes the profile file URL percent-encoded (%20), so the
+	// checks must decode it to find the real directory.
+	cacheHome := filepath.Join(testutil.TempDir(t), "cache home")
 	tmpInRoot, logPath := loTempEnv(t, root, cacheHome)
 	t.Setenv("PATH", stubs)
 	cacheDir, err := os.UserCacheDir()
@@ -142,8 +147,21 @@ func assertWorkDirsOutsideRoot(t *testing.T, log map[string][]string, root, cach
 	if len(log["work"]) != 1 || len(log["profile"]) != 1 || len(log["out"]) != 1 || len(log["pandoc"]) != 1 {
 		t.Fatalf("stub log does not show one conversion and one pandoc read: %v", log)
 	}
+	// The profile is logged as the percent-encoded path of a file URL. Decode
+	// it to its filesystem path before the location checks. It must name the
+	// profile directory whose mode the stub inspected.
+	profile, err := url.PathUnescape(log["profile"][0])
+	if err != nil {
+		t.Fatalf("decode profile URL path %q: %v", log["profile"][0], err)
+	}
+	if want := filepath.Join(log["work"][0], "profile"); profile != want {
+		t.Fatalf("profile = %q, want %q", profile, want)
+	}
 	for _, key := range []string{"work", "profile", "out", "pandoc"} {
 		p := log[key][0]
+		if key == "profile" {
+			p = profile
+		}
 		if config.PathInsideRoot(p, root) {
 			t.Fatalf("%s path %s is inside the corpus root %s", key, p, root)
 		}

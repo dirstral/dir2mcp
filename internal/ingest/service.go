@@ -5548,7 +5548,7 @@ func (s *Service) generateFlatEngineMarkdownRepresentation(ctx context.Context, 
 // readOrComputeOCR.
 func (s *Service) readOrComputeFlatEngine(ctx context.Context, doc model.Document, content []byte, eng flatEngine) (string, error) {
 	// The cache holds document text, so the directory is owner-only (0700)
-	// and each file is 0600 (statefs.WriteFile). Spec 0.97.0 §7.4.B requires
+	// and each file is 0600 (statefs.WriteFileAtomic). Spec 0.97.0 §7.4.B requires
 	// this for a cached copy of the libreoffice conversion. The hardened call
 	// also tightens a directory that already exists with a wider mode.
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", eng.name)
@@ -5564,7 +5564,10 @@ func (s *Service) readOrComputeFlatEngine(ctx context.Context, doc model.Documen
 		return "", fmt.Errorf("%w: %s extract %s: %w", ErrOCRProviderFailure, eng.name, doc.RelPath, err)
 	}
 	mdBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(md, "\r\n", "\n"), "\r", "\n"))
-	if err := statefs.WriteFile(cachePath, mdBytes); err != nil {
+	// The atomic write publishes the entry only when it is complete, so a
+	// failed write (a full disk) leaves no truncated entry that a later run
+	// reads as a cache hit.
+	if err := statefs.WriteFileAtomic(cachePath, mdBytes); err != nil {
 		return "", fmt.Errorf("write %s cache: %w", eng.name, err)
 	}
 	return string(mdBytes), nil
