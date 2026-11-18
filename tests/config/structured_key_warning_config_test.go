@@ -100,3 +100,72 @@ func TestStructuredKeyWarning_MisspelledSiblingStillWarns(t *testing.T) {
 		t.Errorf("warning does not name the one misspelled key: %s", got[0])
 	}
 }
+
+// The yaml.v3 pass reads only the nested `media:` block. A dotted spelling of a
+// side-parsed map key is read by no parser, so it must keep the
+// unrecognized-key warning instead of a silent drop.
+func TestStructuredKeyWarning_DottedSideParsedKeysWarn(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		key  string
+	}{
+		{
+			name: "top-level flow language_providers",
+			yaml: gigaamProfile + "media.stt.language_providers: {ru: gigaam}\n",
+			key:  "media.stt.language_providers",
+		},
+		{
+			name: "top-level block language_providers",
+			yaml: gigaamProfile + "media.stt.language_providers:\n  ru: gigaam\n",
+			key:  "media.stt.language_providers.ru",
+		},
+		{
+			name: "top-level child language_providers",
+			yaml: gigaamProfile + "media.stt.language_providers.ru: gigaam\n",
+			key:  "media.stt.language_providers.ru",
+		},
+		{
+			name: "media-level dotted flow language_providers",
+			yaml: gigaamProfile + "media:\n  stt.language_providers: {ru: gigaam}\n",
+			key:  "stt.language_providers",
+		},
+		{
+			name: "top-level flow translate glossary",
+			yaml: "media.translate.glossary: {en: {Navalny: Navalny}}\n",
+			key:  "media.translate.glossary",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadCfg(t, tc.yaml)
+			if len(cfg.MediaSTTLanguageProviders) != 0 || len(cfg.MediaTranslateGlossary) != 0 {
+				t.Fatalf("dotted spelling was read: providers=%v glossary=%v", cfg.MediaSTTLanguageProviders, cfg.MediaTranslateGlossary)
+			}
+			got := unknownKeyWarnings(cfg)
+			if len(got) != 1 {
+				t.Fatalf("want exactly one unrecognized-key warning, got %d: %v", len(got), got)
+			}
+			if !strings.Contains(got[0], "1 unrecognized key(s)") || !strings.Contains(got[0], tc.key) {
+				t.Errorf("warning does not name %s: %s", tc.key, got[0])
+			}
+		})
+	}
+}
+
+// A glossary in block form under media: and translate: is read by the yaml.v3
+// pass, so its term keys must not warn.
+func TestStructuredKeyWarning_TranslateGlossaryBlockForm(t *testing.T) {
+	cfg := loadCfg(t, ""+
+		"media:\n"+
+		"  translate:\n"+
+		"    glossary:\n"+
+		"      en:\n"+
+		"        Navalny: Navalny\n")
+	if got := unknownKeyWarnings(cfg); len(got) != 0 {
+		t.Errorf("block-form translate glossary warned: %v", got)
+	}
+	if got := cfg.MediaTranslateGlossary["en"]["Navalny"]; got != "Navalny" {
+		t.Errorf("MediaTranslateGlossary[en][Navalny] = %q, want Navalny (all: %v)", got, cfg.MediaTranslateGlossary)
+	}
+}

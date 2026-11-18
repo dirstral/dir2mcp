@@ -3767,7 +3767,8 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			continue
 		}
 
-		if err := handleYAMLScalarValue(&cfg, key, value, !inSideParsedBlock); err != nil {
+		collectUnknown := collectsUnknownKey(inSideParsedBlock, key, len(sectionByIndent))
+		if err := handleYAMLScalarValue(&cfg, key, value, collectUnknown); err != nil {
 			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 	}
@@ -3784,7 +3785,8 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 // (`first`/`all`) of media.stt.tracks would be silently dropped by the scalar path,
 // which has no such field.
 // `collectUnknown` is false while the parser is inside a side-parsed top-level
-// block, whose children legitimately never reach a scalar setter (#628).
+// block, whose children legitimately never reach a scalar setter (#628), and
+// for a nested side-parsed key (isNestedSideParsedKey).
 func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bool) error {
 	value = unquoteYAMLScalar(value)
 	if strings.Contains(value, "\\n") {
@@ -3833,7 +3835,9 @@ var sideParsedTopLevelBlocks = map[string]bool{
 // child key under the map key (media.stt.language_providers.ru). In flow form
 // (`language_providers: {ru: gigaam}`) it sees the map key itself with the
 // whole flow map as a scalar value. Both shapes are read by the yaml.v3 pass,
-// so neither is an unrecognized key.
+// so neither is an unrecognized key. The yaml.v3 pass reads only the nested
+// `media:` block, so a dotted spelling (`media.stt.language_providers: ...`)
+// is read by no parser and keeps the warning (isNestedSideParsedKey).
 var sideParsedKeys = []string{
 	"media.translate.glossary",
 	"media.stt.language_providers",
@@ -3851,6 +3855,24 @@ func isSideParsedKey(key string) bool {
 	return false
 }
 
+// isNestedSideParsedKey reports whether key is a side-parsed key that the
+// flat parser built from nested sections only, one segment per line. Then the
+// yaml.v3 pass reads it too. sections is the number of enclosing sections of
+// the line. A key written with a dot in it (media.stt.language_providers at the
+// top level) has more segments than enclosing sections plus one. The yaml.v3
+// pass does not read that key, so it stays eligible for the warning.
+func isNestedSideParsedKey(key string, sections int) bool {
+	return isSideParsedKey(key) && strings.Count(key, ".") == sections
+}
+
+// collectsUnknownKey reports whether the flat parser must check a scalar key
+// for the unrecognized-key warning. It does not for a line inside a
+// side-parsed top-level block or for a nested side-parsed key: a yaml.v3 pass
+// reads both.
+func collectsUnknownKey(inSideParsedBlock bool, key string, sections int) bool {
+	return !inSideParsedBlock && !isNestedSideParsedKey(key, sections)
+}
+
 // scalarKeyIsRecognized reports whether any setter claims key.
 //
 // Detection is by EFFECT rather than by enumerating every known key: the string
@@ -3859,9 +3881,6 @@ func isSideParsedKey(key string) bool {
 // in #624. Every fileConfig field is a pointer, so applying the key to a fresh
 // fileConfig and finding it unchanged proves nothing assigned it.
 func scalarKeyIsRecognized(key, value string) bool {
-	if isSideParsedKey(key) {
-		return true
-	}
 	var probe fileConfig
 	if err := setFileScalarValue(&probe, key, value); err != nil {
 		// A parse/validation error means a setter DID claim the key; the caller
