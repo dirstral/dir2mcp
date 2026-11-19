@@ -3767,7 +3767,7 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			continue
 		}
 
-		collectUnknown := collectsUnknownKey(inSideParsedBlock, key, len(sectionByIndent))
+		collectUnknown := collectsUnknownKey(inSideParsedBlock, key, len(sectionByIndent), lineKeyWrittenDotted(line))
 		if err := handleYAMLScalarValue(&cfg, key, value, collectUnknown); err != nil {
 			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
@@ -3858,19 +3858,34 @@ func isSideParsedKey(key string) bool {
 // isNestedSideParsedKey reports whether key is a side-parsed key that the
 // flat parser built from nested sections only, one segment per line. Then the
 // yaml.v3 pass reads it too. sections is the number of enclosing sections of
-// the line. A key written with a dot in it (media.stt.language_providers at the
-// top level) has more segments than enclosing sections plus one. The yaml.v3
-// pass does not read that key, so it stays eligible for the warning.
-func isNestedSideParsedKey(key string, sections int) bool {
-	return isSideParsedKey(key) && strings.Count(key, ".") == sections
+// the line, and writtenDotted reports whether the line itself wrote its key
+// with a dot. Both conditions are needed:
+//   - A key the line writes with a dot (media.stt.language_providers, at the
+//     top level or under media: and stt:) is kept as written, so its segment
+//     count can match the section count by chance. yaml.v3 reads it as one
+//     literal key and never as the side-parsed map.
+//   - A key built from a dotted section line (media.stt: then
+//     language_providers:) has more segments than enclosing sections plus one.
+//     yaml.v3 does not read that key either.
+//
+// Such keys stay eligible for the warning.
+func isNestedSideParsedKey(key string, sections int, writtenDotted bool) bool {
+	return !writtenDotted && isSideParsedKey(key) && strings.Count(key, ".") == sections
 }
 
 // collectsUnknownKey reports whether the flat parser must check a scalar key
 // for the unrecognized-key warning. It does not for a line inside a
 // side-parsed top-level block or for a nested side-parsed key: a yaml.v3 pass
 // reads both.
-func collectsUnknownKey(inSideParsedBlock bool, key string, sections int) bool {
-	return !inSideParsedBlock && !isNestedSideParsedKey(key, sections)
+func collectsUnknownKey(inSideParsedBlock bool, key string, sections int, writtenDotted bool) bool {
+	return !inSideParsedBlock && !isNestedSideParsedKey(key, sections, writtenDotted)
+}
+
+// lineKeyWrittenDotted reports whether a "key: value" line writes its key with
+// a dot, before any section prefix is added.
+func lineKeyWrittenDotted(line string) bool {
+	k, _, _ := strings.Cut(line, ":")
+	return strings.Contains(strings.TrimSpace(k), ".")
 }
 
 // scalarKeyIsRecognized reports whether any setter claims key.

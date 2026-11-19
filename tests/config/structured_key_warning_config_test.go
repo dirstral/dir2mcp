@@ -131,6 +131,16 @@ func TestStructuredKeyWarning_DottedSideParsedKeysWarn(t *testing.T) {
 			key:  "stt.language_providers",
 		},
 		{
+			name: "fully dotted language_providers under media and stt",
+			yaml: gigaamProfile + "media:\n  stt:\n    media.stt.language_providers: {ru: gigaam}\n",
+			key:  "media.stt.language_providers",
+		},
+		{
+			name: "dotted section line media.stt",
+			yaml: gigaamProfile + "media.stt:\n  language_providers: {ru: gigaam}\n",
+			key:  "media.stt.language_providers",
+		},
+		{
 			name: "top-level flow translate glossary",
 			yaml: "media.translate.glossary: {en: {Navalny: Navalny}}\n",
 			key:  "media.translate.glossary",
