@@ -3767,7 +3767,8 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			continue
 		}
 
-		if err := handleYAMLScalarValue(&cfg, key, value, !inSideParsedBlock); err != nil {
+		collectUnknown := collectsUnknownKey(inSideParsedBlock, key, len(sectionByIndent), lineKeyWrittenDotted(line))
+		if err := handleYAMLScalarValue(&cfg, key, value, collectUnknown); err != nil {
 			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 	}
@@ -3784,7 +3785,8 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 // (`first`/`all`) of media.stt.tracks would be silently dropped by the scalar path,
 // which has no such field.
 // `collectUnknown` is false while the parser is inside a side-parsed top-level
-// block, whose children legitimately never reach a scalar setter (#628).
+// block, whose children legitimately never reach a scalar setter (#628), and
+// for a nested side-parsed key (isNestedSideParsedKey).
 func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bool) error {
 	value = unquoteYAMLScalar(value)
 	if strings.Contains(value, "\\n") {
@@ -3827,11 +3829,63 @@ var sideParsedTopLevelBlocks = map[string]bool{
 	"carbon":    true,
 }
 
-// sideParsedKeyPrefixes are the nested maps decoded separately that DO arrive
+// sideParsedKeys are the nested maps decoded separately that DO arrive
 // prefixed, because they sit under the registered `media` section (#574, #566).
-var sideParsedKeyPrefixes = []string{
-	"media.translate.glossary.",
-	"media.stt.language_providers.",
+// The flat parser sees one of them in two shapes. In block form it sees each
+// child key under the map key (media.stt.language_providers.ru). In flow form
+// (`language_providers: {ru: gigaam}`) it sees the map key itself with the
+// whole flow map as a scalar value. Both shapes are read by the yaml.v3 pass,
+// so neither is an unrecognized key. The yaml.v3 pass reads only the nested
+// `media:` block, so a dotted spelling (`media.stt.language_providers: ...`)
+// is read by no parser and keeps the warning (isNestedSideParsedKey).
+var sideParsedKeys = []string{
+	"media.translate.glossary",
+	"media.stt.language_providers",
+}
+
+// isSideParsedKey reports whether a yaml.v3 pass reads key: the map key
+// itself or a key below it. A sibling that only shares the leading text
+// (media.stt.language_providerz) does not match.
+func isSideParsedKey(key string) bool {
+	for _, mapKey := range sideParsedKeys {
+		if key == mapKey || strings.HasPrefix(key, mapKey+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// isNestedSideParsedKey reports whether key is a side-parsed key that the
+// flat parser built from nested sections only, one segment per line. Then the
+// yaml.v3 pass reads it too. sections is the number of enclosing sections of
+// the line, and writtenDotted reports whether the line itself wrote its key
+// with a dot. Both conditions are needed:
+//   - A key the line writes with a dot (media.stt.language_providers, at the
+//     top level or under media: and stt:) is kept as written, so its segment
+//     count can match the section count by chance. yaml.v3 reads it as one
+//     literal key and never as the side-parsed map.
+//   - A key built from a dotted section line (media.stt: then
+//     language_providers:) has more segments than enclosing sections plus one.
+//     yaml.v3 does not read that key either.
+//
+// Such keys stay eligible for the warning.
+func isNestedSideParsedKey(key string, sections int, writtenDotted bool) bool {
+	return !writtenDotted && isSideParsedKey(key) && strings.Count(key, ".") == sections
+}
+
+// collectsUnknownKey reports whether the flat parser must check a scalar key
+// for the unrecognized-key warning. It does not for a line inside a
+// side-parsed top-level block or for a nested side-parsed key: a yaml.v3 pass
+// reads both.
+func collectsUnknownKey(inSideParsedBlock bool, key string, sections int, writtenDotted bool) bool {
+	return !inSideParsedBlock && !isNestedSideParsedKey(key, sections, writtenDotted)
+}
+
+// lineKeyWrittenDotted reports whether a "key: value" line writes its key with
+// a dot, before any section prefix is added.
+func lineKeyWrittenDotted(line string) bool {
+	k, _, _ := strings.Cut(line, ":")
+	return strings.Contains(strings.TrimSpace(k), ".")
 }
 
 // scalarKeyIsRecognized reports whether any setter claims key.
@@ -3842,11 +3896,6 @@ var sideParsedKeyPrefixes = []string{
 // in #624. Every fileConfig field is a pointer, so applying the key to a fresh
 // fileConfig and finding it unchanged proves nothing assigned it.
 func scalarKeyIsRecognized(key, value string) bool {
-	for _, prefix := range sideParsedKeyPrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
 	var probe fileConfig
 	if err := setFileScalarValue(&probe, key, value); err != nil {
 		// A parse/validation error means a setter DID claim the key; the caller
@@ -4201,8 +4250,7 @@ func isMapSectionKey(key string) bool {
 	// sub-entries as a section so children prefix into that namespace
 	// (media.stt.language_providers.<lang>) — a guaranteed no-op — instead of
 	// leaking a language code up to a real media.stt.<key>.
-	if key == "media.translate.glossary" || strings.HasPrefix(key, "media.translate.glossary.") ||
-		key == "media.stt.language_providers" || strings.HasPrefix(key, "media.stt.language_providers.") {
+	if isSideParsedKey(key) {
 		return true
 	}
 	switch key {

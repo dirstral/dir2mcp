@@ -12,6 +12,10 @@ environment variables.
 A key that no setting claims does not fail the load. `dir2mcp up` prints one warning that
 names every unrecognized key, then starts, so a typo or a stale key from an older release
 is reported instead of being dropped in silence.
+The maps `media.stt.language_providers` and `media.translate.glossary` are read only
+in nested form under `media:`, one key per line. A dotted spelling, such as
+`media.stt.language_providers: {ru: gigaam}` at the top level or inside `media:` and
+`stt:`, or a dotted section line such as `media.stt:`, is an unrecognized key.
 
 Comments follow YAML. A `#` at the start of a line, or after a space or tab
 outside quotes, starts a comment, so `key: value  # note` reads as `value`. A `#`
