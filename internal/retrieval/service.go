@@ -1259,7 +1259,16 @@ func (s *Service) registerChunkMetadata(label uint64, metadata model.SearchHit) 
 
 // registerChunkMetadataLocked is registerChunkMetadata for a caller that holds
 // metaMu.
+//
+// It drops the span's Words and Cues before caching (#1180). Nothing that reads
+// chunkByLabel uses them: the served span (buildOpenFileSpan) emits only the
+// bounds, speaker, entities, event, sources and attributes, and subtitle export
+// and translation retiming read word timings from the store. The embed worker
+// hands over spans from NextPending that still carry them, and at ~40 B a word
+// they were most of what this cache kept live on a transcript corpus.
 func (s *Service) registerChunkMetadataLocked(label uint64, metadata model.SearchHit) {
+	metadata.Span.Words = nil
+	metadata.Span.Cues = nil
 	s.chunkByLabel[label] = metadata
 	s.metadataRegistered = true
 	if relPath := normalizeEvictPath(metadata.RelPath); relPath != "" {
