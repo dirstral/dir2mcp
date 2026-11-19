@@ -374,7 +374,9 @@ func marshalListFilesJSON(ctx context.Context, a *App, cfg config.Config, includ
 			Status:       d.Status,
 			Deleted:      d.Deleted,
 			ErrorMessage: redactContentField(d.ErrorMessage, includeContent),
-			HasError:     !includeContent && d.ErrorMessage != "",
+			// A no_speech skip (SPEC §8.6.6) carries a detail in error_message too,
+			// so the failure flag reads the status, not only the message.
+			HasError: !includeContent && d.Status == string(model.DocumentStatusError) && d.ErrorMessage != "",
 		})
 	}
 	return json.MarshalIndent(map[string]interface{}{
