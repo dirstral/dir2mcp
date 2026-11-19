@@ -2890,7 +2890,7 @@ func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.D
 	// out-of-band; never resurrect it into a done state. A no_speech skip
 	// (SPEC §8.6.6) is a done state of an ok document's pipeline, not a failure:
 	// its marker is stamped so an unchanged silent item takes the fast path.
-	if current.Status != healthyStatus && !(healthyStatus == string(model.DocumentStatusOK) && isNoSpeechSkip(current)) {
+	if current.Status != healthyStatus && (healthyStatus != string(model.DocumentStatusOK) || !isNoSpeechSkip(current)) {
 		return nil
 	}
 	// Stamp the withheld done marker onto the re-read row so out-of-band writes
