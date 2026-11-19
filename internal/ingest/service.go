@@ -484,6 +484,13 @@ type Service struct {
 	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
 
+	// noSpeechFallbackThisDoc is the §8.2.4 route-fallback stamp of the empty
+	// transcript a no_speech verdict on the current document came from, zero
+	// when that decode was not a fallback result (SPEC §8.6.6, #1182). It is
+	// recorded on the no_speech row so the incremental gates still reach the
+	// fallback retry. Re-scoped per document in generateRepresentations.
+	noSpeechFallbackThisDoc noSpeechFallback
+
 	// recognizeIncompleteThisDoc records that the recognition backend ran out of
 	// its wall-clock budget on the document currently being processed (#894). The
 	// document is NOT failed — status="error" would hide every chunk it already has
@@ -4509,6 +4516,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// members processed after it.
 	s.quarantinedThisDoc = false
 	s.recognizeIncompleteThisDoc = false
+	s.noSpeechFallbackThisDoc = noSpeechFallback{}
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -5940,7 +5948,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return s.settleEmptyTranscript(ctx, doc, tc, coverage)
+		return s.settleEmptyTranscript(ctx, doc, tc, coverage, route)
 	}
 
 	// #681: a credential spoken on a call, or read out in a screen share, is audio
@@ -6194,7 +6202,7 @@ func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, 
 // four-value return, so the caller carries one line rather than a nested error
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
-func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, string, error) {
+func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage, route *itemRoute) (bool, bool, string, error) {
 	skipReason, gateRejected, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
 	if err != nil {
 		return false, false, "", err
@@ -6202,7 +6210,7 @@ func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document,
 	// SPEC §8.6.6 (#1182): nothing was refused and the decode covered the whole
 	// item, so the empty transcript is the provider's answer: no speech.
 	if skipReason == "" && !gateRejected && heardNoSpeech(coverage) {
-		return s.settleNoSpeechTrack(ctx, doc, tc)
+		return s.settleNoSpeechTrack(ctx, doc, tc, cachedTranscript{coverage: coverage, route: route})
 	}
 	return false, gateRejected, skipReason, nil
 }

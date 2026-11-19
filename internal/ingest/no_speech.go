@@ -65,14 +65,27 @@ func heardNoSpeech(coverage *TranscriptCoverage) bool {
 // provider heard no speech. Any transcript an earlier run derived for the track
 // (with another STT identity) is retired, exactly as a §8.6.13 refusal does, so
 // a document recorded as having no speech does not keep stale chunks of a
-// transcript the current model does not produce.
-func (s *Service) settleNoSpeechTrack(ctx context.Context, doc model.Document, tc trackContext) (bool, bool, string, error) {
+// transcript the current model does not produce. When the empty transcript is a
+// §8.2.4 route-fallback result, its stamp is kept for the no_speech row, so the
+// item still reaches the fallback retry (noSpeechSettled).
+func (s *Service) settleNoSpeechTrack(ctx context.Context, doc model.Document, tc trackContext, decoded cachedTranscript) (bool, bool, string, error) {
 	s.getLogger().Printf("stt: no speech in %s%s: the provider answered with an empty transcript or the media has no audio track (SPEC §8.6.6)",
 		doc.RelPath, trackSuffixForLog(tc))
 	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
 		return false, false, "", fmt.Errorf("no-speech outcome for %s: %w", doc.RelPath, err)
 	}
+	if at, by, ok := decoded.fallbackStamp(); ok && !s.noSpeechFallbackThisDoc.ok {
+		s.noSpeechFallbackThisDoc = noSpeechFallback{ok: true, at: at, by: by}
+	}
 	return false, false, model.SkipReasonNoSpeech, nil
+}
+
+// noSpeechFallback is the §8.2.4 stamp (route_fallback_at, route_fallback_by)
+// of an empty transcript that a route-fallback decode produced. ok is false
+// when the decode was not a fallback result.
+type noSpeechFallback struct {
+	ok     bool
+	at, by string
 }
 
 // settleUnrepresentedMedia records the final verdict on a media document that
@@ -101,22 +114,35 @@ func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Docume
 
 // persistNoSpeechSkip records the durable no_speech skip. The row's
 // error_message carries a short detail naming the STT identity the item was
-// judged with, so the incremental gates can tell when that identity changed
-// (noSpeechSettled) without a store schema change.
+// judged with, and the §8.2.4 stamp when the empty transcript is a
+// route-fallback result, so the incremental gates can tell when the identity
+// changed or the fallback retry is due (noSpeechSettled) without a store schema
+// change.
 func (s *Service) persistNoSpeechSkip(ctx context.Context, doc model.Document) {
 	doc.ErrorMessage = s.noSpeechDetail()
 	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonNoSpeech)
 }
 
 // noSpeechIdentityPrefix opens the detail persistNoSpeechSkip writes. The token
-// comes first so the store's 512-byte cap on error_message can never cut it.
-const noSpeechIdentityPrefix = "no speech (stt_identity="
+// and the fallback stamp come first so the store's 512-byte cap on
+// error_message can never cut them; noSpeechRecordEnd closes them.
+const (
+	noSpeechIdentityPrefix = "no speech (stt_identity="
+	noSpeechRecordEnd      = "): "
+	noSpeechFallbackAt     = "; route_fallback_at="
+	noSpeechFallbackBy     = "; route_fallback_by="
+)
 
 // noSpeechDetail renders the detail recorded on a no_speech row: a stable token
-// of the active STT identity plus the provider and model in plain words.
+// of the active STT identity, the §8.2.4 stamp of a route-fallback result, and
+// the provider and model in plain words.
 func (s *Service) noSpeechDetail() string {
-	return fmt.Sprintf("%s%s): the STT provider answered with no speech, or the media has no audio track (SPEC §8.6.6); judged with %s/%s",
-		noSpeechIdentityPrefix, s.noSpeechIdentityToken(), strings.TrimSpace(s.sttProvider), strings.TrimSpace(s.sttModel))
+	record := s.noSpeechIdentityToken()
+	if fb := s.noSpeechFallbackThisDoc; fb.ok {
+		record += noSpeechFallbackAt + fb.at + noSpeechFallbackBy + fb.by
+	}
+	return fmt.Sprintf("%s%s%sthe STT provider answered with no speech, or the media has no audio track (SPEC §8.6.6); judged with %s/%s",
+		noSpeechIdentityPrefix, record, noSpeechRecordEnd, strings.TrimSpace(s.sttProvider), strings.TrimSpace(s.sttModel))
 }
 
 // noSpeechIdentityToken is a short, stable token of the active transcript
@@ -126,15 +152,23 @@ func (s *Service) noSpeechIdentityToken() string {
 	return computeContentHash([]byte(s.activeTranscriptIdentity()))[:16]
 }
 
-// recordedNoSpeechToken reads the identity token back from a no_speech row's
-// detail. ok is false when the detail does not carry one.
-func recordedNoSpeechToken(detail string) (string, bool) {
+// recordedNoSpeech reads the identity token and the fallback stamp back from a
+// no_speech row's detail. ok is false when the detail carries no token.
+func recordedNoSpeech(detail string) (token string, fb noSpeechFallback, ok bool) {
 	rest, found := strings.CutPrefix(strings.TrimSpace(detail), noSpeechIdentityPrefix)
 	if !found {
-		return "", false
+		return "", noSpeechFallback{}, false
 	}
-	token, _, found := strings.Cut(rest, ")")
-	return token, found && token != ""
+	record, _, found := strings.Cut(rest, noSpeechRecordEnd)
+	if !found {
+		return "", noSpeechFallback{}, false
+	}
+	token, stamp, hasStamp := strings.Cut(record, noSpeechFallbackAt)
+	if hasStamp {
+		fb.ok = true
+		fb.at, fb.by, _ = strings.Cut(stamp, noSpeechFallbackBy)
+	}
+	return token, fb, token != ""
 }
 
 // isNoSpeechSkip reports whether a stored row is a no_speech skip.
@@ -147,12 +181,28 @@ func isNoSpeechSkip(doc model.Document) bool {
 // item, so the recorded outcome stands, exactly as transcriptStale self-skips
 // when STT is off. A row whose detail carries no token is not settled: it is
 // re-derived once (the transcript cache usually answers without calling STT).
+//
+// Silence a §8.2.4 route-fallback decode produced is provisional like any
+// fallback result: it does not stand when the fallback retry is due
+// (on_route_error: fail, route_retry_after elapsed, or route_fallback_by is not
+// the current default profile). The item is then processed, and the cached
+// fallback result goes through the retry in serveCachedTranscript.
 func (s *Service) noSpeechSettled(existing model.Document) bool {
 	if s.transcriber == nil {
 		return true
 	}
-	recorded, ok := recordedNoSpeechToken(existing.ErrorMessage)
-	return ok && recorded == s.noSpeechIdentityToken()
+	recorded, fb, ok := recordedNoSpeech(existing.ErrorMessage)
+	if !ok || recorded != s.noSpeechIdentityToken() {
+		return false
+	}
+	if !fb.ok {
+		return true
+	}
+	if v := s.routeFallbackVerdict(fb.at, fb.by); v.Due {
+		s.getLogger().Printf("route fallback: %s was recorded as having no speech from a route-fallback decode (%s); decoding it again on its route this scan (SPEC §8.2.4)", existing.RelPath, v.Why)
+		return false
+	}
+	return true
 }
 
 // noSpeechStale reports whether a stored no_speech skip must be re-derived on
@@ -164,7 +214,7 @@ func (s *Service) noSpeechStale(existing model.Document) bool {
 	if !isNoSpeechSkip(existing) || s.noSpeechSettled(existing) {
 		return false
 	}
-	s.getLogger().Printf("STT identity changed for %s since it was recorded as having no speech; transcribing it again (SPEC §8.6.6/§8.6.7)", existing.RelPath)
+	s.getLogger().Printf("%s was recorded as having no speech under another STT identity, or from a route-fallback decode now due; transcribing it again (SPEC §8.6.6/§8.6.7/§8.2.4)", existing.RelPath)
 	return true
 }
 

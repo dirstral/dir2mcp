@@ -12,6 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -228,5 +229,153 @@ func TestNoSpeech_STTOff_StaysError(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(doc.ErrorMessage), "no representation") {
 		t.Errorf("error_message = %q, want the no-representation diagnostic", doc.ErrorMessage)
+	}
+}
+
+// scriptedSilenceTranscriber answers the Nth windowed request (1-based) with
+// texts[N], else def, exactly as given: an empty string is an empty answer
+// (silence), not a placeholder. Every answer reports lang at confidence 0.9.
+type scriptedSilenceTranscriber struct {
+	mu    sync.Mutex
+	calls int
+	texts map[int]string
+	def   string
+	lang  string
+}
+
+func (w *scriptedSilenceTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
+	res, err := w.TranscribeStructured(ctx, relPath, data)
+	return res.Text, err
+}
+
+func (w *scriptedSilenceTranscriber) TranscribeStructured(context.Context, string, []byte) (model.TranscriptResult, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	text, ok := w.texts[w.calls]
+	if !ok {
+		text = w.def
+	}
+	return model.TranscriptResult{Text: text, Language: w.lang, LanguageConfidence: 0.9}, nil
+}
+
+// MaxTranscribePayloadBytes declares no cap, so only the duration rule windows.
+func (w *scriptedSilenceTranscriber) MaxTranscribePayloadBytes() int { return 0 }
+
+// windowedSilenceService drives a 30-minute recording (four ~10-minute decode
+// windows) through ProcessDocument with deterministic duration and cut stubs.
+// scope "" keeps the default item scope; gate turns the §8.6.6 quality gate on.
+func windowedSilenceService(t *testing.T, root string, st *store.SQLiteStore, tr model.Transcriber, scope string, gate bool) *ingest.Service {
+	t.Helper()
+	svc := mustNewIngestService(t, config.Config{RootDir: root, StateDir: testutil.TempDir(t), STTProvider: "off"}, st)
+	svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
+	svc.SetTranscriber(tr)
+	svc.SetSTTIdentity("whisper", "large-v3")
+	if scope != "" {
+		svc.SetLanguageScope(scope)
+	}
+	if gate {
+		svc.SetQualityGate(quality.New(quality.DefaultConfig()))
+	}
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) {
+		return time.Duration(scopeTotalMS) * time.Millisecond, nil
+	}
+	svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+		return make([]byte, 10*(endMS-startMS)/scopeTotalMS+1), nil
+	}
+	return svc
+}
+
+func processWindowed(t *testing.T, svc *ingest.Service, root, relPath string) {
+	t.Helper()
+	writeFile(t, filepath.Join(root, relPath), "fake-audio")
+	f := ingest.DiscoveredFile{RelPath: relPath, SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument(%s): %v", relPath, err)
+	}
+}
+
+// TestNoSpeech_SilentWindowsCountAsDecoded: a window that completes with no
+// speech was listened to, so it counts as decoded and its range is covered
+// (§8.6.13). A recording with speech in its first window and silence in the
+// other three is complete coverage, so a min_coverage 0.8 floor under skip does
+// not drop it as transcript_partial.
+func TestNoSpeech_SilentWindowsCountAsDecoded(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	st := newRealStore(t)
+	tr := &scriptedSilenceTranscriber{texts: map[int]string{1: ruText}, lang: "ru"}
+	svc := windowedSilenceService(t, root, st, tr, "", false)
+	svc.SetPartialTranscriptFloor(0.8, "skip")
+	processWindowed(t, svc, root, "half-silent.mp3")
+
+	doc := mustGetDoc(t, st, "half-silent.mp3")
+	if doc.Status != string(model.DocumentStatusOK) || doc.SkipReason != "" {
+		t.Fatalf("status = %q skip_reason = %q, want ok: silent windows were decoded, not missed", doc.Status, doc.SkipReason)
+	}
+	cov, present := transcriptCoverageFromMeta(t, transcriptMetaFor(t, st, "half-silent.mp3"))
+	if !present || cov.WindowsAttempted != 4 || cov.WindowsDecoded != 4 {
+		t.Fatalf("coverage = %+v (present %v), want 4 of 4 windows decoded", cov, present)
+	}
+	if cov.DecodedMS < cov.DurationMS {
+		t.Errorf("decoded_ms = %d of %d: the silent windows' ranges are missing from coverage", cov.DecodedMS, cov.DurationMS)
+	}
+}
+
+// TestNoSpeech_FullySilentWindowedDecode: every window answers with no speech
+// and none is refused. The item is a no_speech skip, not TRANSCRIBE_FAILED or a
+// quality-gate empty_output error, under item scope and under window scope.
+func TestNoSpeech_FullySilentWindowedDecode(t *testing.T) {
+	t.Parallel()
+	for _, scope := range []string{"", "window"} {
+		root := testutil.TempDir(t)
+		st := newRealStore(t)
+		tr := &scriptedSilenceTranscriber{lang: "ru"}
+		svc := windowedSilenceService(t, root, st, tr, scope, true)
+		processWindowed(t, svc, root, "silent.mp3")
+
+		if tr.calls != 4 {
+			t.Errorf("scope %q: STT calls = %d, want 4 windows", scope, tr.calls)
+		}
+		doc := mustGetDoc(t, st, "silent.mp3")
+		if doc.Status != string(model.DocumentStatusSkipped) || doc.SkipReason != model.SkipReasonNoSpeech {
+			t.Errorf("scope %q: status = %q skip_reason = %q error = %q, want skipped/no_speech", scope, doc.Status, doc.SkipReason, doc.ErrorMessage)
+		}
+	}
+}
+
+// TestNoSpeech_RefusedWindowStaysOutsideCoverage: silence counts as decoded, a
+// refusal does not. Under window scope the second window is a repetition loop
+// the per-window gate refuses; the first has speech and the last two are
+// silent. Coverage counts three decoded windows and the refused range is kept
+// out of the decoded ranges.
+func TestNoSpeech_RefusedWindowStaysOutsideCoverage(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	st := newRealStore(t)
+	tr := &scriptedSilenceTranscriber{texts: map[int]string{1: ruText, 2: loopText}, lang: "ru"}
+	svc := windowedSilenceService(t, root, st, tr, "window", true)
+	processWindowed(t, svc, root, "refused.mp3")
+
+	meta := transcriptMetaFor(t, st, "refused.mp3")
+	if strings.TrimSpace(meta) == "" {
+		t.Fatalf("no transcript persisted; doc = %+v", mustGetDoc(t, st, "refused.mp3"))
+	}
+	scoped := decodeScopedMeta(t, meta)
+	cov := scoped.Coverage
+	if cov == nil {
+		t.Fatalf("transcript meta carries no coverage: %s", meta)
+	}
+	if cov.WindowsAttempted != 4 || cov.WindowsDecoded != 3 {
+		t.Errorf("coverage = %d of %d windows decoded, want 3 of 4 (the refused window is not decoded)", cov.WindowsDecoded, cov.WindowsAttempted)
+	}
+	if len(cov.Refused) != 1 || cov.Refused[0].Reason != "quality_gate" {
+		t.Fatalf("refused = %+v, want one quality_gate range", cov.Refused)
+	}
+	ref := cov.Refused[0]
+	for _, r := range cov.Ranges {
+		if r.StartMS < ref.EndMS && r.EndMS > ref.StartMS {
+			t.Errorf("decoded range %+v overlaps the refused range %+v", r, ref)
+		}
 	}
 }
