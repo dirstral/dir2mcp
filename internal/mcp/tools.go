@@ -2411,6 +2411,9 @@ func isMediaDocType(docType string) bool {
 // mediaClipMIMEForPath picks a container MIME type for an extracted clip from
 // the source file extension (stream-copy keeps the source muxer), falling back
 // to a generic audio/video type by doc_type when the extension is unknown.
+// Video containers come from the avutil table, so every container ingest
+// classifies as video has its own type here. A .mod clip is muxed as an MPEG
+// program stream (avutil.SegmentOutputExt), which video/mpeg names.
 func mediaClipMIMEForPath(relPath, docType string) string {
 	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
 	case ".mp3":
@@ -2423,12 +2426,17 @@ func mediaClipMIMEForPath(relPath, docType string) string {
 		return "audio/flac"
 	case ".ogg", ".opus":
 		return "audio/ogg"
-	case ".mp4":
-		return "video/mp4"
-	case ".mov":
-		return "video/quicktime"
 	}
-	if strings.EqualFold(strings.TrimSpace(docType), "video") {
+	isVideo := strings.EqualFold(strings.TrimSpace(docType), "video")
+	ext := filepath.Ext(strings.TrimSpace(relPath))
+	// A content-sniffed extension (.ts, .mts, .mod) names a video container only
+	// when the document is video; a .ts that is TypeScript has no clip MIME.
+	if avutil.IsVideoContainerExt(ext) || (isVideo && avutil.IsContentSniffedVideoExt(ext)) {
+		if mime, ok := avutil.VideoContainerMIME(ext); ok {
+			return mime
+		}
+	}
+	if isVideo {
 		return "video/mp4"
 	}
 	return "audio/mpeg"
