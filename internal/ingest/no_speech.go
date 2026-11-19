@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -61,6 +63,15 @@ func heardNoSpeech(coverage *TranscriptCoverage) bool {
 	return coverage.Complete() && (coverage == nil || len(coverage.Refused) == 0)
 }
 
+// emptyFailedDecode reports whether a windowed decode left windows undecoded
+// with no window refused: when such a decode yields no text, the windows that
+// answered heard nothing and the others FAILED. That is a provider failure to
+// retry, not silence (SPEC §8.6.6: a provider failure is still an error); a
+// decode with refused windows stays under §8.6.13/§8.2.2.
+func emptyFailedDecode(coverage *TranscriptCoverage) bool {
+	return coverage != nil && !coverage.Complete() && len(coverage.Refused) == 0
+}
+
 // settleNoSpeechTrack finishes a track whose transcript is empty because the
 // provider heard no speech. Any transcript an earlier run derived for the track
 // (with another STT identity) is retired, exactly as a §8.6.13 refusal does, so
@@ -74,8 +85,9 @@ func (s *Service) settleNoSpeechTrack(ctx context.Context, doc model.Document, t
 	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
 		return false, false, "", fmt.Errorf("no-speech outcome for %s: %w", doc.RelPath, err)
 	}
-	if at, by, ok := decoded.fallbackStamp(); ok && !s.noSpeechFallbackThisDoc.ok {
-		s.noSpeechFallbackThisDoc = noSpeechFallback{ok: true, at: at, by: by}
+	if at, by, ok := decoded.fallbackStamp(); ok {
+		s.noSpeechFallbackThisDoc = dueFirstFallback(s.noSpeechFallbackThisDoc,
+			noSpeechFallback{ok: true, at: at, by: by}, s.defaultRouteIdentity())
 	}
 	return false, false, model.SkipReasonNoSpeech, nil
 }
@@ -88,11 +100,48 @@ type noSpeechFallback struct {
 	at, by string
 }
 
+// dueFirstFallback picks, of two fallback stamps of one document's silent
+// tracks, the one whose §8.2.4 retry becomes due first, so the single stamp a
+// no_speech row keeps never hides a track that is due. A stamp from another
+// default profile is due at once (DecideRouteFallback), then an unparseable
+// route_fallback_at, then the earliest one; on a tie the kept stamp stays.
+func dueFirstFallback(kept, next noSpeechFallback, producer string) noSpeechFallback {
+	if !kept.ok {
+		return next
+	}
+	if !next.ok {
+		return kept
+	}
+	keptStale := strings.TrimSpace(kept.by) != strings.TrimSpace(producer)
+	nextStale := strings.TrimSpace(next.by) != strings.TrimSpace(producer)
+	if keptStale != nextStale {
+		if nextStale {
+			return next
+		}
+		return kept
+	}
+	if fallbackDueAt(next.at).Before(fallbackDueAt(kept.at)) {
+		return next
+	}
+	return kept
+}
+
+// fallbackDueAt orders route_fallback_at stamps for dueFirstFallback: an
+// unparseable one is due at once, so it sorts first.
+func fallbackDueAt(at string) time.Time {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(at))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
 // settleUnrepresentedMedia records the final verdict on a media document that
 // produced no representation and that recognition did not rescue. It reports
 // whether the document was settled here (so the caller must not also credit it
-// as indexed, #426).
-func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, verdict mediaVerdict) bool {
+// as indexed, #426). A no_speech row the store refused is returned as an error,
+// so the document is not finalized as done without its durable record.
+func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, verdict mediaVerdict) (bool, error) {
 	switch verdict {
 	case mediaVerdictNoRepresentation:
 		// No sidecar, no derived transcript, no multimodal keyframe chunks AND no
@@ -102,13 +151,11 @@ func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Docume
 		s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
 		s.addErrors(1)
 		s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
-		return true
+		return true, nil
 	case mediaVerdictNoSpeech:
-		s.addSkipped(1)
-		s.persistNoSpeechSkip(ctx, doc)
-		return true
+		return true, s.persistNoSpeechSkip(ctx, doc)
 	default:
-		return false
+		return false, nil
 	}
 }
 
@@ -118,9 +165,27 @@ func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Docume
 // route-fallback result, so the incremental gates can tell when the identity
 // changed or the fallback retry is due (noSpeechSettled) without a store schema
 // change.
-func (s *Service) persistNoSpeechSkip(ctx context.Context, doc model.Document) {
+//
+// Unlike persistNonFatalDocSkip, a failed write is returned: the caller would
+// otherwise stamp the done marker on the row's earlier ok state, and an
+// unchanged file would then be skipped as indexed with nothing indexed. The skip
+// is counted and its file_skip raised only once the store accepted the row, and
+// never for an archive member, which the container accounts for (SPEC §3.2).
+func (s *Service) persistNoSpeechSkip(ctx context.Context, doc model.Document) error {
+	doc.Status = string(model.DocumentStatusSkipped)
+	doc.SkipReason = model.SkipReasonNoSpeech
 	doc.ErrorMessage = s.noSpeechDetail()
-	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonNoSpeech)
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("persist no_speech skip for %s: %w", doc.RelPath, err)
+	}
+	// Keep the live dedup map equal to the row this write produced (#691).
+	s.notifyDocumentContentHash(doc.RelPath, doc.ContentHash)
+	if s.archiveMemberThisDoc {
+		return nil
+	}
+	s.addSkipped(1)
+	s.notifyDocumentSkip(doc)
+	return nil
 }
 
 // noSpeechIdentityPrefix opens the detail persistNoSpeechSkip writes. The token
@@ -146,10 +211,24 @@ func (s *Service) noSpeechDetail() string {
 }
 
 // noSpeechIdentityToken is a short, stable token of the active transcript
-// derivation identity (§8.6.7). A hash, not the identity itself, because under
-// window scope the identity carries the whole route table and is unbounded.
+// derivation identity (§8.6.7) and of the media.stt.tracks selection (§8.6.12)
+// the verdict was judged over: a track the old selection did not decode may
+// hold the speech. A hash, not the identity itself, because under window scope
+// the identity carries the whole route table and is unbounded. The per-track
+// transcript cache keys are unchanged, so a new selection decodes only the
+// tracks it adds.
 func (s *Service) noSpeechIdentityToken() string {
-	return computeContentHash([]byte(s.activeTranscriptIdentity()))[:16]
+	return computeContentHash([]byte(s.activeTranscriptIdentity() + "\x00tracks=" + s.sttTrackSelectionKey()))[:16]
+}
+
+// sttTrackSelectionKey renders the media.stt.tracks selection in a canonical
+// form, so an unset selection and an explicit "first" are the same key.
+func (s *Service) sttTrackSelectionKey() string {
+	sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks)
+	if err != nil {
+		return strings.Join(s.cfg.MediaSTTTracks, ",")
+	}
+	return fmt.Sprintf("%d:%v", sel.Mode, sel.Indices)
 }
 
 // recordedNoSpeech reads the identity token and the fallback stamp back from a
@@ -216,6 +295,33 @@ func (s *Service) noSpeechStale(existing model.Document) bool {
 	}
 	s.getLogger().Printf("%s was recorded as having no speech under another STT identity, or from a route-fallback decode now due; transcribing it again (SPEC §8.6.6/§8.6.7/§8.2.4)", existing.RelPath)
 	return true
+}
+
+// archiveHasStaleNoSpeechMember reports whether an archive container holds a
+// no_speech member that must be re-derived (noSpeechStale). The members of an
+// unchanged container are otherwise retained without being processed, so a
+// member's STT identity change or due fallback retry would never be seen. With
+// no transcriber configured nothing is stale, and the store is not read.
+func (s *Service) archiveHasStaleNoSpeechMember(ctx context.Context, archiveRelPath string) bool {
+	if s.transcriber == nil {
+		return false
+	}
+	const pageSize = 500
+	for offset := 0; ; offset += pageSize {
+		docs, _, err := s.store.ListFiles(ctx, archiveRelPath+"/", "", pageSize, offset)
+		if err != nil {
+			s.getLogger().Printf("check archive members of %s for a stale no_speech outcome: %v", archiveRelPath, err)
+			return false
+		}
+		for _, d := range docs {
+			if s.noSpeechStale(d) {
+				return true
+			}
+		}
+		if len(docs) < pageSize {
+			return false
+		}
+	}
 }
 
 // carryNoSpeechSkip keeps an unchanged no_speech document skipped on the full

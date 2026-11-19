@@ -491,6 +491,12 @@ type Service struct {
 	// fallback retry. Re-scoped per document in generateRepresentations.
 	noSpeechFallbackThisDoc noSpeechFallback
 
+	// archiveMemberThisDoc is true while an archive member's representations are
+	// generated (processDocumentFromContent). Members are not credited to the
+	// run's counters and raise no file_skip (the container accounts for the
+	// archive, SPEC §3.2), so a no_speech member is persisted without either.
+	archiveMemberThisDoc bool
+
 	// recognizeIncompleteThisDoc records that the recognition backend ran out of
 	// its wall-clock budget on the document currently being processed (#894). The
 	// document is NOT failed — status="error" would hide every chunk it already has
@@ -684,7 +690,8 @@ var errBinaryOnRawTextPath = errors.New(
 
 // errNoVideoRepresentation marks a video document that produced zero
 // representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it, no
-// transcript was derived (speech-to-text is off/unconfigured — issue #495),
+// transcript was derived (speech-to-text is off or unconfigured — issue #495 — or
+// the media.stt.tracks selection matched no track of the file, §8.6.12),
 // multimodal keyframe embedding is off, and recognition produced nothing either
 // (recognize.provider=off, or the backend returned no annotations — #622). Such a
 // video is known but unsearchable, so it is surfaced as a durable non-fatal
@@ -693,7 +700,7 @@ var errBinaryOnRawTextPath = errors.New(
 // §8.6.6, #1182).
 var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, no transcript was derived " +
-		"(speech-to-text is off/unconfigured), multimodal keyframe embedding is off, " +
+		"(speech-to-text is off or unconfigured, or media.stt.tracks selected no track of the file), multimodal keyframe embedding is off, " +
 		"and no recognition annotations were produced — configure a speech-to-text provider, enable embed_multimodal, " +
 		"configure a recognition backend (recognize.provider), or provide a .vtt/.srt sidecar to make it searchable")
 
@@ -2447,6 +2454,9 @@ func (s *Service) fastPathIdentityStale(ctx context.Context, f DiscoveredFile, e
 	if existing.Status == string(model.DocumentStatusOK) {
 		return s.derivationIdentityStale(ctx, f.RelPath, existing.DocType)
 	}
+	if existing.DocType == "archive" {
+		return s.archiveHasStaleNoSpeechMember(ctx, f.RelPath)
+	}
 	return s.noSpeechStale(existing)
 }
 
@@ -2556,7 +2566,9 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if doc.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
 		return true
 	}
-	return false
+	// An unchanged archive container retains its members unprocessed, so a
+	// no_speech member that must be re-derived reopens the container (#1182).
+	return doc.DocType == "archive" && s.archiveHasStaleNoSpeechMember(ctx, doc.RelPath)
 }
 
 // refreshDocID re-reads the persisted document after an upsert to obtain the
@@ -3596,7 +3608,10 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// Archive members are not credited to the run's indexed counter here (the
 	// container document accounts for the archive), so the non-fatal-error signal
 	// is irrelevant on this path: a persisted soft-error already counted itself.
-	if _, err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
+	s.archiveMemberThisDoc = true
+	_, err = s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex)
+	s.archiveMemberThisDoc = false
+	if err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -4668,10 +4683,14 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	// Only now is the verdict final. A settled document is durably status="error"
 	// or status="skipped" and already counted; signal the caller not to also
 	// credit it as indexed (issue #426).
-	if !recognized && s.settleUnrepresentedMedia(ctx, doc, secretPatterns, verdict) {
-		return true, nil
+	if recognized {
+		return transcriptSoftFailed, nil
 	}
-	return transcriptSoftFailed, nil
+	settled, err := s.settleUnrepresentedMedia(ctx, doc, secretPatterns, verdict)
+	if err != nil {
+		return transcriptSoftFailed, err
+	}
+	return settled || transcriptSoftFailed, nil
 }
 
 // degradeIncompleteRecognition settles a document whose recognition FAILED (it ran
@@ -6207,12 +6226,22 @@ func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document,
 	if err != nil {
 		return false, false, "", err
 	}
+	if skipReason != "" || gateRejected {
+		return false, gateRejected, skipReason, nil
+	}
 	// SPEC §8.6.6 (#1182): nothing was refused and the decode covered the whole
 	// item, so the empty transcript is the provider's answer: no speech.
-	if skipReason == "" && !gateRejected && heardNoSpeech(coverage) {
+	if heardNoSpeech(coverage) {
 		return s.settleNoSpeechTrack(ctx, doc, tc, cachedTranscript{coverage: coverage, route: route})
 	}
-	return false, gateRejected, skipReason, nil
+	// Nothing was refused, but windows FAILED and the ones that answered heard
+	// nothing: that is a provider failure, not silence, and not a transcript.
+	// It stays retryable (the decode was not cached, readOrComputeTranscriptOpts).
+	if emptyFailedDecode(coverage) {
+		return false, false, "", fmt.Errorf("%w: %s: the windowed decode heard no speech in the %d of %d windows that answered and the others failed",
+			ErrTranscriptProviderFailure, doc.RelPath, coverage.WindowsDecoded, coverage.WindowsAttempted)
+	}
+	return false, false, "", nil
 }
 
 func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
@@ -7184,6 +7213,11 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 	}
 	s.stampFreshRouteFallback(coverage, route)
 	out := cachedTranscript{text: normalizeTranscriptNewlines(transcript), words: words, coverage: coverage, route: route}
+	// An empty decode whose other windows failed is not an answer to keep: it is
+	// not cached, so the next run sends the audio to the provider again (#1182).
+	if strings.TrimSpace(out.text) == "" && emptyFailedDecode(coverage) {
+		return out.unpack()
+	}
 	if err := s.publishTranscriptCache(paths, out); err != nil {
 		return "", nil, nil, nil, err
 	}
