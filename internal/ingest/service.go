@@ -484,6 +484,19 @@ type Service struct {
 	// even when a document produces several (transcript + per-language translations).
 	quarantinedThisDoc bool
 
+	// noSpeechFallbackThisDoc is the §8.2.4 route-fallback stamp of the empty
+	// transcript a no_speech verdict on the current document came from, zero
+	// when that decode was not a fallback result (SPEC §8.6.6, #1182). It is
+	// recorded on the no_speech row so the incremental gates still reach the
+	// fallback retry. Re-scoped per document in generateRepresentations.
+	noSpeechFallbackThisDoc noSpeechFallback
+
+	// archiveMemberThisDoc is true while an archive member's representations are
+	// generated (processDocumentFromContent). Members are not credited to the
+	// run's counters and raise no file_skip (the container accounts for the
+	// archive, SPEC §3.2), so a no_speech member is persisted without either.
+	archiveMemberThisDoc bool
+
 	// recognizeIncompleteThisDoc records that the recognition backend ran out of
 	// its wall-clock budget on the document currently being processed (#894). The
 	// document is NOT failed — status="error" would hide every chunk it already has
@@ -677,14 +690,17 @@ var errBinaryOnRawTextPath = errors.New(
 
 // errNoVideoRepresentation marks a video document that produced zero
 // representations: no subtitle sidecar (.vtt/.srt/.ttml) was found next to it, no
-// transcript was derived (speech-to-text is off/unconfigured, or the video has no
-// audio track to transcribe — issue #495), multimodal keyframe embedding is off,
-// and recognition produced nothing either (recognize.provider=off, or the backend
-// returned no annotations — #622). Such a video is known but unsearchable, so it
-// is surfaced as a durable non-fatal diagnostic instead of a silent no-op (#398).
+// transcript was derived (speech-to-text is off or unconfigured — issue #495 — or
+// the media.stt.tracks selection matched no track of the file, §8.6.12),
+// multimodal keyframe embedding is off, and recognition produced nothing either
+// (recognize.provider=off, or the backend returned no annotations — #622). Such a
+// video is known but unsearchable, so it is surfaced as a durable non-fatal
+// diagnostic instead of a silent no-op (#398). A video whose STT heard no speech,
+// or that has no audio track, is not this error: it is a no_speech skip (SPEC
+// §8.6.6, #1182).
 var errNoVideoRepresentation = errors.New(
 	"video produced no representation: no subtitle sidecar found, no transcript was derived " +
-		"(speech-to-text is off/unconfigured or the video has no audio track), multimodal keyframe embedding is off, " +
+		"(speech-to-text is off or unconfigured, or media.stt.tracks selected no track of the file), multimodal keyframe embedding is off, " +
 		"and no recognition annotations were produced — configure a speech-to-text provider, enable embed_multimodal, " +
 		"configure a recognition backend (recognize.provider), or provide a .vtt/.srt sidecar to make it searchable")
 
@@ -2423,11 +2439,25 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	// derived. When the recorded derivation identity no longer matches, fall back
 	// to the full read/hash path so the stale representation is re-derived rather
 	// than silently skipped. Only meaningful for an existing ok document.
-	if existing.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) {
+	if s.fastPathIdentityStale(ctx, f, existing) {
 		return false, nil
 	}
 	s.skipUnchangedDocument(ctx, f, existing, seen)
 	return true, nil
+}
+
+// fastPathIdentityStale is the derivation-identity half of the cheap-signal fast
+// path: an ok document whose representations were derived with another
+// STT/OCR identity (§8.6.7), or a no_speech skip judged with another STT
+// identity (§8.6.6, #1182), must take the full read path to be re-derived.
+func (s *Service) fastPathIdentityStale(ctx context.Context, f DiscoveredFile, existing model.Document) bool {
+	if existing.Status == string(model.DocumentStatusOK) {
+		return s.derivationIdentityStale(ctx, f.RelPath, existing.DocType)
+	}
+	if existing.DocType == "archive" {
+		return s.archiveHasStaleNoSpeechMember(ctx, f.RelPath)
+	}
+	return s.noSpeechStale(existing)
 }
 
 // storedTypeStale reports whether a stored row's doc type no longer matches
@@ -2527,10 +2557,18 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if existingDoc.DocType != "" && existingDoc.DocType != doc.DocType {
 		return true
 	}
+	// SPEC §8.6.6 (#1182): an unchanged no_speech document whose STT identity
+	// still stands was carried as skipped (carryNoSpeechSkip). One still ok here
+	// was judged with another STT identity, or this is a forced reindex.
+	if isNoSpeechSkip(existingDoc) && doc.Status == string(model.DocumentStatusOK) {
+		return true
+	}
 	if doc.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
 		return true
 	}
-	return false
+	// An unchanged archive container retains its members unprocessed, so a
+	// no_speech member that must be re-derived reopens the container (#1182).
+	return doc.DocType == "archive" && s.archiveHasStaleNoSpeechMember(ctx, doc.RelPath)
 }
 
 // refreshDocID re-reads the persisted document after an upsert to obtain the
@@ -2619,6 +2657,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// before the gate and the upsert so an unchanged withheld document stays
 	// withheld instead of being written back as "ok".
 	carrySecretExclusion(&doc, existingDoc)
+	s.carryNoSpeechSkip(&doc, existingDoc, forceReindex)
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
@@ -2848,8 +2887,10 @@ func (s *Service) finalizeContentHashForStatus(ctx context.Context, doc *model.D
 	}
 	// #413 guard: a non-fatal per-representation failure (or archive-subtype
 	// failure) may have persisted a status other than the expected healthy one
-	// out-of-band; never resurrect it into a done state.
-	if current.Status != healthyStatus {
+	// out-of-band; never resurrect it into a done state. A no_speech skip
+	// (SPEC §8.6.6) is a done state of an ok document's pipeline, not a failure:
+	// its marker is stamped so an unchanged silent item takes the fast path.
+	if current.Status != healthyStatus && (healthyStatus != string(model.DocumentStatusOK) || !isNoSpeechSkip(current)) {
 		return nil
 	}
 	// Stamp the withheld done marker onto the re-read row so out-of-band writes
@@ -3541,6 +3582,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// withheld for a secret in its DERIVED text must not be written back as "ok"
 	// when the container is re-extracted with the member's bytes unchanged.
 	carrySecretExclusion(&doc, existingDoc)
+	s.carryNoSpeechSkip(&doc, existingDoc, forceReindex)
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
 
 	// Withhold the content_hash done marker until representations commit so an
@@ -3566,7 +3608,10 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	// Archive members are not credited to the run's indexed counter here (the
 	// container document accounts for the archive), so the non-fatal-error signal
 	// is irrelevant on this path: a persisted soft-error already counted itself.
-	if _, err := s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex); err != nil {
+	s.archiveMemberThisDoc = true
+	_, err = s.generateRepresentations(ctx, doc, content, secretPatterns, forceReindex)
+	s.archiveMemberThisDoc = false
+	if err != nil {
 		// Persist error status so the next incremental run retries this document
 		// and operators can identify it via status queries.  Silence the upsert
 		// error since the original rep error is the more actionable signal.
@@ -4486,6 +4531,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// members processed after it.
 	s.quarantinedThisDoc = false
 	s.recognizeIncompleteThisDoc = false
+	s.noSpeechFallbackThisDoc = noSpeechFallback{}
 	if s.repGen == nil {
 		return false, nil
 	}
@@ -4552,9 +4598,9 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// and `off` keep the transcript path unchanged.
 	skipTranscript := s.embedMultimodal == "replace" && mediaProduced
 
-	var noVideoRep bool
+	verdict := mediaVerdictNone
 	if !skipTranscript {
-		nonFatalErrored, noVideoRep, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
+		nonFatalErrored, verdict, err = s.generateTranscriptOrSidecar(ctx, doc, content, secretPatterns, forceReindex, mediaProduced)
 		if err != nil {
 			return nonFatalErrored, err
 		}
@@ -4568,7 +4614,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		return false, nil
 	}
 
-	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, noVideoRep, nonFatalErrored)
+	return s.recognizeAndFinalizeMedia(ctx, doc, secretPatterns, verdict, nonFatalErrored)
 }
 
 // recognizeAndFinalizeMedia runs recognition over a media document and finalizes
@@ -4582,9 +4628,11 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 // recognition is never recognized at all (#622). A recognition-backend failure is
 // a hard per-document error exactly like an STT failure.
 //
-// `noVideoRep` is the provisional verdict from generateTranscriptOrSidecar; it
-// only becomes a durable status="error" diagnostic when recognition came up empty
-// too. Split out of generateRepresentations to keep that function within the
+// `verdict` is the provisional verdict from generateTranscriptOrSidecar; it only
+// becomes durable when recognition came up empty too: a status="error"
+// diagnostic for a video with no representation source at all, or a
+// status="skipped" no_speech record for media whose STT heard no speech
+// (SPEC §8.6.6). Split out of generateRepresentations to keep that function within the
 // cyclomatic-complexity budget.
 //
 // `transcriptSoftFailed` carries that function's own non-fatal outcome through
@@ -4595,7 +4643,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 // runs. Its already-persisted status="error" and error count are preserved either
 // way, so the transcript is retried on the next incremental run even when
 // recognition indexed annotations in the meantime.
-func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep, transcriptSoftFailed bool) (bool, error) {
+func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, verdict mediaVerdict, transcriptSoftFailed bool) (bool, error) {
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
 		// The daemon itself is going away (shutdown, an outer deadline): that says
@@ -4632,19 +4680,17 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	if s.secretExcludedThisDoc {
 		return false, nil
 	}
-	if noVideoRep && !recognized {
-		// Only now is the verdict final: no sidecar, no derived transcript, no
-		// multimodal keyframe chunks AND no recognition — the video is known but
-		// unsearchable, so record it as a durable status="error" diagnostic
-		// (#398/#495) while letting the run continue.
-		s.getLogger().Printf("no representation produced for video %s: %v", doc.RelPath, errNoVideoRepresentation)
-		s.addErrors(1)
-		s.persistNonFatalDocError(ctx, doc, errNoVideoRepresentation, secretPatterns)
-		// The document is now durably status="error" and counted; signal the caller
-		// not to also credit it as indexed (issue #426).
-		return true, nil
+	// Only now is the verdict final. A settled document is durably status="error"
+	// or status="skipped" and already counted; signal the caller not to also
+	// credit it as indexed (issue #426).
+	if recognized {
+		return transcriptSoftFailed, nil
 	}
-	return transcriptSoftFailed, nil
+	settled, err := s.settleUnrepresentedMedia(ctx, doc, secretPatterns, verdict)
+	if err != nil {
+		return transcriptSoftFailed, err
+	}
+	return settled || transcriptSoftFailed, nil
 }
 
 // degradeIncompleteRecognition settles a document whose recognition FAILED (it ran
@@ -4834,17 +4880,19 @@ func (s *Service) resolveSidecarTranscript(ctx context.Context, doc model.Docume
 // any stale sidecar transcripts and re-running STT. Sidecar ingestion bypasses
 // the quality gate (authored, not model-derived; §8.6.6/§8.6.7).
 //
-// It returns (nonFatalErrored, noVideoRepresentation, err). nonFatalErrored is
-// true when a soft-failure path persisted the document as status="error" and
-// counted it as an error itself, so the caller must not also credit it as
-// indexed (issue #426). noVideoRepresentation is true when this video yielded
-// no transcript, no sidecar and no media chunks — a PROVISIONAL verdict the
-// caller finalizes only after recognition has had its chance, since recognition
-// is an independent representation source (#622).
-func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, bool, error) {
+// It returns (nonFatalErrored, verdict, err). nonFatalErrored is true when a
+// soft-failure path persisted the document as status="error" and counted it as
+// an error itself, so the caller must not also credit it as indexed (issue
+// #426). verdict is mediaVerdictNoRepresentation when this video yielded no
+// transcript (STT off or unconfigured), no sidecar and no media chunks, and
+// mediaVerdictNoSpeech when STT answered and heard no speech (or the media has
+// no audio track) and there are no media chunks (SPEC §8.6.6). Both are
+// PROVISIONAL verdicts the caller finalizes only after recognition has had its
+// chance, since recognition is an independent representation source (#622).
+func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, mediaVerdict, error) {
 	done, err := s.resolveSidecarTranscript(ctx, doc, forceReindex)
 	if err != nil || done {
-		return false, false, err
+		return false, mediaVerdictNone, err
 	}
 
 	// Route audio AND video (issue #495) through the same STT transcript path when
@@ -4859,14 +4907,14 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		// emit degraded output. Handled in a helper so this function stays under the
 		// cyclomatic-complexity budget; see skipUncoveredLanguageTranscript.
 		if skip, suppressCredit := s.skipUncoveredLanguageTranscript(ctx, doc, mediaProduced); skip {
-			return suppressCredit, false, nil
+			return suppressCredit, mediaVerdictNone, nil
 		}
 		// STT needs the bytes: load them if the sampled identity left them unread
 		// (§7.6). A sidecar returned above, so this read never runs for a
 		// subtitled file.
 		content, err = s.ensureMediaContent(ctx, doc, content)
 		if err != nil {
-			return false, false, err
+			return false, mediaVerdictNone, err
 		}
 		produced, skipReason, err := s.generateTranscriptRepresentation(ctx, doc, content)
 		if err != nil {
@@ -4892,15 +4940,21 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 					// above; signal the caller not to also credit it as indexed
 					// (issue #426). A doc that DID produce media chunks stays "ok"
 					// and searchable, so it is still credited (returns false).
-					return true, false, nil
+					return true, mediaVerdictNone, nil
 				}
-				return false, false, nil
+				return false, mediaVerdictNone, nil
 			}
-			return false, false, err
+			return false, mediaVerdictNone, err
 		}
 		if produced {
 			s.addRepresentations(1)
-			return false, false, nil
+			return false, mediaVerdictNone, nil
+		}
+		// SPEC §8.6.6 (#1182): STT answered and heard no speech, or the media has
+		// no audio track. Silence is an outcome, not a failure; the caller records
+		// it as skip_reason=no_speech once recognition has had its chance.
+		if skipReason == model.SkipReasonNoSpeech {
+			return false, noSpeechVerdict(mediaProduced), nil
 		}
 		// §8.6.13 skip action (#961): the transcript was refused because its windowed
 		// decode covered too little of the recording. Record the durable
@@ -4909,11 +4963,12 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		// floor does. Handled in a helper to keep this function inside the
 		// cyclomatic-complexity budget.
 		if suppressCredit, skipped := s.recordPartialTranscriptSkip(ctx, doc, skipReason, mediaProduced); skipped {
-			return suppressCredit, false, nil
+			return suppressCredit, mediaVerdictNone, nil
 		}
-		// produced == false: the transcript was empty (silence) or the video has no
-		// audio track to transcribe. Fall through so an otherwise unsearchable video
-		// is still surfaced by the no-representation check below (#398/#495).
+		// produced == false with no skip: an empty transcript the §8.6.6 no-speech
+		// rule does not cover (a partial windowed decode, a quality-gate refusal,
+		// cue cleaning that left nothing). Fall through so an otherwise unsearchable
+		// video is still surfaced by the no-representation check below (#398/#495).
 	}
 
 	// #398/#495: a video with no subtitle sidecar (handled above), no derived
@@ -4923,9 +4978,9 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 	// condition upward and let the caller record the durable status="error"
 	// diagnostic if recognition comes up empty too.
 	if doc.DocType == "video" && !mediaProduced {
-		return false, true, nil
+		return false, mediaVerdictNoRepresentation, nil
 	}
-	return false, false, nil
+	return false, mediaVerdictNone, nil
 }
 
 // retireStaleSidecarTranscripts tombstones a media document's existing
@@ -5853,8 +5908,12 @@ func (s *Service) settleAllTracksFailed(doc model.Document, failed, partialSkips
 // its tracks were refused for different reasons (§8.2.2 terminal status): the
 // first reason seen, unless a later track was refused for its language, which
 // is the operator's own decision and recurs on every run.
+//
+// no_speech ranks below every refusal: a silent track next to a refused one is
+// still a refusal, and the document is no_speech only when every track was
+// silent (SPEC §8.6.6).
 func preferLanguageSkip(current, next string) string {
-	if current == "" || next == model.SkipReasonLanguageUncovered {
+	if current == "" || current == model.SkipReasonNoSpeech || next == model.SkipReasonLanguageUncovered {
 		return next
 	}
 	return current
@@ -5908,7 +5967,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return s.settleEmptyTranscript(ctx, doc, tc, coverage)
+		return s.settleEmptyTranscript(ctx, doc, tc, coverage, route)
 	}
 
 	// #681: a credential spoken on a call, or read out in a screen share, is audio
@@ -6162,12 +6221,27 @@ func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, 
 // four-value return, so the caller carries one line rather than a nested error
 // branch. A refusal whose retirement failed is an error, not a skip: see
 // refusePartialTranscript.
-func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, string, error) {
+func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage, route *itemRoute) (bool, bool, string, error) {
 	skipReason, gateRejected, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
 	if err != nil {
 		return false, false, "", err
 	}
-	return false, gateRejected, skipReason, nil
+	if skipReason != "" || gateRejected {
+		return false, gateRejected, skipReason, nil
+	}
+	// SPEC §8.6.6 (#1182): nothing was refused and the decode covered the whole
+	// item, so the empty transcript is the provider's answer: no speech.
+	if heardNoSpeech(coverage) {
+		return s.settleNoSpeechTrack(ctx, doc, tc, cachedTranscript{coverage: coverage, route: route})
+	}
+	// Nothing was refused, but windows FAILED and the ones that answered heard
+	// nothing: that is a provider failure, not silence, and not a transcript.
+	// It stays retryable (the decode was not cached, readOrComputeTranscriptOpts).
+	if emptyFailedDecode(coverage) {
+		return false, false, "", fmt.Errorf("%w: %s: the windowed decode heard no speech in the %d of %d windows that answered and the others failed",
+			ErrTranscriptProviderFailure, doc.RelPath, coverage.WindowsDecoded, coverage.WindowsAttempted)
+	}
+	return false, false, "", nil
 }
 
 func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
@@ -7139,6 +7213,11 @@ func (s *Service) readOrComputeTranscriptOpts(ctx context.Context, doc model.Doc
 	}
 	s.stampFreshRouteFallback(coverage, route)
 	out := cachedTranscript{text: normalizeTranscriptNewlines(transcript), words: words, coverage: coverage, route: route}
+	// An empty decode whose other windows failed is not an answer to keep: it is
+	// not cached, so the next run sends the audio to the provider again (#1182).
+	if strings.TrimSpace(out.text) == "" && emptyFailedDecode(coverage) {
+		return out.unpack()
+	}
 	if err := s.publishTranscriptCache(paths, out); err != nil {
 		return "", nil, nil, nil, err
 	}

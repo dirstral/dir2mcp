@@ -270,6 +270,32 @@ func TestElevenLabsTranscribe_FallbacksToTextField(t *testing.T) {
 	}
 }
 
+// TestElevenLabsTranscribe_EmptyTextIsNoSpeech is the #1182 guard: a 200 whose
+// body carries no text is the provider answering that it heard no speech.
+// Silence is an outcome, not a failure (SPEC §8.6.6): an empty transcript with
+// no error.
+func TestElevenLabsTranscribe_EmptyTextIsNoSpeech(t *testing.T) {
+	rt := elevenLabsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"text":"","segments":[{"text":"  ","start":0}]}`)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+
+	client := elevenlabs.NewClient("test-api-key", "voice-default")
+	client.HTTPClient = &http.Client{Transport: rt}
+
+	text, err := client.Transcribe(context.Background(), "audio/silence.mp3", []byte("fake-audio"))
+	if err != nil {
+		t.Fatalf("Transcribe: err = %v, want nil (an empty answer is no speech, not an error)", err)
+	}
+	if text != "" {
+		t.Fatalf("Transcribe = %q, want empty", text)
+	}
+}
+
 func TestElevenLabsTranscribe_MapsAuthError(t *testing.T) {
 	rt := elevenLabsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{

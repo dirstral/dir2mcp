@@ -103,7 +103,9 @@ func TestVideoTranscript_RoutedThroughSTT(t *testing.T) {
 // degradation path (#495): a video with no audio stream has nothing to transcribe,
 // so STT is not invoked and the run does not fail. With no transcript, no subtitle
 // sidecar, and multimodal keyframe embedding off, the soundless video is still
-// surfaced as a durable status="error" so it is not a silent no-op (#398).
+// surfaced durably so it is not a silent no-op (#398): since spec 0.98.0 (SPEC
+// §8.6.6, #1182) silence is an outcome, so it is status="skipped" with
+// skip_reason="no_speech", not an error retried on every run.
 func TestVideoTranscript_NoAudioTrack_DegradesGracefully(t *testing.T) {
 	t.Parallel()
 	root := testutil.TempDir(t)
@@ -131,10 +133,7 @@ func TestVideoTranscript_NoAudioTrack_DegradesGracefully(t *testing.T) {
 	}
 
 	doc := documentByPath(t, st, "silent.mp4")
-	if doc.Status != "error" {
-		t.Errorf("soundless video status = %q, want error (an unsearchable video must be durably visible, #398)", doc.Status)
-	}
-	if !strings.Contains(strings.ToLower(doc.ErrorMessage), "no representation") {
-		t.Errorf("error_message = %q, want it to explain the video produced no representation", doc.ErrorMessage)
+	if doc.Status != "skipped" || doc.SkipReason != "no_speech" {
+		t.Errorf("soundless video status = %q skip_reason = %q, want skipped/no_speech (SPEC §8.6.6: silence is an outcome, durably visible, #398)", doc.Status, doc.SkipReason)
 	}
 }
