@@ -16,6 +16,56 @@
 | `dir2mcp_list_files` | List indexed files with metadata |
 | `dir2mcp_stats` | Corpus statistics, including the extraction engine actually in use and the `evidence` thresholds in effect with their null baseline (see [configuration](configuration.md#relevance-floor-and-insufficient-evidence-abstention)) |
 
+### `dir2mcp_open_file` on media with no text
+
+`dir2mcp_open_file` returns text only. Two cases have no text to return, and
+both answer the non-retryable `MEDIA_NO_TEXT`:
+
+- a media document that is embedded directly and has no text representation
+  (`model.embed.multimodal: replace`);
+- a recording that the scan skipped as `no_speech` (`status=skipped`,
+  `skip_reason=no_speech`): the speech-to-text decode found no speech in the
+  selected audio tracks, so there is no transcript. This holds for audio and
+  video, and for each span kind (no span, lines, page, time). The tool does
+  not return the retryable `OCR_NOT_READY` here, and it does not return empty
+  content.
+
+The same holds for a document that stays `status=ok` through another
+representation (recognition, for example) after every selected audio track was
+a no-speech result. Its transcript is absent, not pending. A call that would
+return the transcript returns `MEDIA_NO_TEXT`: the default call or a line span
+on an audio or video file, and a time span that no other representation answers. A call
+that another representation answers is answered from it, for example
+recognition text for a time span. A document in which one selected track has a
+transcript and another track holds no speech is not this case: the tool
+returns its transcript.
+
+### `dir2mcp_transcribe` and `dir2mcp_transcribe_and_ask` on a recording with no speech
+
+A recording that holds no speech is a success for both tools, not an error.
+`dir2mcp_transcribe` returns `indexed: false`, `transcribed: false` and no
+segments.
+
+- `retranscribe: false` (the default): when a no-speech result is stored for
+  the recording under the current speech-to-text identity (provider, model,
+  language settings), the tool sends no decode request.
+- `retranscribe: true` is an explicit request, so the tool always decodes the
+  recording again. When the new decode again finds no speech, the result is
+  the same. An earlier transcript of the recording is then retired with its
+  chunks, its translations and its summaries, and the document is in the
+  state that a scan writes: `status=skipped` with `skip_reason=no_speech`
+  when it has no other searchable representation.
+- The tools decode the first audio track only. When `media.stt.tracks`
+  selects more tracks, a first track with no speech does not settle the
+  document as `no_speech`. The tool withholds the done marker, so the next
+  scan decodes every selected track and decides.
+- `transcribed_now` is `true` only when the call sent a decode request.
+- `dir2mcp_transcribe_and_ask` has no `retranscribe` argument. It behaves as
+  `retranscribe: false`.
+
+A client must not retry on `MEDIA_NO_TEXT`. `OCR_NOT_READY` is the retryable
+answer: the text does not exist yet, and a later call can succeed.
+
 ### What a citation carries
 
 A `time` span (recognition and media content) carries more than its bounds, and a

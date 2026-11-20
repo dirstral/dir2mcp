@@ -574,8 +574,64 @@ type geminiPart struct {
 	InlineData *geminiInlineData `json:"inlineData,omitempty"`
 }
 
+// UnmarshalJSON decodes a response part. A text field that is present must be
+// a JSON string: encoding/json would leave the Go string empty for a null and
+// report no error, and an empty text is a no-speech result (SPEC §8.2). A
+// present text of another type (null, a number, an object) makes the response
+// malformed. An absent text field and an empty string decode as before.
+func (p *geminiPart) UnmarshalJSON(data []byte) error {
+	// encoding/json calls this method for a JSON null too. A null part is not
+	// an object, so it holds no text field at all: malformed. An empty object
+	// ({}) is a part with no text and stays valid.
+	if isJSONNull(data) {
+		return errors.New("gemini response part: the part is null")
+	}
+	var aux struct {
+		Text       json.RawMessage   `json:"text"`
+		InlineData *geminiInlineData `json:"inlineData"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	p.Text, p.InlineData = "", aux.InlineData
+	if len(aux.Text) == 0 {
+		return nil
+	}
+	if aux.Text[0] != '"' {
+		return errors.New("gemini response part: text is present and is not a string")
+	}
+	return json.Unmarshal(aux.Text, &p.Text)
+}
+
 type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
+}
+
+// UnmarshalJSON decodes a response content object. An absent parts field is
+// valid: Gemini omits it when the model generated nothing (a no-speech result
+// for transcription). A parts field that is present must be an array, so an
+// explicit null makes the response malformed, as a field of the wrong type
+// does in every other STT response (SPEC §8.2).
+func (c *geminiContent) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		Parts json.RawMessage `json:"parts"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	c.Parts = nil
+	if len(aux.Parts) == 0 {
+		return nil
+	}
+	if isJSONNull(aux.Parts) {
+		return errors.New("gemini response content: parts is null")
+	}
+	return json.Unmarshal(aux.Parts, &c.Parts)
+}
+
+// isJSONNull reports whether raw is the JSON literal null.
+func isJSONNull(raw []byte) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }
 
 type geminiPrebuiltVoice struct {
@@ -602,7 +658,9 @@ type geminiGenerateRequest struct {
 
 type geminiGenerateResponse struct {
 	Candidates []struct {
-		Content geminiContent `json:"content"`
+		// Content is nil when the candidate names no content object.
+		Content      *geminiContent `json:"content"`
+		FinishReason string         `json:"finishReason"`
 	} `json:"candidates"`
 }
 
@@ -661,16 +719,46 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "failed to decode transcription response", Retryable: false, StatusCode: resp.StatusCode, Cause: err}
 	}
-	text := strings.TrimSpace(firstCandidateText(parsed))
-	if text == "" {
-		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription response had no text", Retryable: false, StatusCode: resp.StatusCode}
+	// SPEC §8.2 (spec 0.99.0): the generated text is the text field of the normalized
+	// response. A response with no candidate has no text field, so it is
+	// malformed. A candidate that the model did not finish (a safety block, a
+	// token limit) is not a decode result either.
+	if len(parsed.Candidates) == 0 {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "malformed transcription response: no candidate", Retryable: false, StatusCode: resp.StatusCode}
 	}
+	// A candidate with no content object holds no generated text at all, so
+	// the response has no text field: malformed, never a no-speech result.
+	// Gemini answers audio with nothing said with a content object that has
+	// no parts, or with an empty text part.
+	if parsed.Candidates[0].Content == nil {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "malformed transcription response: the candidate has no content", Retryable: false, StatusCode: resp.StatusCode}
+	}
+	// The text is trimmed first, so a candidate with only whitespace that did
+	// not finish is an error too, as a candidate with no text is.
+	text := strings.TrimSpace(firstCandidateText(parsed))
+	if text == "" && !generationFinished(parsed.Candidates[0].FinishReason) {
+		return "", &model.ProviderError{Code: "GEMINI_FAILED", Message: "transcription generation did not finish: " + parsed.Candidates[0].FinishReason, Retryable: false, StatusCode: resp.StatusCode}
+	}
+	// Empty or whitespace-only generated text is a no-speech result: the
+	// decode succeeded and found nothing said. It is not a provider error.
 	return text, nil
+}
+
+// generationFinished reports whether a candidate ended normally: its finish
+// reason is STOP. An absent finish reason means the generation has not stopped
+// (Gemini v1beta), so empty text with no finish reason is not a no-speech
+// result (SPEC §8.2, spec 0.99.0: a finishReason other than STOP stays a
+// provider error).
+func generationFinished(reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), "STOP")
 }
 
 // firstCandidateText concatenates the text parts of the first candidate.
 func firstCandidateText(r geminiGenerateResponse) string {
 	if len(r.Candidates) == 0 {
+		return ""
+	}
+	if r.Candidates[0].Content == nil {
 		return ""
 	}
 	var b strings.Builder
@@ -747,6 +835,9 @@ func (c *Client) Synthesize(ctx context.Context, text string) ([]byte, error) {
 func firstAudioPart(r geminiGenerateResponse) ([]byte, int, error) {
 	if len(r.Candidates) == 0 {
 		return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no candidates", Retryable: false}
+	}
+	if r.Candidates[0].Content == nil {
+		return nil, 0, &model.ProviderError{Code: "GEMINI_FAILED", Message: "tts response had no audio content", Retryable: false}
 	}
 	for _, p := range r.Candidates[0].Content.Parts {
 		if p.InlineData == nil || p.InlineData.Data == "" {

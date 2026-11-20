@@ -1,6 +1,9 @@
 package model
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrNotImplemented marks skeleton methods that still need subsystem work.
@@ -50,6 +53,15 @@ var (
 	// retrying will not produce text — so open_file MUST surface it as the
 	// non-retryable MEDIA_NO_TEXT and never fall back to raw bytes.
 	ErrMediaNoText = errors.New("media has no text representation")
+
+	// ErrMediaNoSpeech is the ErrMediaNoText case of a recording that is
+	// status=skipped with skip_reason=no_speech (SPEC §8.6.13, §15.4): the
+	// decode found no speech, so the document has no transcript and never will
+	// while its content and the STT derivation identity are unchanged.
+	// open_file surfaces it as the non-retryable MEDIA_NO_TEXT, never as the
+	// retryable OCR_NOT_READY and never as empty content. It wraps
+	// ErrMediaNoText, so errors.Is(err, ErrMediaNoText) holds for it.
+	ErrMediaNoSpeech = fmt.Errorf("%w: the recording holds no speech", ErrMediaNoText)
 )
 
 type ProviderError struct {

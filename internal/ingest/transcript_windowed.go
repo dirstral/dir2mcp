@@ -59,6 +59,11 @@ func MergeTranscriptWindows(windows []TranscriptWindow, stepMS int) (string, []m
 	if stepMS <= 0 {
 		stepMS = 1
 	}
+	// A window whose decode found no speech (spec 0.99.0) is decoded audio for
+	// coverage, but it gives the merge no text. It must not end the preceding
+	// window's core: that would drop the preceding window's overlap tail with
+	// nothing to replace it. So the merge sees only windows with text.
+	windows = windowsWithText(windows)
 	// Collect whole SEGMENTS (a [mm:ss] line plus the words that fall in it) rather
 	// than filtering lines and words separately: keeping a segment's text and word
 	// timings together lets the overlap de-duplication drop both as a unit.
@@ -482,8 +487,11 @@ func (s *Service) decodeSingleWindowScoped(ctx context.Context, relPath string, 
 	}
 	stats.decoded = 1
 	stats.ranges = wd.covered
+	if wd.noSpeech != nil {
+		stats.noSpeech = []CoverageRange{*wd.noSpeech}
+	}
 	text, words := MergeTranscriptWindows(wd.decoded, totalMS)
-	return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), totalMS), nil
+	return text, words, withNoSpeech(withWindowMS(s.liveScopedCoverage(stats, totalMS), totalMS), stats.noSpeech, totalMS), nil
 }
 
 // withWindowMS records the decode window on a coverage record, for the
@@ -545,11 +553,20 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	// transcript; §8.6.13 scopes the recorded coverage to the authoritative source
 	// transcript, so the coverage is dropped here and the decode is otherwise
 	// unchanged (issue #961).
-	text, words, _, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
+	text, words, coverage, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		s.getLogger().Printf("windowed translate %s: the audio cannot be sliced (%v); decoding in one pass", doc.RelPath, err)
 		return s.translateStructured(ctx, doc, content)
+	}
+	if err == nil {
+		// The coverage record is not kept for a translation, but its failed
+		// window count decides the outcome here: a failed window next to
+		// windows with no speech is a failure, as in the source decode
+		// (§8.6.13). Without this the caller would cache the empty text, and
+		// no later run would decode the recording again. An empty text with
+		// no failed window stays a successful empty translation.
+		err = failedBesideNoSpeech(doc.RelPath, text, coverage)
 	}
 	return text, words, err
 }
@@ -606,14 +623,24 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	// it does and does not cover.
 	if st != nil {
 		text, words := MergeTranscriptWindows(windows, stepMS)
-		return text, words, withWindowMS(s.liveScopedCoverage(stats, totalMS), windowMS), nil
+		return text, words, withNoSpeech(withWindowMS(s.liveScopedCoverage(stats, totalMS), windowMS), stats.noSpeech, totalMS), nil
 	}
 	var rd redecodeOutcome
 	if unhinted && label == "transcription" {
 		windows, rd = s.redecodeLowConfidenceWindows(ctx, relPath, tmpPath, stt, plan, windows, stats.reports)
 	}
 	text, words := MergeTranscriptWindows(windows, stepMS)
-	coverage := withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS)
+	coverage := withNoSpeech(withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS), stats.noSpeech, totalMS)
+	if coverage != nil {
+		coverage.WindowsFailed = stats.failed
+	} else if stats.failed > 0 && !hasTranscriptText(text) {
+		// A decode of one scheduled window records no coverage, so the failed
+		// count would be lost here and the empty text would read as a
+		// no-speech recording. A window that the payload cap split and that
+		// lost a piece is a failed window (§8.6.13): the lost piece can hold
+		// speech, so the recording is an error and is retried.
+		return "", nil, nil, fmt.Errorf("windowed %s %s: a piece of the recording failed and the other pieces hold no speech; a failed piece can hold speech, so the recording is retried (SPEC §8.6.13)", label, relPath)
+	}
 	rd.stamp(coverage)
 	return text, words, coverage, nil
 }
@@ -637,7 +664,12 @@ type windowSchedule struct {
 type windowStats struct {
 	attempted int
 	decoded   int
-	ranges    []CoverageRange
+	// failed counts the windows that failed: a cut failure, a window with no
+	// decoded piece and no refusal (a transport or provider failure), a
+	// decoded or refused window that lost a piece (a decoded window of these
+	// also counts in decoded).
+	failed int
+	ranges []CoverageRange
 	// languages and refused are the §8.2.2 per-window records, populated only
 	// under media.stt.language_scope: window (a nil state leaves them empty).
 	languages []model.CoverageLanguage
@@ -648,6 +680,9 @@ type windowStats struct {
 	// reports are the decoder's language reports of the decoded windows under
 	// item scope, in schedule order, for the §8.6.13 low-confidence rule.
 	reports []windowReport
+	// noSpeech are the cores of the windows whose decode was a no-speech result
+	// (spec 0.99.0), for the §8.6.6 low-density duration.
+	noSpeech []CoverageRange
 }
 
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
@@ -685,6 +720,7 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 			if firstCutErr == nil {
 				firstCutErr = cutErr
 			}
+			stats.failed++
 			continue
 		}
 		stats.languages = append(stats.languages, wd.languages...)
@@ -696,7 +732,20 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 			firstDecodeErr = wd.err
 		}
 		if len(wd.decoded) == 0 {
+			// A window with no decoded piece failed, unless it was refused. A
+			// refused window that lost a piece failed too: the cap split it,
+			// one piece was refused and another has no result, and that piece
+			// can hold speech.
+			if len(wd.refused) == 0 || wd.piecesFailed {
+				stats.failed++
+			}
 			continue
+		}
+		if wd.noSpeech != nil {
+			stats.noSpeech = append(stats.noSpeech, *wd.noSpeech)
+		}
+		if wd.piecesFailed {
+			stats.failed++
 		}
 		stats.decoded++
 		stats.ranges = append(stats.ranges, wd.covered...)
@@ -753,17 +802,25 @@ func (s *Service) decodeScheduledWindow(ctx context.Context, relPath, tmpPath st
 		s.getLogger().Printf("windowed %s: cannot cut window [%d,%d]ms of %s: %v", plan.label, start, end, relPath, err)
 		return windowDecode{}, &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", plan.label, start, end, err)}
 	}
+	core := CoverageRange{StartMS: start, EndMS: end}
+	if i+1 < len(starts) && starts[i+1] < core.EndMS {
+		core.EndMS = starts[i+1]
+	}
 	if st != nil {
-		core := CoverageRange{StartMS: start, EndMS: end}
-		if i+1 < len(starts) && starts[i+1] < core.EndMS {
-			core.EndMS = starts[i+1]
-		}
 		return s.decodeWindowScoped(ctx, relPath, pieces, plan, core, st), nil
 	}
 	decoded, covered, results, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
-	lang, conf := decoderReport(results)
-	return windowDecode{decoded: decoded, covered: covered, err: decodeErr,
-		report: windowReport{span: CoverageRange{StartMS: start, EndMS: end}, lang: lang, conf: conf}}, nil
+	wd := windowDecode{decoded: decoded, covered: covered, err: decodeErr,
+		report:       windowReport{span: CoverageRange{StartMS: start, EndMS: end}},
+		piecesFailed: len(results) > 0 && len(results) < len(pieces)}
+	if decodedWithoutSpeech(pieces, results, decodeErr) {
+		// Spec 0.99.0: a no-speech window reports no language, so the
+		// low-confidence re-decode rule does not read it.
+		wd.noSpeech = &core
+		return wd, nil
+	}
+	wd.report.lang, wd.report.conf = decoderReport(results)
+	return wd, nil
 }
 
 // decodeWindowPieces decodes every piece of one scheduled window and returns the

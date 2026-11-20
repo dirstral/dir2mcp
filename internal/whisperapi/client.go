@@ -567,6 +567,29 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	// skip_reason=no_speech, rather than as an error retried on every run. A
 	// failed request, a non-200 status and an undecodable body stay errors above.
 	text := strings.TrimSpace(parsed.Text)
+	if text == "" {
+		// The empty answer must be a well-formed response (SPEC §8.2, spec
+		// 0.99.0). A body that names neither a text nor a segments field, or
+		// has one of the wrong type, is malformed. Timed words with no text
+		// (absent, empty or only whitespace) is a contradiction, not silence:
+		// the decoder reports speech that the text does not hold. Such a
+		// response stays an error, so the audio is decoded again and is never
+		// recorded as no speech.
+		if parsed.hasWordEntries() {
+			return model.TranscriptResult{}, &model.ProviderError{
+				Code:      "WHISPER_FAILED",
+				Message:   "malformed transcription response: timed words but no text",
+				Retryable: false,
+			}
+		}
+		if !providerhttp.WellFormedEmptySTT(raw, []string{"text"}, "segments") {
+			return model.TranscriptResult{}, &model.ProviderError{
+				Code:      "WHISPER_FAILED",
+				Message:   "malformed transcription response: no text or segments field, or a field of the wrong type",
+				Retryable: false,
+			}
+		}
+	}
 	// Flat-text fallback (no segments): words have no segment frame to anchor
 	// against, so emit text only.
 	return model.TranscriptResult{Text: text, Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence()}, nil
@@ -681,6 +704,23 @@ func (r transcribeResponse) timedWords() []model.TimedWord {
 		return nil
 	}
 	return out
+}
+
+// hasWordEntries reports whether the response carries timed words: a
+// top-level words array or a words array inside a segment, with at least one
+// entry (SPEC §8.2). It reads both arrays and counts every entry, also a blank
+// one: timedWords prefers the segment words and drops blank words, so it
+// cannot answer this question.
+func (r transcribeResponse) hasWordEntries() bool {
+	if len(r.Words) > 0 {
+		return true
+	}
+	for _, seg := range r.Segments {
+		if len(seg.Words) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // secondsToMS converts fractional seconds to whole milliseconds, clamping

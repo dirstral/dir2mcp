@@ -2912,6 +2912,10 @@ func mapOpenFileError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
 		return &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+	case errors.Is(err, model.ErrMediaNoSpeech):
+		// Checked before ErrMediaNoText, which it wraps: the same code, with a
+		// message that names the real cause.
+		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "the recording holds no speech in its selected audio tracks, so it has no transcript; no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrMediaNoText):
 		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "media embedded directly with no text representation (multimodal replace mode); no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrOCRNotReady):
@@ -3247,24 +3251,6 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	if err != nil {
 		return "", false, false, mapReadDocumentError(err)
 	}
-	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+ingest.TranscriptLangSuffix(language)+".txt")
-	// Determine whether we already have a usable cache file. We initially
-	// consider the cache "valid" if it exists on disk. When a retranscribe is
-	// requested we treat the cached file as stale regardless of whether it
-	// existed, so we force cacheValid=false and remove the file.
-	cacheValid := true
-	if _, statErr := os.Stat(cachePath); statErr != nil {
-		cacheValid = false
-	}
-	if retranscribe {
-		cacheValid = false
-		// remove any existing cache so that future callers don't accidentally
-		// read stale data; ignore not-exist errors since that's fine.
-		if rmErr := os.Remove(cachePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return "", false, false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
-		}
-	}
-
 	// STT resolves through the provider model (SPEC 8.1.3); the legacy
 	// stt.provider selector still maps onto a profile during the
 	// transition. The per-request language override is threaded onto the
@@ -3282,11 +3268,38 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	}
 	ing.SetTranscriber(transcriber)
 
+	// The transcript cache is keyed on the bytes and the active STT derivation
+	// identity, so the ingest service names the entry, not this handler. A
+	// retranscribe is an explicit request and is exempt from the no-speech
+	// guard (SPEC §8.6.13): the entry is removed with its sidecars, so the
+	// read below sends a new decode request. Without
+	// a retranscribe, a stored result (a transcript, or a no-speech result) is
+	// read from the cache and no request is sent.
+	if retranscribe {
+		ing.PurgeTranscriptCache(content, language)
+	}
+	// transcribed_now is true only when the read below sends a provider
+	// request: no entry exists for it to read.
+	transcribedNow := !ing.TranscriptCached(content, language)
+
 	// generate transcript text first so we can accurately determine whether
 	// there is anything worth indexing.
-	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content, language)
+	transcript, noSpeech, readErr := ing.ReadOrComputeTranscriptOutcome(ctx, doc, content, language)
 	if readErr != nil {
 		return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
+	}
+	if noSpeech {
+		// A no-speech result is a success with indexed false and no segments.
+		// With the default language it is also the stored outcome of the
+		// document, so the tool leaves the state that a scan writes: an earlier
+		// transcript is retired and the no-speech record is stored. A decode
+		// with a language override is a one-off and changes nothing stored.
+		if strings.TrimSpace(language) == "" {
+			if settleErr := ing.SettleNoSpeechOutsideScan(ctx, doc); settleErr != nil {
+				return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", settleErr)
+			}
+		}
+		return "", transcribedNow, false, nil
 	}
 
 	// Gate the transcript against secret_patterns before indexing or returning
@@ -3307,9 +3320,16 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
 			return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
 		}
+		if strings.TrimSpace(language) == "" {
+			// The recording holds speech now, so a no-speech outcome of an
+			// earlier decode no longer describes it.
+			if settleErr := ing.SettleSpeechOutsideScan(ctx, doc); settleErr != nil {
+				return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", settleErr)
+			}
+		}
 		indexed = true
 	}
-	return transcript, !cacheValid, indexed, nil
+	return transcript, transcribedNow, indexed, nil
 }
 
 // annotationReadError maps a readDocumentContent failure to the tool error
