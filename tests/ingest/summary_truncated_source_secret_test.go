@@ -77,3 +77,30 @@ func TestSummary_ShortSourceKeepsAllowContextIsSummarized(t *testing.T) {
 		t.Fatalf("the summarizer did not receive the clean source (%d prompt(s))", n)
 	}
 }
+
+// fixedSummarizer returns one fixed summary text for every prompt.
+type fixedSummarizer struct{ out string }
+
+func (f fixedSummarizer) Generate(context.Context, string) (string, error) { return f.out, nil }
+
+// TestSummary_OutputMatchedBeforeTrimIsWithheld: a pattern can need the
+// whitespace that the trim of the summary removes. The summary as the
+// generator returned it matches, so the document is withheld and no summary
+// is persisted, also though the trimmed text does not match (SPEC §7.2).
+func TestSummary_OutputMatchedBeforeTrimIsWithheld(t *testing.T) {
+	t.Parallel()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "notes.txt"), "the quarterly budget report\n")
+	st := newRealStore(t)
+	cfg := hierarchicalConfig(testutil.TempDir(t))
+	cfg.RootDir = root
+	cfg.STTProvider = "off"
+	cfg.SecretPatterns = []string{`(?m)^SUMKEY=[A-Za-z0-9]+\n`}
+	cfg.SecretAllowPatterns = nil
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetSummarizer(fixedSummarizer{out: "SUMKEY=abc123\n"}, "mistral", "mistral-small-latest")
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	requireWithheldAndRetired(t, st, "notes.txt")
+}

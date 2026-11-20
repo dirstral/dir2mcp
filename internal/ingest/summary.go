@@ -281,17 +281,22 @@ func (s *Service) generateSummaryForRep(ctx context.Context, doc model.Document,
 		return errSummarySourceSecret
 	}
 
-	summaryText, err := s.readOrComputeSummary(ctx, sourceText)
+	rawSummary, err := s.readOrComputeSummary(ctx, sourceText)
 	if err != nil {
 		return err
 	}
-	summaryText = strings.TrimSpace(summaryText)
+	summaryText := strings.TrimSpace(rawSummary)
 	if summaryText == "" {
 		return fmt.Errorf("generator returned an empty summary")
 	}
 	// A summary is model output: check it like any derived text before it is
-	// persisted. A match withholds the document, as for any derived text.
-	if s.screenDerivedSecrets(ctx, doc, derivedKindSummary, summaryText) {
+	// persisted. A match withholds the document, as for any derived text. The
+	// text as the generator (or the cache) returned it is checked as well as
+	// the trimmed text that is persisted: a pattern can need the whitespace
+	// that the trim removes (a `\n` at the end of a match), and the cache
+	// write is refused on either form, so the two checks agree.
+	if s.screenDerivedSecrets(ctx, doc, derivedKindSummary, rawSummary) ||
+		s.screenDerivedSecrets(ctx, doc, derivedKindSummary, summaryText) {
 		// An entry that an earlier run cached (under an earlier policy, or
 		// before the check ran ahead of the cache write) is removed, so the
 		// rejected text does not stay on disk.
