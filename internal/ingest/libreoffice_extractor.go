@@ -228,15 +228,35 @@ func libreofficeMakeWorkDirContext(ctx context.Context, root string) (string, er
 // The probe has the sofficeProbeTimeout limit, because a directory on a dead
 // network mount can block the create call. A probe that reaches the limit
 // counts as failed.
+//
+// The limit covers the create call and the removal. When it expires, the probe
+// reports unavailable at once, and the work finishes in the background.
 func libreofficeWorkDirUsable(root string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), sofficeProbeTimeout)
-	defer cancel()
-	work, err := libreofficeMakeWorkDirContext(ctx, root)
-	if err != nil {
+	return libreofficeWorkDirUsableWithin(root, sofficeProbeTimeout, libreofficeMakeWorkDir, os.RemoveAll)
+}
+
+// libreofficeWorkDirUsableWithin is libreofficeWorkDirUsable with the limit
+// and the filesystem calls as parameters, so a test can make one of them hang.
+func libreofficeWorkDirUsableWithin(root string, limit time.Duration, mk func(string) (string, error), rm func(string) error) bool {
+	// Buffered, so the goroutine never blocks on the send after a timeout.
+	done := make(chan bool, 1)
+	go func() {
+		work, err := mk(root)
+		if err != nil {
+			done <- false
+			return
+		}
+		_ = rm(work)
+		done <- true
+	}()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case ok := <-done:
+		return ok
+	case <-timer.C:
 		return false
 	}
-	_ = os.RemoveAll(work)
-	return true
 }
 
 // deadlineErr maps an error that happened because the per-document deadline

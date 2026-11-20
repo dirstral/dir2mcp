@@ -609,7 +609,9 @@ binary resolve and both pass a short probe (`--version`). The LibreOffice probe
 has a time limit of 10 seconds; a probe that reaches the limit counts as
 failed, and the engine is unavailable. The LibreOffice binary
 is `ingest.libreoffice.command` when it is set, else `soffice` on `PATH`, else
-`libreoffice` on `PATH`. When
+`libreoffice` on `PATH`. On Windows, `soffice.exe --version` waits for a key
+press, so the probe runs the console launcher `soffice.com` beside it when that
+file exists. When
 either is missing, the engine is off and no engine reads `.doc`, the same as a
 missing pandoc for `.odt`. Each `.doc` is then a durable skip
 (`skip_reason=unsupported_format`) under `ingest.on_unsupported: lenient` (the

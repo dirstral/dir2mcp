@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -97,13 +98,29 @@ func sofficeFunctionalCheck(bin string) error {
 func runSofficeVersionProbe(ctx context.Context, bin string) error {
 	pctx, cancel := context.WithTimeout(ctx, sofficeProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(pctx, bin, "--version")
+	cmd := exec.CommandContext(pctx, sofficeProbeBinary(bin, runtime.GOOS), "--version")
 	cmd.Env = os.Environ()
 	prepareLibreOfficeCmd(cmd)
 	cmd.WaitDelay = pandocWaitDelay
 	err := cmd.Run()
 	reapLibreOfficeGroup(cmd)
 	return err
+}
+
+// sofficeProbeBinary returns the binary the version probe runs. On Windows,
+// soffice.exe --version opens a console and waits for Enter, so the probe
+// would time out on a working installation. The console launcher soffice.com
+// beside it answers without input, so the probe runs that one when it exists.
+// Every other binary is probed as it is.
+func sofficeProbeBinary(bin, goos string) string {
+	if goos != "windows" || !strings.EqualFold(filepath.Ext(bin), ".exe") {
+		return bin
+	}
+	com := strings.TrimSuffix(bin, filepath.Ext(bin)) + ".com"
+	if info, err := os.Stat(com); err == nil && !info.IsDir() {
+		return com
+	}
+	return bin
 }
 
 // libreofficeMissing names, in a stable order, the binaries the libreoffice
