@@ -57,8 +57,8 @@ segments.
   when it has no other searchable representation.
 - The tools decode the first audio track only. When `media.stt.tracks`
   selects more tracks, a first track with no speech does not settle the
-  document as `no_speech`: the next scan decodes every selected track and
-  decides.
+  document as `no_speech`. The tool withholds the done marker, so the next
+  scan decodes every selected track and decides.
 - `transcribed_now` is `true` only when the call sent a decode request.
 - `dir2mcp_transcribe_and_ask` has no `retranscribe` argument. It behaves as
   `retranscribe: false`.

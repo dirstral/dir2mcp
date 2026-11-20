@@ -48,8 +48,9 @@ func TestSettleNoSpeechOutsideScan_FailedRecordMarksTheDocumentError(t *testing.
 
 // TestSettleNoSpeechOutsideScan_MultiTrackSelectionLeavesTheState: with
 // media.stt.tracks selecting more than the first track, a first track with no
-// speech does not decide no_speech (§8.6.12). The stored row and the record
-// stay as they are; the next scan decodes every selected track.
+// speech does not decide no_speech (§8.6.12). The row keeps its status and no
+// record is written, but the done marker is withheld, so the next scan
+// decodes every selected track.
 //
 // Mutant killed: settling no_speech from the first track alone.
 func TestSettleNoSpeechOutsideScan_MultiTrackSelectionLeavesTheState(t *testing.T) {
@@ -70,5 +71,8 @@ func TestSettleNoSpeechOutsideScan_MultiTrackSelectionLeavesTheState(t *testing.
 	}
 	if rec, err := st.GetSetting(ctx, store.NoSpeechIdentitySettingKey("voice.wav")); err == nil && rec != "" {
 		t.Errorf("a no-speech record %q was stored from the first track alone", rec)
+	}
+	if got.ContentHash != "" {
+		t.Errorf("content_hash = %q, want empty: the done marker is withheld so the next scan decodes every selected track", got.ContentHash)
 	}
 }

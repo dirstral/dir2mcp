@@ -293,8 +293,8 @@ func (s *Service) TranscriptCached(content []byte, language string) bool {
 //
 // no_speech needs every selected track to hold no speech (§8.6.12). When
 // media.stt.tracks selects more than the first track, the first track alone
-// does not decide it, so the stored state is left to the next scan, which
-// decodes every selected track.
+// does not decide it. The done marker is withheld, so the next scan processes
+// the document and decodes every selected track.
 //
 // A retirement or a record write that fails is returned, as in a scan. The
 // document is then recorded as status="error", so the next scan processes it
@@ -302,7 +302,14 @@ func (s *Service) TranscriptCached(content []byte, language string) bool {
 // unchanged.
 func (s *Service) SettleNoSpeechOutsideScan(ctx context.Context, doc model.Document) error {
 	if sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks); err != nil || sel.Mode != config.STTTracksFirst {
+		// Withhold the #402 done marker, so the next scan processes the
+		// document again, also with unchanged bytes and identity, and decodes
+		// every selected track. The row keeps its status and representations.
 		s.getLogger().Printf("stt: the first audio track of %s holds no speech; media.stt.tracks selects more tracks, so the next scan settles the document (SPEC §8.6.12)", doc.RelPath)
+		doc.ContentHash = ""
+		if err := s.store.UpsertDocument(ctx, doc); err != nil {
+			return fmt.Errorf("withhold the done marker of %s for the next scan: %w", doc.RelPath, err)
+		}
 		return nil
 	}
 	if err := s.settleNoSpeechOutsideScan(ctx, doc); err != nil {
