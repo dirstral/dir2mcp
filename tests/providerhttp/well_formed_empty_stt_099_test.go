@@ -6,7 +6,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/providerhttp"
 )
 
-// TestWellFormedEmptySTT pins the SPEC 0.97.0 §8.2 shape rule that tells a
+// TestWellFormedEmptySTT pins the SPEC 0.99.0 §8.2 shape rule that tells a
 // no-speech result from a malformed response: it parses, it has a text or a
 // segments field, and every field it has is of the right type.
 func TestWellFormedEmptySTT(t *testing.T) {

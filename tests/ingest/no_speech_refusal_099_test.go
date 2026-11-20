@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §8.6.13 (0.97.0): a window that the quality gate refused counts as a
+// SPEC §8.6.13 (0.99.0): a window that the quality gate refused counts as a
 // failed window next to no-speech windows. When every window is a no-speech
 // result or a quality-gate refusal, and at least one is a refusal, the outcome
 // is the TRANSCRIBE_FAILED error and the recording is retried. With a
@@ -153,7 +153,7 @@ func TestNoSpeech_BothRefusalsBesideNoSpeechAreALanguageSkip(t *testing.T) {
 // windowProviderFailure is a provider failure of one decode window.
 var windowProviderFailure = &model.ProviderError{Code: "WHISPER_FAILED", Message: "upstream 502", Retryable: false}
 
-// assertFailedWindowWins checks the SPEC 0.97.0 §8.6.13 precedence rule: the
+// assertFailedWindowWins checks the SPEC 0.99.0 §8.6.13 precedence rule: the
 // document is a transcription failure (the class that the run manifest reports
 // as TRANSCRIBE_FAILED), not a declared skip.
 func assertFailedWindowWins(t *testing.T, st *store.SQLiteStore) {
@@ -226,90 +226,5 @@ func TestNoSpeech_AllRefusedWithNoFailedWindowIsUnchanged(t *testing.T) {
 	doc := mustGetDoc(t, st, "talk.mp3")
 	if doc.Status != "skipped" || doc.SkipReason != model.SkipReasonLanguageUncovered {
 		t.Fatalf("talk.mp3: status=%q skip_reason=%q error=%q, want skipped/%s", doc.Status, doc.SkipReason, doc.ErrorMessage, model.SkipReasonLanguageUncovered)
-	}
-}
-
-// fallbackNoSpeechService builds the window-scope service of these tests with
-// a route candidate for Russian and media.stt.on_route_error=default. The
-// candidate decodes the window that routes to it, then fails on every later
-// window. The default profile finds no speech in those windows, so each of
-// them is a no-speech result of a route fallback decode.
-func fallbackNoSpeechService(t *testing.T, defaultReplies map[int]model.TranscriptResult, candText string, candCoverage []string, candFirstCall int) (*ingest.Service, *store.SQLiteStore, *replyTranscriber, *langWindowTranscriber, ingest.DiscoveredFile) {
-	t.Helper()
-	svc, st, tr, f := refusalBesideNoSpeechService(t, defaultReplies)
-	cand := &langWindowTranscriber{
-		def:    langReply{err: windowProviderFailure},
-		script: map[int]langReply{candFirstCall: {lang: "ru", conf: 0.9, text: candText}},
-	}
-	svc.SetRouteTranscriber("ru", cand, "ru-ckpt", candCoverage)
-	svc.SetRouteErrorFallback(true)
-	return svc, st, tr, cand, f
-}
-
-// ruWindow is a decode by the default profile that reports Russian, so the
-// window routes to the Russian candidate.
-func ruWindow() model.TranscriptResult {
-	return model.TranscriptResult{Text: ruText, Language: "ru", LanguageConfidence: 0.9}
-}
-
-// TestNoSpeech_FallbackNoSpeechWindowCountsAsFailed pins SPEC 0.97.0 §8.6.13:
-// when no window produced transcript text, a window whose route failed and
-// whose fallback decode is a no-speech result counts as a failed window. The
-// outcome is an error and the recording is retried. The route is carried from
-// an earlier window whose text was refused, which is the only way a window
-// can start on a candidate route in a recording with no transcript text.
-//
-//   - language refusal: the candidate does not declare Russian, so window 1 is
-//     refused as language_uncovered. Windows 2 to 4 start on the candidate,
-//     which fails, and the default finds no speech. Without the rule the
-//     document is the language_uncovered skip.
-//   - quality refusal: the candidate decodes window 1 as a loop that the gate
-//     refuses. Without the rule the verdict is the cached quality-gate error,
-//     which sends no new request on the next run.
-//   - both refusals: window 1 is refused for its language on the default
-//     profile, window 2 by the gate on the candidate.
-//
-// Mutant killed: counting the fallback no-speech window as an ordinary
-// no-speech window.
-func TestNoSpeech_FallbackNoSpeechWindowCountsAsFailed(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name          string
-		replies       map[int]model.TranscriptResult
-		candText      string
-		candCoverage  []string
-		candFirstCall int
-	}{
-		{"language refusal", map[int]model.TranscriptResult{1: ruWindow()}, ruText, []string{"de"}, 1},
-		{"quality refusal", map[int]model.TranscriptResult{1: ruWindow()}, loopText, nil, 1},
-		{"both refusals", map[int]model.TranscriptResult{1: uncoveredWindow(), 2: ruWindow()}, loopText, nil, 1},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-			svc, st, tr, cand, f := fallbackNoSpeechService(t, tc.replies, tc.candText, tc.candCoverage, tc.candFirstCall)
-			_ = svc.ProcessDocument(ctx, f, nil, false)
-			if cand.callCount() < 2 {
-				t.Fatalf("candidate calls = %d, want at least 2: a later window must start on the carried route and fail; the fixture is wrong", cand.callCount())
-			}
-			assertFailedWindowWins(t, st)
-			if rec, err := st.GetSetting(ctx, store.NoSpeechIdentitySettingKey("talk.mp3")); err == nil && rec != "" {
-				t.Errorf("a no-speech record %q was stored", rec)
-			}
-
-			// The error is not cached: the next run sends new requests.
-			tr.mu.Lock()
-			before := tr.calls
-			tr.mu.Unlock()
-			_ = svc.ProcessDocument(ctx, f, nil, false)
-			tr.mu.Lock()
-			after := tr.calls
-			tr.mu.Unlock()
-			if after == before {
-				t.Errorf("the next run sent no decode request: the recording must be retried")
-			}
-		})
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// SPEC 0.97.0 §8.6.13: dir2mcp_transcribe follows the no-speech guard. With
+// SPEC 0.99.0 §8.6.13: dir2mcp_transcribe follows the no-speech guard. With
 // retranscribe=false it sends no decode request for a recording that has a
 // stored no-speech result under the current STT derivation identity, and it
 // returns a success result with indexed false and no segments. retranscribe

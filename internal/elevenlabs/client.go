@@ -108,8 +108,9 @@ func (c *Client) buildSTTRequestBody(data []byte, fileName string) ([]byte, *mul
 }
 
 // parseTranscribeResult extracts the transcript text from a parsed ElevenLabs
-// STT response.  Returns ("", false) when no text is present.
-func parseTranscribeResult(parsed transcribeResponse) (string, bool) {
+// STT response. It returns "" when no text is present: the provider heard no
+// speech.
+func parseTranscribeResult(parsed transcribeResponse) string {
 	if len(parsed.Segments) > 0 {
 		lines := make([]string, 0, len(parsed.Segments))
 		for _, segment := range parsed.Segments {
@@ -126,17 +127,14 @@ func parseTranscribeResult(parsed transcribeResponse) (string, bool) {
 			lines = append(lines, model.FormatTranscriptTimestamp(startMS)+" "+text)
 		}
 		if len(lines) > 0 {
-			return strings.Join(lines, "\n"), true
+			return strings.Join(lines, "\n")
 		}
 	}
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
 		text = strings.TrimSpace(parsed.Transcript)
 	}
-	if text == "" {
-		return "", false
-	}
-	return text, true
+	return text
 }
 
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
@@ -201,15 +199,15 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "failed to decode STT response", Retryable: false, Cause: err}
 	}
 
-	text, ok := parseTranscribeResult(parsed)
-	if !ok {
-		// SPEC 0.97.0: a well-formed response whose text fields are empty is a
-		// successful decode that found no speech, not a provider failure. A
-		// body that names none of the text-bearing fields, or has one of the
-		// wrong type, is malformed.
-		if providerhttp.WellFormedEmptySTT(bodyBytes, []string{"text", "transcript"}, "segments") {
-			return "", nil
-		}
+	// An answer with no text is the provider saying it heard no speech: silence
+	// is an outcome, not a failure (SPEC §8.6.6, spec 0.98.0). It is returned as
+	// an empty transcript with no error; a failed request, a non-2xx status and
+	// an undecodable body stay errors above. The empty answer must be a
+	// well-formed response (SPEC §8.2, spec 0.99.0): a body that names none of
+	// the text-bearing fields, has one of the wrong type, or holds timed words
+	// with no text is malformed and stays an error.
+	text := parseTranscribeResult(parsed)
+	if text == "" && !providerhttp.WellFormedEmptySTT(bodyBytes, []string{"text", "transcript"}, "segments") {
 		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "malformed stt response: no text, transcript or segments field, a field of the wrong type, or timed words with no text", Retryable: false}
 	}
 	return text, nil

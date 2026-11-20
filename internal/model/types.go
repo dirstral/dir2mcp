@@ -42,6 +42,9 @@ type Document struct {
 	// field is intentionally not part of the MCP `list_files` tool
 	// output (that schema is fixed by SPEC §15.5 with
 	// additionalProperties:false); it is a diagnostic-bundle field.
+	// A status="skipped" row with SkipReason == SkipReasonNoSpeech also carries
+	// a detail here: the STT identity token the item was judged with, which the
+	// incremental gates compare to re-derive it when that identity changes.
 	ErrorMessage string
 	// SkipReason is the stable classification of *why* a document was
 	// recorded as skipped (never indexed) rather than ingested — one of
@@ -100,18 +103,13 @@ const (
 	// declared not-indexed coverage rather than a transcript that silently answers
 	// "no" for the audio no window decoded.
 	SkipReasonTranscriptPartial = "transcript_partial"
-	// SkipReasonNoSpeech (SPEC 0.97.0, §15.2): media whose STT decode found no
-	// speech in any selected audio track (media.stt.tracks; a track that is
-	// not selected is not decoded) (§8.2, §8.6.13): every decode returned a
-	// well-formed response with empty text and no segment that holds text, for
-	// example a recording that holds only music or ambient sound, and the
-	// document has no other searchable representation. It is not an error, and
-	// a track whose decode was a no-speech result is not decoded again while
-	// both the content_hash and the STT derivation identity are unchanged; a
-	// change of either makes the next run decode it again when the track is
-	// still selected. A no-speech result of a route fallback decode with no
-	// transcript text in the recording is not this skip: it is an error and
-	// the recording is retried (§8.6.13).
+	// SkipReasonNoSpeech: audio or video whose STT provider answered
+	// successfully with no speech (an empty transcript for the whole item), or
+	// which has no audio track at all, and which therefore has no
+	// representation (SPEC §8.6.6 "Silence is an outcome", spec 0.98.0).
+	// Silence is an outcome, not a failure: the empty transcript is cached like
+	// any other, and the item is re-derived only when its content or the STT
+	// identity changes.
 	SkipReasonNoSpeech = "no_speech"
 )
 

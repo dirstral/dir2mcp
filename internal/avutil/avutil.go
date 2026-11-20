@@ -750,8 +750,9 @@ func extractSegment(ctx context.Context, input, srcExt string, startMS, endMS in
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Keep the source extension so ffmpeg infers the matching muxer and the
-	// extracted clip stays the same container/MIME as the source.
-	ext := srcExt
+	// extracted clip stays the same container/MIME as the source. An extension
+	// ffmpeg has no muxer for (.mod) is mapped to one for the same container.
+	ext := SegmentOutputExt(srcExt)
 	if ext == "" {
 		ext = ".bin"
 	}

@@ -18,7 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC 0.97.0 §8.6.13: the lifecycle of a no-speech outcome. A document that
+// SPEC 0.99.0 §8.6.13: the lifecycle of a no-speech outcome. A document that
 // keeps another searchable representation stays ok, and the per-document
 // record of the STT identity that found no speech never outlives the
 // derivation or the document it describes.

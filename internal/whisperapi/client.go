@@ -561,17 +561,20 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 			Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence(),
 		}, nil
 	}
+	// An answer with no text is the provider saying it heard no speech: silence
+	// is an outcome, not a failure (SPEC §8.6.6, spec 0.98.0). It is returned as
+	// an empty transcript so the caller can cache it and record the item as
+	// skip_reason=no_speech, rather than as an error retried on every run. A
+	// failed request, a non-200 status and an undecodable body stay errors above.
 	text := strings.TrimSpace(parsed.Text)
 	if text == "" {
-		// SPEC 0.97.0: a well-formed response with empty text and no segment
-		// text is a successful decode that found NO SPEECH (music, ambient
-		// sound, silence), not a provider failure. A body that names neither a
-		// text nor a segments field, or has one of the wrong type, is malformed.
-		// Timed words with no text (absent, empty or only whitespace) is a
-		// contradiction, not silence: the decoder reports speech that the text
-		// does not hold (SPEC §8.2). The response is malformed and stays an
-		// error, so the audio is decoded again and is never recorded as no
-		// speech.
+		// The empty answer must be a well-formed response (SPEC §8.2, spec
+		// 0.99.0). A body that names neither a text nor a segments field, or
+		// has one of the wrong type, is malformed. Timed words with no text
+		// (absent, empty or only whitespace) is a contradiction, not silence:
+		// the decoder reports speech that the text does not hold. Such a
+		// response stays an error, so the audio is decoded again and is never
+		// recorded as no speech.
 		if parsed.hasWordEntries() {
 			return model.TranscriptResult{}, &model.ProviderError{
 				Code:      "WHISPER_FAILED",
@@ -586,10 +589,6 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 				Retryable: false,
 			}
 		}
-		// The language report is kept: an identifier response with empty text
-		// that reports a language is still a signal (§8.2.3). The pipeline does
-		// not read the report of a no-speech decode window (§8.6.13).
-		return model.TranscriptResult{Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence()}, nil
 	}
 	// Flat-text fallback (no segments): words have no segment frame to anchor
 	// against, so emit text only.

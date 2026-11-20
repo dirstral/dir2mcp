@@ -163,7 +163,7 @@ func TestRenderCoverageBlock_RemediationHints(t *testing.T) {
 	}
 }
 
-// TestRenderCoverageBlock_NoSpeechSaysTheDecodeWorked pins the SPEC 0.97.0
+// TestRenderCoverageBlock_NoSpeechSaysTheDecodeWorked pins the SPEC 0.99.0
 // line: a no_speech skip is printed with one line that says the decode
 // succeeded and found nothing said, so an operator does not go looking for a
 // provider fault behind audio that is "not indexed".

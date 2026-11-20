@@ -34,7 +34,7 @@ The same holds for a document that stays `status=ok` through another
 representation (recognition, for example) after every selected audio track was
 a no-speech result. Its transcript is absent, not pending. A call that would
 return the transcript returns `MEDIA_NO_TEXT`: the default call or a line span
-on an audio file, and a time span that no other representation answers. A call
+on an audio or video file, and a time span that no other representation answers. A call
 that another representation answers is answered from it, for example
 recognition text for a time span. A document in which one selected track has a
 transcript and another track holds no speech is not this case: the tool

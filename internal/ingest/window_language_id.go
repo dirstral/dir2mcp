@@ -160,9 +160,9 @@ func (s *Service) identifyWindow(ctx context.Context, relPath string, pieces []w
 	tag := provider.PrimarySubtag(res.Language)
 	if tag == "" {
 		if strings.TrimSpace(res.Text) == "" {
-			// SPEC 0.97.0: no speech in the probe is no identification, not a
+			// Spec 0.99.0: no speech in the probe is no identification, not a
 			// failure; the decoder's report (or inheritance) resolves the window.
-			s.getLogger().Printf("windowed transcription: language identifier %q found no speech in the probe of window [%d,%d]ms of %s; falling back to the decoder's report (SPEC §8.2.3, 0.97.0)",
+			s.getLogger().Printf("windowed transcription: language identifier %q found no speech in the probe of window [%d,%d]ms of %s; falling back to the decoder's report (SPEC §8.2.3, 0.99.0)",
 				s.identifier.route, core.StartMS, core.EndMS, relPath)
 		}
 		return "", 0, false

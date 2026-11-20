@@ -2411,6 +2411,9 @@ func isMediaDocType(docType string) bool {
 // mediaClipMIMEForPath picks a container MIME type for an extracted clip from
 // the source file extension (stream-copy keeps the source muxer), falling back
 // to a generic audio/video type by doc_type when the extension is unknown.
+// Video containers come from the avutil table, so every container ingest
+// classifies as video has its own type here. A .mod clip is muxed as an MPEG
+// program stream (avutil.SegmentOutputExt), which video/mpeg names.
 func mediaClipMIMEForPath(relPath, docType string) string {
 	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
 	case ".mp3":
@@ -2423,12 +2426,17 @@ func mediaClipMIMEForPath(relPath, docType string) string {
 		return "audio/flac"
 	case ".ogg", ".opus":
 		return "audio/ogg"
-	case ".mp4":
-		return "video/mp4"
-	case ".mov":
-		return "video/quicktime"
 	}
-	if strings.EqualFold(strings.TrimSpace(docType), "video") {
+	isVideo := strings.EqualFold(strings.TrimSpace(docType), "video")
+	ext := filepath.Ext(strings.TrimSpace(relPath))
+	// A content-sniffed extension (.ts, .mts, .mod) names a video container only
+	// when the document is video; a .ts that is TypeScript has no clip MIME.
+	if avutil.IsVideoContainerExt(ext) || (isVideo && avutil.IsContentSniffedVideoExt(ext)) {
+		if mime, ok := avutil.VideoContainerMIME(ext); ok {
+			return mime
+		}
+	}
+	if isVideo {
 		return "video/mp4"
 	}
 	return "audio/mpeg"
@@ -3263,8 +3271,8 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	// The transcript cache is keyed on the bytes and the active STT derivation
 	// identity, so the ingest service names the entry, not this handler. A
 	// retranscribe is an explicit request and is exempt from the no-speech
-	// guard (SPEC §8.6.13): the entry is removed with its sidecars and its
-	// no-speech marker, so the read below sends a new decode request. Without
+	// guard (SPEC §8.6.13): the entry is removed with its sidecars, so the
+	// read below sends a new decode request. Without
 	// a retranscribe, a stored result (a transcript, or a no-speech result) is
 	// read from the cache and no request is sent.
 	if retranscribe {
@@ -5122,7 +5130,7 @@ func statsOutputSchema() map[string]interface{} {
 						"reason": map[string]interface{}{
 							"type":        "string",
 							"minLength":   1,
-							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, symlink_ignored, no_speech. no_speech: media whose STT decode found no speech in any selected audio track (media.stt.tracks; a track that is not selected is not decoded) (§8.2, §8.6.13): every decode returned a well-formed response with empty text and no segment that holds text, for example a recording that holds only music or ambient sound, and the document has no other searchable representation. It is not an error, and a track whose decode was a no-speech result is not decoded again while both the content_hash and the STT derivation identity are unchanged; a change of either makes the next run decode it again when the track is still selected. A no-speech result of a route fallback decode with no transcript text in the recording is not this skip: it is an error and the recording is retried (§8.6.13). Render an unrecognized value verbatim.",
+							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, symlink_ignored, no_speech. Render an unrecognized value verbatim.",
 						},
 						"count": map[string]interface{}{"type": "integer", "minimum": 1},
 					},

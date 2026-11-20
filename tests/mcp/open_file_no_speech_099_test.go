@@ -13,14 +13,15 @@ import (
 	"github.com/dirstral/dir2mcp/internal/store"
 )
 
-// SPEC 0.97.0 §8.6.13, §15.4: dir2mcp_open_file on a document that is
+// SPEC 0.99.0 §8.6.13, §15.4: dir2mcp_open_file on a document that is
 // status=skipped with skip_reason=no_speech returns the non-retryable
 // MEDIA_NO_TEXT. It never returns the retryable OCR_NOT_READY and never empty
 // content. The document row decides, not the file extension.
 
 // seedNoSpeechTranscriptCache writes the cache entry that ingest leaves for a
-// decode that found no speech: an empty transcript text and its marker. With
-// no STT identity the cache key is the sha256 of the source bytes.
+// decode that found no speech: an empty transcript text (spec 0.98.0 caches it
+// like any transcript). With no STT identity the cache key is the sha256 of
+// the source bytes.
 func seedNoSpeechTranscriptCache(t *testing.T, env *openFile1100Env, body string) {
 	t.Helper()
 	dir := filepath.Join(env.state, "cache", "transcribe")
@@ -31,9 +32,6 @@ func seedNoSpeechTranscriptCache(t *testing.T, env *openFile1100Env, body string
 	base := filepath.Join(dir, hex.EncodeToString(sum[:]))
 	if err := os.WriteFile(base+".txt", nil, 0o644); err != nil {
 		t.Fatalf("write empty transcript: %v", err)
-	}
-	if err := os.WriteFile(base+".nospeech", []byte(model.SkipReasonNoSpeech), 0o644); err != nil {
-		t.Fatalf("write no-speech marker: %v", err)
 	}
 }
 
@@ -191,7 +189,7 @@ func okNoSpeechEnv096(t *testing.T, relPath, docType, body string) *openFile1100
 	return env
 }
 
-// TestOpenFile_OKDocumentWithNoSpeechTranscript pins SPEC 0.97.0 §8.6.13,
+// TestOpenFile_OKDocumentWithNoSpeechTranscript pins SPEC 0.99.0 §8.6.13,
 // §15.4 for a document that stays ok through another representation after
 // every selected track was a no-speech result. Its transcript is absent, not
 // pending. A call that would return the transcript (the default call or a
@@ -240,11 +238,9 @@ func TestOpenFile_OKDocumentWithNoSpeechTranscript(t *testing.T) {
 		if res.isError || res.content != "home run by Sam Rivera" {
 			t.Fatalf("a time span that recognition answers: want its text, got error=%v code=%q content=%q", res.isError, res.code, res.content)
 		}
-		// The default call on a video never returns a transcript, so its answer
-		// is unchanged.
-		if res := callOpenFile1100(t, env.url, map[string]interface{}{"rel_path": "match.mp4"}); res.code == "MEDIA_NO_TEXT" || res.code == "OCR_NOT_READY" {
-			t.Errorf("the default call on a video is unchanged, got code=%q", res.code)
-		}
+		// open_file serves a video from its transcript (#1166), so the default
+		// call on a video would return the transcript: it is MEDIA_NO_TEXT too.
+		assertNoSpeechMediaNoText(t, callOpenFile1100(t, env.url, map[string]interface{}{"rel_path": "match.mp4"}))
 	})
 }
 

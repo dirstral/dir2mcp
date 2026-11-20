@@ -18,7 +18,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Edge cases of the SPEC 0.97.0 no-speech outcome that a review of #1169 found.
+// Edge cases of the SPEC 0.99.0 no-speech outcome that a review of #1169 found.
 
 // replyTranscriber answers each call (1-based) with replies[n], else def. A
 // reply with empty text is a no-speech result.
@@ -105,40 +105,6 @@ func TestNoSpeech_CandidateWithNoSpeechIsADecodedWindow(t *testing.T) {
 	}
 	if !strings.Contains(out, "window [0,590000]ms of talks/music.m4a holds no speech; it counts as decoded") {
 		t.Errorf("the first window must be logged as decoded with no speech:\n%s", out)
-	}
-}
-
-// TestNoSpeech_RouteFallbackWithNoSpeechIsRetried pins §8.2.4 with §8.6.13:
-// the identifier routes the item to a checkpoint that fails, and the default
-// profile finds no speech. The failed route can hold speech, so the result is
-// an error that is retried, not a settled no_speech skip.
-//
-// Mutant killed: settling the fallback's empty result as no_speech, which
-// stamps the done marker and never tries the selected route again.
-func TestNoSpeech_RouteFallbackWithNoSpeechIsRetried(t *testing.T) {
-	t.Parallel()
-	root := testutil.TempDir(t)
-	writeFile(t, filepath.Join(root, "talk.mp3"), "fake-audio")
-	st := newRealStore(t)
-	def := &replyTranscriber{}
-	svc, state, _ := noSpeechService(t, root, testutil.TempDir(t), st, def, 0)
-	svc.SetLanguageIdentifier(&replyTranscriber{def: model.TranscriptResult{Text: "[00:00] салам", Language: "ky", LanguageConfidence: 0.9}}, "lid")
-	svc.SetRouteTranscriber("ky", &replyTranscriber{err: errors.New("checkpoint unavailable: 503")}, "whisper-ky", []string{"ky"})
-	svc.SetRouteErrorFallback(true)
-
-	f := ingest.DiscoveredFile{RelPath: "talk.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
-	if err := svc.ProcessDocument(context.Background(), f, nil, false); err != nil {
-		t.Fatalf("ProcessDocument: %v", err)
-	}
-	doc := mustGetDoc(t, st, "talk.mp3")
-	if doc.Status != "error" || doc.SkipReason != "" {
-		t.Fatalf("status=%q skip_reason=%q, want error: the failed route can hold speech", doc.Status, doc.SkipReason)
-	}
-	if !strings.Contains(doc.ErrorMessage, "found no speech") {
-		t.Errorf("error message must say why, got %q", doc.ErrorMessage)
-	}
-	if snap := state.Snapshot(); snap.Errors != 1 || snap.Skipped != 0 {
-		t.Errorf("run counters errors=%d skipped=%d, want 1/0", snap.Errors, snap.Skipped)
 	}
 }
 

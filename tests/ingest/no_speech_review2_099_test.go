@@ -19,7 +19,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Edge cases of the SPEC 0.97.0 no-speech outcome from the second review of
+// Edge cases of the SPEC 0.99.0 no-speech outcome from the second review of
 // #1169.
 
 // cappedSilentTranscriber declares a payload cap, so an oversized window is
@@ -89,7 +89,7 @@ func TestNoSpeech_FailedPieceBesideSilentPiecesIsNotNoSpeech(t *testing.T) {
 				if tr.calls <= 4 {
 					t.Fatalf("decode requests = %d, want more than 4: the windows must be split into pieces", tr.calls)
 				}
-				settled := strings.Contains(h.logs.String(), "so no transcript is produced")
+				settled := strings.Contains(h.logs.String(), "stt: no speech in")
 				if !failed {
 					if err != nil || !settled {
 						t.Fatalf("all pieces silent: err=%v, no-speech settled=%v, want no error and a no-speech recording\n%s", err, settled, h.logs.String())
@@ -294,7 +294,7 @@ func TestNoSpeech_FailedPieceOfASingleWindowIsNotNoSpeech(t *testing.T) {
 			if !strings.Contains(h.logs.String(), "/1 windows decoded") || tr.calls != 2 {
 				t.Fatalf("want one scheduled window sent as two pieces, got %d request(s):\n%s", tr.calls, h.logs.String())
 			}
-			settled := strings.Contains(h.logs.String(), "so no transcript is produced")
+			settled := strings.Contains(h.logs.String(), "stt: no speech in")
 			if !failed {
 				if err != nil || !settled {
 					t.Fatalf("both pieces silent: err=%v, no-speech settled=%v, want a no-speech recording\n%s", err, settled, h.logs.String())
@@ -361,7 +361,7 @@ func TestNoSpeech_SilentCandidateDoesNotDependOnCandidateOrder(t *testing.T) {
 	}
 }
 
-// TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript pins SPEC 0.97.0
+// TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript pins SPEC 0.99.0
 // §8.6.13: when a no-speech result retires an earlier transcript, the
 // summaries derived from that transcript go with it. Scan 1 indexes a
 // transcript and its document summary. In scan 2 another STT model finds no
@@ -424,7 +424,7 @@ func TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript(t *testing.T) {
 	}
 }
 
-// TestNoSpeech_WindowDoesNotChangeTheContinuityState pins SPEC 0.97.0 §8.6.13
+// TestNoSpeech_WindowDoesNotChangeTheContinuityState pins SPEC 0.99.0 §8.6.13
 // under window scope. Window 1 resolves Kyrgyz and moves to the Kyrgyz route.
 // Window 2 is a no-speech result: it has no language and does not change the
 // continuity state. Window 3 has speech with no confident language: it
