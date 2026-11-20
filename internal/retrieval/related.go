@@ -3,7 +3,9 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 
@@ -32,14 +34,23 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 		return model.RelatedResult{}, model.ErrRelatedNotSupported
 	}
 	k := s.effectiveK(q.K)
-	seed, err := s.resolveRelatedSource(ctx, cs, q)
+	seed, err := s.resolveCheckedRelatedSeed(ctx, cs, q)
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
-	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, k)
+	// Retrieve more than k, so the secret screen below can leave hits out and
+	// the next neighbours take their places (spec 0.99.0). relatedNeighbors
+	// returns the whole ranked pool; the cut to k runs after the screen.
+	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, 2*k+relatedExcludeMargin)
 	if err != nil {
 		return model.RelatedResult{}, err
 	}
+	// The same secret screen search applies (spec 0.99.0).
+	hits, err = s.screenServedHits(ctx, hits)
+	if err != nil {
+		return model.RelatedResult{}, err
+	}
+	hits = truncateSearchHits(hits, k)
 	indexingComplete, _ := s.IndexingComplete(ctx)
 	return model.RelatedResult{
 		SourceChunkID:    seed.chunkID,
@@ -87,6 +98,101 @@ type relatedSeed struct {
 	axis        string // text|code|both
 	excludeIDs  map[uint64]struct{}
 	textsByAxis map[string][]string
+}
+
+// resolveCheckedRelatedSeed resolves the seed and proves that its text
+// belongs to a document state that the current secret policy evaluated (SPEC
+// §7.2, spec 0.99.0). The seed text goes to an embedder, so it must not come
+// from a document that waits for re-evaluation.
+//
+// The pending check alone is not enough. A broader policy can mark the
+// document after the seed text is read, and a scan can replace the document
+// and clear the mark before the check runs: the check then passes for text
+// that only the earlier policy evaluated. So the document generation (status
+// and content hash; a policy reset clears the hash, and a new version of the
+// document has another one) is read before the seed text and again after the
+// pending check. The seed is used only when both readings are equal:
+//
+//  1. resolve the seed once, to learn its document;
+//  2. read the generation;
+//  3. resolve the seed again: this is the text that is used;
+//  4. reject a pending document;
+//  5. read the generation again and compare.
+//
+// A reset or a replacement between 2 and 5 changes the generation or leaves
+// the mark set, and the request is refused. The caller can try again.
+func (s *Service) resolveCheckedRelatedSeed(ctx context.Context, cs relatedChunkStore, q model.RelatedQuery) (*relatedSeed, error) {
+	first, err := s.resolveRelatedSource(ctx, cs, q)
+	if err != nil {
+		return nil, err
+	}
+	before, err := s.seedDocumentGeneration(ctx, first.relPath)
+	if err != nil {
+		return nil, err
+	}
+	seed, err := s.resolveRelatedSource(ctx, cs, q)
+	if err != nil {
+		return nil, err
+	}
+	if seed.relPath != first.relPath {
+		return nil, model.ErrForbidden
+	}
+	if err := s.rejectPendingSeed(ctx, seed); err != nil {
+		return nil, err
+	}
+	after, err := s.seedDocumentGeneration(ctx, seed.relPath)
+	if err != nil {
+		return nil, err
+	}
+	if after != before {
+		s.logf("related: the seed document changed during the request; the seed text is not used")
+		return nil, model.ErrForbidden
+	}
+	return seed, nil
+}
+
+// seedDocumentGeneration returns a value that changes when the seed document
+// is reset for a secret-policy change or replaced by a scan: its status and
+// content hash. A store with no row for the path gives the empty generation.
+// Any other store error is returned: the seed cannot be proven current.
+func (s *Service) seedDocumentGeneration(ctx context.Context, relPath string) (string, error) {
+	s.metaMu.RLock()
+	st := s.store
+	s.metaMu.RUnlock()
+	if st == nil || relPath == "" {
+		return "", nil
+	}
+	// A store that reports generations includes the pending mark in them, so
+	// a reset of a document that has no content hash yet is seen too.
+	if gs, ok := st.(documentGenerationStore); ok {
+		gens, err := gs.DocumentGenerations(ctx, []string{relPath})
+		if err != nil {
+			return "", fmt.Errorf("related: read the seed document: %w", err)
+		}
+		return gens[relPath], nil
+	}
+	doc, err := st.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("related: read the seed document: %w", err)
+	}
+	return doc.Status + "\x00" + doc.ContentHash, nil
+}
+
+// rejectPendingSeed returns model.ErrForbidden when the seed document waits
+// for a secret-policy re-evaluation, for a chunk_id seed and a rel_path seed
+// alike. A failed lookup is returned: the seed cannot be proven safe to embed.
+func (s *Service) rejectPendingSeed(ctx context.Context, seed *relatedSeed) error {
+	pending, err := s.secretReevalPending(ctx, seed.relPath)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return model.ErrForbidden
+	}
+	return nil
 }
 
 // resolveRelatedSource dispatches to the chunk_id or rel_path seed resolver.
@@ -173,8 +279,10 @@ func resolveRelatedPathSeed(ctx context.Context, cs relatedChunkStore, q model.R
 // resolved seed: it embeds the per-axis seed text(s), searches each active index
 // axis with the §9.5/§9.6 filters, merges any per-axis pools, drops the excluded
 // seed/same-document chunks, orders by descending similarity (ascending chunk_id
-// tiebreak), truncates to k, and prunes tombstoned chunks — exactly as
-// dir2mcp_search does for its final result set.
+// tiebreak), and prunes tombstoned chunks. It returns the whole ranked pool,
+// not only the first k: the caller runs the secret screen over the pool and
+// cuts to k after it, so a pending hit never pushes a safe one out of the
+// result (spec 0.99.0).
 func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, seed *relatedSeed, k int) ([]model.SearchHit, string, error) {
 	filters := model.SearchQuery{
 		K:             k,
@@ -190,7 +298,9 @@ func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, se
 	perAxis := make([][]model.SearchHit, 0, 2)
 	searched := make([]string, 0, 2)
 	for _, ax := range activeAxes(seed.axis) {
-		texts := seed.textsByAxis[ax]
+		// Seed text that matches the secret policy is not sent to the
+		// embedder (spec 0.99.0); an axis with no text left is skipped.
+		texts := s.seedTextsNotSecret(seed.textsByAxis[ax])
 		if len(texts) == 0 {
 			continue
 		}
@@ -215,7 +325,6 @@ func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, se
 	merged := mergeRelatedAxes(perAxis)
 	merged = excludeSeedChunks(merged, seed.excludeIDs)
 	sortRelatedHits(merged)
-	merged = truncateSearchHits(merged, k)
 	return s.pruneTombstonedHits(ctx, merged), effectiveIndexUsed(seed.axis, searched), nil
 }
 
@@ -243,6 +352,21 @@ func (s *Service) indexAndModelForAxis(axis string) (model.Index, string) {
 		return s.codeIndex, s.codeModel
 	}
 	return s.textIndex, s.textModel
+}
+
+// seedTextsNotSecret drops the seed texts that match the secret policy, so
+// text that the policy withholds is not sent to the embedder again.
+func (s *Service) seedTextsNotSecret(texts []string) []string {
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	kept := make([]string, 0, len(texts))
+	for _, text := range texts {
+		if !matcher.MatchString(text) {
+			kept = append(kept, text)
+		}
+	}
+	return kept
 }
 
 // buildSeedVector re-embeds the seed text(s) at the index-time embed role and

@@ -1,25 +1,22 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/config"
-	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
-// anyMatch reports whether any of the compiled default secret patterns matches s.
+// anyMatch reports whether the secret patterns, with the default allow list,
+// match s: the verdict the product reaches (SPEC §7.2).
 func anyMatch(t *testing.T, patterns []string, s string) bool {
 	t.Helper()
-	res, err := ingest.CompileSecretPatterns(patterns)
+	m, err := secretmatch.Compile(patterns, config.DefaultSecretAllowPatterns())
 	if err != nil {
-		t.Fatalf("CompileSecretPatterns: %v", err)
+		t.Fatalf("secretmatch.Compile: %v", err)
 	}
-	for _, re := range res {
-		if re.MatchString(s) {
-			return true
-		}
-	}
-	return false
+	return m.MatchString(s)
 }
 
 // TestDefaultSecretPatterns_MatchProviderKeys is a regression guard for #443:
@@ -57,6 +54,123 @@ func TestDefaultSecretPatterns_NoProseFalsePositives(t *testing.T) {
 	for _, s := range prose {
 		if anyMatch(t, patterns, s) {
 			t.Errorf("default secret patterns false-positived on prose %q", s)
+		}
+	}
+}
+
+// Synthetic fixture builders for the spec 0.99.0 boundary tests. The prefixes
+// are split by concatenation so a repository secret scanner never sees a
+// credential-shaped literal in this file; every value is a repeated run of
+// obviously fake characters.
+func synthRun(n int) string {
+	return repeatAlphabet("Xy7Zq9Wv", n)
+}
+
+func synthLowerRun(n int) string {
+	return repeatAlphabet("x7z9q4", n)
+}
+
+func repeatAlphabet(alphabet string, n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[i%len(alphabet)]
+	}
+	return string(b)
+}
+
+// TestDefaultSecretPatterns_Boundaries_0_99_0 pins the spec 0.99.0 defaults
+// through the real default set, the default allow list and the real matcher.
+// The must-not-match rows are the false positives an archive hit: 13 Word
+// documents withheld through a pasted YouTube redirect link (`redir_token=`)
+// and 4 through transliterated URL slugs (the `sk-` inside `krasnoyarsk-`).
+// The must-match rows are the credential shapes the rules must keep catching.
+// The generic token rule stays broad, so a key that only ends in `token`
+// matches outside a URL query string.
+func TestDefaultSecretPatterns_Boundaries_0_99_0(t *testing.T) {
+	patterns := config.Default().SecretPatterns
+	tok := "to" + "ken"
+	skDash := "s" + "k-"
+	skUnder := "s" + "k_"
+
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		// Must NOT match.
+		{"youtube redirect link", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbWRkRThBZV" + synthRun(40) + "&q=https%3A%2F%2Fexample.org%2Fpage", false},
+		{"krasnoyarsk slug", "https://www.newstube.ru/media/b-elcin-i-konstantinova-v-krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
+		{"baikonur slug", "https://example.org/news/bajkonur-pu" + skDash + "soyuz-28-tm-77-kosmonavty-na-orbite", false},
+		{"task id with sk_ mid-word", "ta" + skUnder + synthLowerRun(32), false},
+		{"task id in prose", "see job ta" + skUnder + synthLowerRun(32) + " for details", false},
+		{"sk_ after an underscore", "task_" + skUnder + synthLowerRun(32), false},
+		// The two must-not-hit samples SPEC §7.2 (spec 0.99.0) lists verbatim.
+		{"spec redirect sample", "https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4&q=https%3A%2F%2Fexample.org", false},
+		{"spec slug sample", "https://example.org/news/krasnoyar" + skDash + "podpisanie-dogovorov-o-sotrudnichestve", false},
+
+		// MUST match.
+		// The default allow list trusts no parameter name outside the YouTube
+		// redirect link, so a pagination cursor on another host matches.
+		{"pagination cursor in a query string", "https://example.org/list?next_page_" + tok + "=" + synthRun(30), true},
+		{"pagination key outside a query string", "next_page_" + tok + "=" + synthRun(30), true},
+		{"csrf form field", "csrf_" + tok + "=" + synthRun(30), true},
+		{"key that only ends in token", "my" + tok + "=" + synthRun(30), true},
+		{"bare token colon", tok + ": " + synthRun(24), true},
+		{"bare token equals at line start", tok + "=" + synthRun(24), true},
+		{"bare token equals on a later line", "# config\n" + tok + "=" + synthRun(24), true},
+		{"github token env", "GITHUB_" + strings.ToUpper(tok) + "=" + synthRun(40), true},
+		{"prefixed secret token env", "MY_APP_SECRET_" + strings.ToUpper(tok) + "=" + synthRun(30), true},
+		{"auth token header", "X-Auth-T" + tok[1:] + ": " + synthRun(30), true},
+		{"access token query", "access_" + tok + "=" + synthRun(30), true},
+		{"password reset token env", "PASSWORD_RESET_" + strings.ToUpper(tok) + "=" + synthRun(24), true},
+		{"vault token env", "VAULT_" + strings.ToUpper(tok) + "=" + synthRun(30), true},
+		{"ci job token env", "CI_JOB_" + strings.ToUpper(tok) + "=" + synthRun(30), true},
+		{"openai project key env", "OPENAI_API_KEY=" + skDash + "proj-" + synthRun(40), true},
+		{"quoted hyphen key", `"` + skDash + synthRun(40) + `"`, true},
+		{"stripe style key", "key = " + skUnder + synthLowerRun(32), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := anyMatch(t, patterns, tc.input); got != tc.want {
+				t.Errorf("default secret patterns match %q = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultSecretPatterns_KnownMissAfterAnUnderscore pins the known miss
+// that SPEC §7.2 (spec 0.99.0) and the docs state: the left boundary of the
+// `sk_`/`api_` rule and of the `sk-` rule cannot tell `task_sk_` from
+// `backup_sk_`, so a key that directly follows an underscore matches no
+// default. The same key after a space or `=` matches. The operator pattern
+// that the docs give as an example closes the miss.
+func TestDefaultSecretPatterns_KnownMissAfterAnUnderscore(t *testing.T) {
+	patterns := config.Default().SecretPatterns
+	skUnder := "s" + "k_" + synthLowerRun(32)
+	skDash := "s" + "k-" + synthRun(20)
+
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"sk_ key after an underscore", "backup_" + skUnder, false},
+		{"sk- key after an underscore", "backup_" + skDash, false},
+		{"sk_ key after a space", "backup " + skUnder, true},
+		{"sk_ key after =", "BACKUP=" + skUnder, true},
+		{"sk- key after a space", "backup " + skDash, true},
+		{"sk- key after =", "BACKUP=" + skDash, true},
+	}
+	for _, tc := range cases {
+		if got := anyMatch(t, patterns, tc.input); got != tc.want {
+			t.Errorf("%s: default secret patterns match %q = %v, want %v", tc.name, tc.input, got, tc.want)
+		}
+	}
+
+	withOperatorPattern := append(append([]string(nil), patterns...), `backup_sk[_-][A-Za-z0-9-]{20,}`)
+	for _, input := range []string{"backup_" + skUnder, "backup_" + skDash} {
+		if !anyMatch(t, withOperatorPattern, input) {
+			t.Errorf("the operator pattern from the docs does not match %q", input)
 		}
 	}
 }

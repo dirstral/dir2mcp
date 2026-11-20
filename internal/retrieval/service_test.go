@@ -468,7 +468,7 @@ func TestMatchExcludePattern_Concurrent(t *testing.T) {
 func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
 	root := t.TempDir()
 	// Keep the path inside root but do not create file contents; metadata should drive output.
-	path := filepath.Join(root, "docs", "ocr.txt")
+	path := filepath.Join(root, "docs", "ocr.pdf")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
 	}
@@ -476,11 +476,11 @@ func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
 	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetChunkMetadata(1, model.SearchHit{
-		RelPath: "docs/ocr.txt",
+		RelPath: "docs/ocr.pdf",
 		Snippet: "page-two-snippet",
 		Span:    model.Span{Kind: "page", Page: 2},
 	})
-	out, err := svc.OpenFile(context.Background(), "docs/ocr.txt", model.Span{Kind: "page", Page: 2}, 200)
+	out, err := svc.OpenFile(context.Background(), "docs/ocr.pdf", model.Span{Kind: "page", Page: 2}, 200)
 	if err != nil {
 		t.Fatalf("OpenFile failed: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
 
 func TestOpenFile_TimeSpan_FromMetadata(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "audio", "transcript.txt")
+	path := filepath.Join(root, "audio", "transcript.mp3")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
 	}
@@ -499,16 +499,16 @@ func TestOpenFile_TimeSpan_FromMetadata(t *testing.T) {
 	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetChunkMetadata(1, model.SearchHit{
-		RelPath: "audio/transcript.txt",
+		RelPath: "audio/transcript.mp3",
 		Snippet: "alpha",
 		Span:    model.Span{Kind: "time", StartMS: 1000, EndMS: 3000},
 	})
 	svc.SetChunkMetadata(2, model.SearchHit{
-		RelPath: "audio/transcript.txt",
+		RelPath: "audio/transcript.mp3",
 		Snippet: "beta",
 		Span:    model.Span{Kind: "time", StartMS: 4000, EndMS: 6000},
 	})
-	out, err := svc.OpenFile(context.Background(), "audio/transcript.txt", model.Span{Kind: "time", StartMS: 2000, EndMS: 5000}, 200)
+	out, err := svc.OpenFile(context.Background(), "audio/transcript.mp3", model.Span{Kind: "time", StartMS: 2000, EndMS: 5000}, 200)
 	if err != nil {
 		t.Fatalf("OpenFile failed: %v", err)
 	}

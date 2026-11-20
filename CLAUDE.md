@@ -13,6 +13,7 @@ dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. I
 - `internal/pdfutil`: pure-Go PDF helpers (page count, per-page extraction) for multimodal media chunks
 - `internal/avutil`: audio/video helpers (ffprobe duration, ffmpeg time-window extraction) for multimodal media chunks
 - `internal/retrieval`: search/ask/open_file logic
+- `internal/secretmatch`: the secret pattern and allow pattern matcher that every secret screen uses (SPEC §7.2)
 - `internal/mcp`: JSON-RPC/MCP server and tools
 - `internal/mistral`: Mistral client adapters
 - `internal/x402`: x402 types + facilitator client

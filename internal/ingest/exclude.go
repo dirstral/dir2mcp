@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // secretScanSampleBytes is the head-sample budget for a source whose searchable
@@ -52,8 +55,10 @@ func secretScanBytes(docType string, content []byte) []byte {
 	return contentSample(content)
 }
 
-func compileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
-	return CompileSecretPatterns(patterns)
+// compileSecretMatcher builds the one matcher every ingest screen uses: the
+// raw-byte scan, the derived-text screen and the error redaction (SPEC §7.2).
+func compileSecretMatcher(cfg config.Config) (*secretmatch.Matcher, error) {
+	return secretmatch.Compile(cfg.SecretPatterns, cfg.SecretAllowPatterns)
 }
 
 // CompileSecretPatterns compiles secret-detection regexes from config.
@@ -73,11 +78,14 @@ func CompileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
 	return compiled, nil
 }
 
-func hasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
-	return HasSecretMatch(sample, patterns)
+// hasSecretMatch reports whether sample holds a secret match that no allow
+// match covers (SPEC §7.2).
+func hasSecretMatch(sample []byte, matcher *secretmatch.Matcher) bool {
+	return matcher.Match(sample)
 }
 
-// HasSecretMatch reports whether any compiled secret regex matches sample.
+// HasSecretMatch reports whether any compiled secret regex matches sample. It
+// applies no allow list; ingest itself uses the secretmatch.Matcher.
 func HasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
 	for _, rx := range patterns {
 		if rx.Match(sample) {
@@ -93,18 +101,8 @@ func HasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
 // to the support bundle) so that a provider error that quotes back the
 // triggering payload — e.g. a misconfigured Authorization header or an
 // echoed API key — cannot leak through the diagnostic surface.
-func RedactSecretsInMessage(msg string, patterns []*regexp.Regexp) string {
-	if msg == "" {
-		return msg
-	}
-	out := msg
-	for _, rx := range patterns {
-		if rx == nil {
-			continue
-		}
-		out = rx.ReplaceAllString(out, "[REDACTED]")
-	}
-	return out
+func RedactSecretsInMessage(msg string, matcher *secretmatch.Matcher) string {
+	return matcher.Redact(msg)
 }
 
 // highConfidenceCredentialRedactors is the shared safety net of high-confidence

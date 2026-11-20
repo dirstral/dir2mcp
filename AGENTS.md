@@ -21,6 +21,7 @@ dir2mcp is a single-binary Go service that indexes local directory content and s
 - `internal/config` - config precedence and validation
 - `internal/ingest` - ingestion + derived representations
 - `internal/retrieval` - retrieval/search/ask/open_file services
+- `internal/secretmatch` - secret pattern and allow pattern matcher shared by ingest, retrieval and MCP
 - `internal/mcp` - MCP server and tool handlers
 - `internal/mistral` - Mistral provider client code
 - `internal/x402` - payment types and facilitator HTTP client

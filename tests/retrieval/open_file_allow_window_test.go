@@ -1,0 +1,346 @@
+package tests
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"github.com/dirstral/dir2mcp/internal/store"
+	"io"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/config"
+	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
+	"github.com/dirstral/dir2mcp/tests/testutil"
+)
+
+// SPEC §7.2 / §15.4 (spec 0.99.0): open_file checks the WHOLE source against
+// the secret policy before it returns any byte, so its decision is exactly the
+// decision secretmatch.Matcher.Match makes on the whole text. The cases below
+// broke earlier designs that judged the source in read windows.
+
+func openFileService(t *testing.T, root string, secret, allow []string) *retrieval.Service {
+	t.Helper()
+	svc := newBoundedService(root)
+	if err := svc.SetSecretPolicy(secret, allow); err != nil {
+		t.Fatalf("SetSecretPolicy: %v", err)
+	}
+	return svc
+}
+
+func writeRootFile(t *testing.T, root, relPath string, body []byte) {
+	t.Helper()
+	abs := filepath.Join(root, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(abs, body, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func TestOpenFile_WholeSourceDecisionEqualsMatch(t *testing.T) {
+	tok := "to" + "ken"
+	cases := []struct {
+		name   string
+		allow  []string
+		body   string
+		refuse bool
+	}{
+		// An allow match ends at a 64 KiB read boundary, but the text runs on.
+		{"anchored allow, run goes on", []string{`^` + tok + `=A+$`}, tok + "=" + strings.Repeat("A", 100000) + "!", true},
+		{"anchored allow, whole source is one allow match", []string{`^` + tok + `=A+$`}, tok + "=" + strings.Repeat("A", 100000), false},
+		// The key and its value are 65,531 spaces apart: \s* is unbounded.
+		{"key far before its value", nil, tok + strings.Repeat(" ", 65531) + "=" + strings.Repeat("A", 24), true},
+		// An unanchored allow match at a cut must not make an anchored one
+		// match there.
+		{"anchored allow far from the start", []string{`prefix`, `^prefix\s*` + tok + `=[A-Z]+!`},
+			strings.Repeat("x", 61440) + "prefix" + strings.Repeat(" ", 4090) + tok + "=" + strings.Repeat("A", 24) + "!", true},
+		{"anchored allow at the real start", []string{`prefix`, `^prefix\s*` + tok + `=[A-Z]+!`},
+			"prefix" + strings.Repeat(" ", 4090) + tok + "=" + strings.Repeat("A", 24) + "!", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := secretmatch.Compile([]string{secretmatch.GenericTokenPattern}, tc.allow)
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+			if got := m.MatchString(tc.body); got != tc.refuse {
+				t.Fatalf("whole-text Match = %v, the case expects %v", got, tc.refuse)
+			}
+			root := testutil.TempDir(t)
+			writeRootFile(t, root, "docs/case.txt", []byte(tc.body))
+			svc := openFileService(t, root, []string{secretmatch.GenericTokenPattern}, tc.allow)
+			_, err = svc.OpenFile(context.Background(), "docs/case.txt", model.Span{}, 20000)
+			if tc.refuse && !errors.Is(err, model.ErrForbidden) {
+				t.Fatalf("OpenFile err = %v, want ErrForbidden (Match refuses this source)", err)
+			}
+			if !tc.refuse && err != nil {
+				t.Fatalf("OpenFile err = %v, want the head of the source (Match serves it)", err)
+			}
+		})
+	}
+}
+
+// TestOpenFile_RandomSourcesEqualMatch compares the open_file decision with
+// Match on random sources built from benign links, credentials, long runs and
+// long whitespace gaps, for the shipped defaults and two operator allow lists.
+func TestOpenFile_RandomSourcesEqualMatch(t *testing.T) {
+	tok := "to" + "ken"
+	upper := strings.ToUpper(tok)
+	cfg := config.Default()
+	policies := []struct {
+		name          string
+		secret, allow []string
+	}{
+		{"defaults", cfg.SecretPatterns, cfg.SecretAllowPatterns},
+		{"anchored", []string{secretmatch.GenericTokenPattern}, []string{`^` + tok + `=A+$`, `prefix`, `^prefix\s*` + tok + `=[A-Z]+!`}},
+		{"suffix", []string{secretmatch.GenericTokenPattern}, []string{`feature_` + tok + `=[A-Za-z0-9]+;ok`}},
+	}
+	pieces := []string{
+		"plain prose about the regional budget. ",
+		"https://www.youtube.com/redirect?event=video_description&redir_" + tok + "=QUFFLUhqbkJ3T2xYbE5fZ3lQdmZ4MTIz==&q=x ",
+		"https://example.org/list?page_" + tok + "=abc?GITHUB_" + upper + "=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv ",
+		"GITHUB_" + upper + "=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv\n",
+		"feature_" + tok + "=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9;ok ",
+		"feature_" + tok + "=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9;no ",
+		tok + strings.Repeat(" ", 70000) + "=" + strings.Repeat("A", 24),
+		"prefix" + strings.Repeat(" ", 4090) + tok + "=" + strings.Repeat("A", 24) + "!",
+		strings.Repeat("x", 61440),
+		tok + "=" + strings.Repeat("A", 70000),
+		"!",
+	}
+	rng := rand.New(rand.NewSource(1167))
+	root := testutil.TempDir(t)
+	services := make([]*retrieval.Service, len(policies))
+	matchers := make([]*secretmatch.Matcher, len(policies))
+	for i, p := range policies {
+		services[i] = openFileService(t, root, p.secret, p.allow)
+		m, err := secretmatch.Compile(p.secret, p.allow)
+		if err != nil {
+			t.Fatalf("compile %s: %v", p.name, err)
+		}
+		matchers[i] = m
+	}
+	var refused, served int
+	for trial := 0; trial < 60; trial++ {
+		var b strings.Builder
+		for n := 1 + rng.Intn(5); n > 0; n-- {
+			b.WriteString(pieces[rng.Intn(len(pieces))])
+		}
+		rel := fmt.Sprintf("docs/random-%d.txt", trial)
+		writeRootFile(t, root, rel, []byte(b.String()))
+		for i, p := range policies {
+			want := matchers[i].MatchString(b.String())
+			_, err := services[i].OpenFile(context.Background(), rel, model.Span{}, 200)
+			got := errors.Is(err, model.ErrForbidden)
+			if !got && err != nil {
+				t.Fatalf("%s trial %d: OpenFile err = %v", p.name, trial, err)
+			}
+			if got != want {
+				t.Fatalf("%s trial %d: open_file refused=%v, Match=%v", p.name, trial, got, want)
+			}
+			if want {
+				refused++
+			} else {
+				served++
+			}
+		}
+	}
+	if refused == 0 || served == 0 {
+		t.Fatalf("random sources are one-sided: %d refused, %d served", refused, served)
+	}
+}
+
+// TestOpenFile_SourceAboveTheCapIsFileTooLarge pins the bound: ingest never
+// content-checked or indexed a file above ingest.max_file_mb, so open_file
+// refuses it with FILE_TOO_LARGE and reads no more than cap+1 bytes.
+func TestOpenFile_SourceAboveTheCapIsFileTooLarge(t *testing.T) {
+	root := testutil.TempDir(t)
+	const capBytes = 1 << 20
+	body := repeatToSize("remote object line with enough text to be interesting\n", 4<<20)
+	fs := &cappedCorpusFS{objects: map[string][]byte{"docs/big.md": []byte(body)}, cap: capBytes + 1}
+	svc := newBoundedService(root)
+	svc.SetCorpusFS(fs)
+	svc.SetMaxFileBytes(capBytes)
+
+	_, err := svc.OpenFile(context.Background(), "docs/big.md", model.Span{}, 20000)
+	if !errors.Is(err, corpusfs.ErrObjectTooLarge) {
+		t.Fatalf("OpenFile err = %v, want corpusfs.ErrObjectTooLarge", err)
+	}
+	if fs.bytesRead > capBytes+1 {
+		t.Fatalf("read %d bytes; the read must stop at cap+1 (%d)", fs.bytesRead, capBytes+1)
+	}
+
+	// A source at the cap is served.
+	fs.objects["docs/at-cap.md"] = []byte(body[:capBytes])
+	fs.bytesRead = 0
+	if _, err := svc.OpenFile(context.Background(), "docs/at-cap.md", model.Span{}, 20000); err != nil {
+		t.Fatalf("OpenFile at the cap: %v", err)
+	}
+}
+
+// changingCorpusFS serves a clean document on the first Open and a document
+// with a credential on every later Open. It stands in for a source that
+// changes between two reads of one request.
+type changingCorpusFS struct {
+	first, later []byte
+	opens        int
+}
+
+func (f *changingCorpusFS) Open(ctx context.Context, _ string) (io.ReadSeekCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.opens++
+	data := f.later
+	if f.opens == 1 {
+		data = f.first
+	}
+	read := 0
+	return &cappedReader{data: data, cap: len(data) + 1, read: &read}, nil
+}
+
+func (f *changingCorpusFS) Walk(context.Context, string, corpusfs.Options) ([]corpusfs.DiscoveredFile, error) {
+	return nil, errors.New("changingCorpusFS: Walk not implemented")
+}
+
+func (f *changingCorpusFS) Localize(context.Context, string) (string, func(), error) {
+	return "", func() {}, errors.New("changingCorpusFS: Localize not implemented")
+}
+
+// TestOpenFile_SliceComesFromTheCheckedBytes pins SPEC §15.4 (spec 0.99.0):
+// the slice that open_file returns comes from the same bytes that the secret
+// check covered. The source is read once per call, for every span kind of a
+// text source. A source that changes after that read cannot put unchecked
+// content into the answer: a second read would return the credential here.
+func TestOpenFile_SliceComesFromTheCheckedBytes(t *testing.T) {
+	clean := "line one\nline two\nline three\n"
+	changed := "line one\nGITHUB_" + "TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv\nline three\n"
+	spans := map[string]model.Span{
+		"default text": {},
+		"line range":   {Kind: "lines", StartLine: 2, EndLine: 2},
+		"page":         {Kind: "page", Page: 1},
+	}
+	for name, span := range spans {
+		fs := &changingCorpusFS{first: []byte(clean), later: []byte(changed)}
+		svc := newBoundedService(testutil.TempDir(t))
+		svc.SetCorpusFS(fs)
+		out, err := svc.OpenFile(context.Background(), "docs/notes.txt", span, 2000)
+		if err != nil {
+			t.Fatalf("%s: OpenFile: %v", name, err)
+		}
+		if fs.opens != 1 {
+			t.Errorf("%s: the source was opened %d times, want 1 (check and slice use one read)", name, fs.opens)
+		}
+		if strings.Contains(out, "Xy7Zq9Wv") || !strings.Contains(out, "line two") {
+			t.Errorf("%s: answer = %q, want text from the checked read only", name, out)
+		}
+	}
+}
+
+// TestOpenFile_TextNativeMetadataSpanChecksTheWholeSource pins SPEC §15.4 for
+// a text-native path that has page or time chunks in the index. The stored
+// chunks can serve the span, but the whole-source rule still applies: a
+// credential outside the requested span refuses the call. A clean source
+// returns the stored slice only when the stored document holds those exact
+// bytes; after an edit that the index has not seen, the span comes from the
+// checked bytes, not from the stored chunks of the earlier version. A
+// document with derived text (a PDF) keeps the stored-chunk route and needs
+// no source read.
+func TestOpenFile_TextNativeMetadataSpanChecksTheWholeSource(t *testing.T) {
+	credential := "GITHUB_" + "TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv"
+	spans := map[string]model.Span{
+		"page": {Kind: "page", Page: 2},
+		"time": {Kind: "time", StartMS: 1000, EndMS: 3000},
+	}
+	indexed := "stored slice\nmore text\n"
+	edited := "first page\f\n00:00:02 edited slice\n"
+	for name, span := range spans {
+		root := testutil.TempDir(t)
+		st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
+		if err := st.Init(context.Background()); err != nil {
+			t.Fatalf("store init: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		sum := sha256.Sum256([]byte(indexed))
+		if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "docs/notes.txt", DocType: "txt", Status: "ok", ContentHash: hex.EncodeToString(sum[:])}); err != nil {
+			t.Fatalf("UpsertDocument: %v", err)
+		}
+		svc := retrieval.NewService(st, nil, nil, nil)
+		svc.SetRootDir(root)
+		svc.SetStateDir(filepath.Join(root, ".dir2mcp"))
+		svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/notes.txt", Snippet: "stored slice", Span: span})
+		svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/scan.pdf", Snippet: "stored pdf slice", Span: span})
+
+		writeRootFile(t, root, "docs/notes.txt", []byte(indexed+credential+"\n"))
+		if _, err := svc.OpenFile(context.Background(), "docs/notes.txt", span, 200); !errors.Is(err, model.ErrForbidden) {
+			t.Errorf("%s span: a credential outside the span: err = %v, want ErrForbidden", name, err)
+		}
+
+		writeRootFile(t, root, "docs/notes.txt", []byte(indexed))
+		out, err := svc.OpenFile(context.Background(), "docs/notes.txt", span, 200)
+		if err != nil || out != "stored slice" {
+			t.Errorf("%s span: clean indexed source = (%q, %v), want the stored slice", name, out, err)
+		}
+
+		writeRootFile(t, root, "docs/notes.txt", []byte(edited))
+		out, err = svc.OpenFile(context.Background(), "docs/notes.txt", span, 200)
+		if err != nil || strings.Contains(out, "stored slice") || !strings.Contains(out, "edited slice") {
+			t.Errorf("%s span: edited source = (%q, %v), want the span of the checked bytes", name, out, err)
+		}
+
+		out, err = svc.OpenFile(context.Background(), "docs/scan.pdf", span, 200)
+		if err != nil || out != "stored pdf slice" {
+			t.Errorf("%s span: PDF with no source file = (%q, %v), want the stored slice", name, out, err)
+		}
+	}
+}
+
+// TestOpenFile_ReturnedTextIsCheckedAfterTheCut pins SPEC §7.2 for the text
+// that open_file returns. The allow pattern `token=A+;ok` covers the
+// assignment only together with its `;ok` end. The whole source holds that
+// end, so the whole-source check passes. A cut to max_chars inside the value
+// removes it: the returned text then holds a generic token match with no
+// cover, and the call must be refused. A cut after the cover is served.
+func TestOpenFile_ReturnedTextIsCheckedAfterTheCut(t *testing.T) {
+	tok := "to" + "ken"
+	allow := []string{tok + `=A+;ok`}
+	secret := []string{secretmatch.GenericTokenPattern}
+	const maxChars = 200
+	// The cut at 200 characters falls after 25 A's, before ";ok".
+	pad := strings.Repeat("x", maxChars-len(tok)-1-25-1) + " "
+	body := pad + tok + "=" + strings.Repeat("A", 30) + ";ok and more text after the cover\n"
+	m, err := secretmatch.Compile(secret, allow)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if m.MatchString(body) || !m.MatchString(body[:maxChars]) {
+		t.Fatal("the fixture must pass as a whole and match once cut to 200 characters")
+	}
+
+	root := testutil.TempDir(t)
+	writeRootFile(t, root, "docs/cut.txt", []byte(body))
+	svc := openFileService(t, root, secret, allow)
+	if out, err := svc.OpenFile(context.Background(), "docs/cut.txt", model.Span{}, maxChars); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("OpenFile cut inside the allow cover = (%q, %v), want ErrForbidden", out, err)
+	}
+	out, err := svc.OpenFile(context.Background(), "docs/cut.txt", model.Span{}, maxChars+40)
+	if err != nil || !strings.Contains(out, ";ok") {
+		t.Fatalf("OpenFile cut after the allow cover = (%q, %v), want the text with its cover", out, err)
+	}
+
+	// The same cut on a stored page slice of a document with derived text.
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/scan.pdf", Snippet: body, Span: model.Span{Kind: "page", Page: 1}})
+	if out, err := svc.OpenFile(context.Background(), "docs/scan.pdf", model.Span{Kind: "page", Page: 1}, maxChars); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("OpenFile page slice cut inside the allow cover = (%q, %v), want ErrForbidden", out, err)
+	}
+}

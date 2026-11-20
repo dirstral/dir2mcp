@@ -97,6 +97,9 @@ type App struct {
 	newIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	newStore     func(config.Config) model.Store
 	newRetriever func(config.Config, model.Store) model.Retriever
+	// wrapRetriever is RuntimeHooks.WrapRetriever; nil leaves the retriever
+	// as built.
+	wrapRetriever func(model.Retriever) model.Retriever
 	// newIndex replaces the local index.backend dispatch for one kind ("text"
 	// or "code"), returning the index and the path it persists to. Nil in
 	// production; tests set it via RuntimeHooks.NewIndex.
@@ -182,6 +185,13 @@ type RuntimeHooks struct {
 	// networked qdrant/pgvector branches. It is called once per kind, from two
 	// goroutines at once, so an implementation must be safe for concurrent use.
 	NewIndex func(config.Config, string) (model.Index, string)
+	// WrapRetriever receives the retrieval service that the local ask path
+	// built, fully configured, and returns the retriever the command uses. It
+	// lets a test under tests/ check that wiring (the secret policy, SPEC
+	// §7.2) without a model provider: the wrapper can answer Ask and Search
+	// itself and keep the real service for an open_file check. Unlike
+	// NewRetriever it does not replace the construction.
+	WrapRetriever func(model.Retriever) model.Retriever
 }
 
 type globalOptions struct {
@@ -426,6 +436,7 @@ func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	if hooks.NewIndex != nil {
 		app.newIndex = hooks.NewIndex
 	}
+	app.wrapRetriever = hooks.WrapRetriever
 	return app
 }
 
@@ -908,6 +919,17 @@ func openHNSWForAsk(ctx context.Context, path, identity string) (*index.HNSWInde
 	return ix, nil
 }
 
+// configureSecretPolicy installs security.secret_patterns and
+// security.secret_allow_patterns on a retrieval service (SPEC §7.2). The `up`
+// server and the local ask path both call it, so open_file and the serve-time
+// screen apply the operator's lists, not only the built-in defaults.
+func configureSecretPolicy(ret *retrieval.Service, cfg config.Config) error {
+	if err := ret.SetSecretPolicy(cfg.SecretPatterns, cfg.SecretAllowPatterns); err != nil {
+		return fmt.Errorf("compile secret patterns: %w", err)
+	}
+	return nil
+}
+
 // buildRetrieverForAsk constructs a retrieval service for the ask path:
 // it loads the text/code HNSW indexes, resolves the embed/chat clients,
 // wires reranking, and preloads embedded chunk metadata. It returns the
@@ -933,6 +955,11 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 
 	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
+	if err := configureSecretPolicy(ret, cfg); err != nil {
+		_ = textIx.Close()
+		_ = codeIx.Close()
+		return nil, nil, err
+	}
 	ret.SetQueryEmbeddingModel(etm)
 	ret.SetCodeEmbeddingModel(ecm)
 	ret.SetCodeIndex(codeIx)
@@ -1009,6 +1036,9 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	cleanup := func() {
 		_ = textIx.Close()
 		_ = codeIx.Close()
+	}
+	if a.wrapRetriever != nil {
+		return a.wrapRetriever(ret), cleanup, nil
 	}
 	return ret, cleanup, nil
 }

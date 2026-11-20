@@ -168,7 +168,7 @@ func TestOpenFile_MarkdownDefault_UnchangedBehavior(t *testing.T) {
 // that open_file on a path with a binary extension that actually resolves to a
 // directory returns ErrDocTypeUnsupported (mapped to DOC_TYPE_UNSUPPORTED at
 // the MCP layer) rather than bubbling an opaque OS error up as an
-// INTERNAL_ERROR. This mirrors how openFileFromResolvedPath rejects directory
+// INTERNAL_ERROR. This mirrors how the text-native read (openSource) rejects directory
 // targets and prevents the OCR-cache fallback from leaking EISDIR.
 func TestOpenFile_PDFExtensionOnDirectory_ReturnsErrDocTypeUnsupported(t *testing.T) {
 	root := testutil.TempDir(t)

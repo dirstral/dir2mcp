@@ -1,6 +1,7 @@
 package retrieval
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,6 +28,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/promptrules"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/usage"
 )
 
@@ -77,14 +79,19 @@ var defaultPathExcludes = []string{
 	"**/id_rsa",
 }
 
-var defaultSecretPatternLiterals = []string{
-	`AKIA[0-9A-Z]{16}`,
-	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
+// defaultSecretPatternLiterals is the retrieval baseline: every shipped
+// default of security.secret_patterns (SPEC §7.2). open_file and the
+// serve-time screen always apply it, also when the operator sets a list of
+// their own. It is read from config.Default(), so it can never drift from the
+// defaults that ingest applies.
+var defaultSecretPatternLiterals = config.Default().SecretPatterns
 
-	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
-	`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
-}
+// defaultSecretAllowPatternLiterals is the shipped default of
+// security.secret_allow_patterns. NewService starts with it, so a service that
+// is never configured screens the way a default deployment does.
+// SetSecretPolicy and SetSecretAllowPatterns replace it with the operator's
+// list.
+var defaultSecretAllowPatternLiterals = config.DefaultSecretAllowPatterns()
 
 const (
 	defaultOverfetchMultiplier = 5
@@ -334,7 +341,23 @@ type Service struct {
 	pathExcludes    []string
 	// cached compiled regexps for exclude patterns; keys are normalized patterns
 	excludeRegexps map[string]*regexp.Regexp
-	secretPatterns []*regexp.Regexp
+	// secretMatcher screens returned text (SPEC §7.2): the baseline plus the
+	// operator's secret patterns, and the allow list. secretPatternList and
+	// secretAllowList hold the sources it was built from, so each setter can
+	// rebuild it with the other list unchanged.
+	secretMatcher     *secretmatch.Matcher
+	secretPatternList []string
+	secretAllowList   []string
+	// secretOperatorList is the operator list as last configured, without the
+	// baseline; nil until a setter runs (then the shipped defaults apply).
+	secretOperatorList []string
+	// ingestPolicy is the policy ingest applies for the same configuration:
+	// the operator lists as configured, without the retrieval baseline. It is
+	// compared with the policy the store recorded (see
+	// secretPolicyTransitionPending). ingestPolicyKnown is false until
+	// SetSecretPolicy installs the configured lists.
+	ingestPolicy      secretmatch.Policy
+	ingestPolicyKnown bool
 	// hybridEnabled toggles BM25+vector RRF fusion in Search. Defaults to
 	// true; the engine can disable it via SetHybridEnabled when the operator
 	// sets retrieval.hybrid.enabled=false.
@@ -504,13 +527,9 @@ type Service struct {
 var _ model.Retriever = (*Service)(nil)
 
 func NewService(store model.Store, index model.Index, embedder model.Embedder, gen model.Generator) *Service {
-	compiledPatterns := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals))
-	for _, pattern := range defaultSecretPatternLiterals {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			panic(fmt.Errorf("invalid default secret pattern %q: %w", pattern, err))
-		}
-		compiledPatterns = append(compiledPatterns, re)
+	secretMatcher, err := secretmatch.Compile(defaultSecretPatternLiterals, defaultSecretAllowPatternLiterals)
+	if err != nil {
+		panic(fmt.Errorf("invalid default secret pattern: %w", err))
 	}
 	// overfetchMultiplier defaults to 5; callers may override it with
 	// SetOverfetchMultiplier to tune for their workload.  Values less than
@@ -537,7 +556,9 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		protocolVersion:     "2025-11-25",
 		excludeRegexps:      make(map[string]*regexp.Regexp),
 		pathExcludes:        append([]string(nil), defaultPathExcludes...),
-		secretPatterns:      compiledPatterns,
+		secretMatcher:       secretMatcher,
+		secretPatternList:   append([]string(nil), defaultSecretPatternLiterals...),
+		secretAllowList:     append([]string(nil), defaultSecretAllowPatternLiterals...),
 		hybridEnabled:       true,
 		rerankCandidatePool: defaultRerankCandidatePool,
 		hydeMode:            hydeModeFuse,
@@ -1219,29 +1240,135 @@ func (s *Service) SetPathExcludes(patterns []string) {
 	s.metaMu.Unlock()
 }
 
+// SetSecretPatterns installs security.secret_patterns, merged with the
+// baseline, and keeps the current allow list. It goes through the same path
+// as SetSecretPolicy, so the ingest policy that the transition check compares
+// stays in step.
 func (s *Service) SetSecretPatterns(patterns []string) error {
-	// start with compiled defaults so that baseline secret-detection
-	// patterns (AWS keys, JWT tokens, etc.) are never dropped when callers
-	// add custom patterns.
-	compiled := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals)+len(patterns))
-	for _, pattern := range defaultSecretPatternLiterals {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return fmt.Errorf("failed to compile default secret pattern %q: %w", pattern, err)
-		}
-		compiled = append(compiled, re)
+	s.metaMu.RLock()
+	allow := append([]string{}, s.secretAllowList...)
+	s.metaMu.RUnlock()
+	return s.SetSecretPolicy(patterns, allow)
+}
+
+// SetSecretAllowPatterns installs security.secret_allow_patterns (SPEC §7.2)
+// and keeps the current operator secret list. A secret match that an allow
+// match covers is cancelled. The list replaces the default allow list; an
+// empty list cancels nothing. It goes through the same path as
+// SetSecretPolicy.
+func (s *Service) SetSecretAllowPatterns(patterns []string) error {
+	s.metaMu.RLock()
+	operator := s.secretOperatorList
+	s.metaMu.RUnlock()
+	if operator == nil {
+		operator = defaultSecretPatternLiterals
 	}
-	for _, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return err
-		}
-		compiled = append(compiled, re)
+	return s.SetSecretPolicy(append([]string{}, operator...), patterns)
+}
+
+// SetSecretPolicy installs security.secret_patterns (merged with the
+// baseline) and security.secret_allow_patterns in one step. Nothing changes
+// when either list does not compile. Every secret setter goes through it, so
+// the matcher and the ingest policy (the operator lists as configured, which
+// the transition check compares with the recorded policy) never disagree.
+func (s *Service) SetSecretPolicy(patterns, allowPatterns []string) error {
+	merged := make([]string, 0, len(defaultSecretPatternLiterals)+len(patterns))
+	merged = append(merged, defaultSecretPatternLiterals...)
+	merged = append(merged, patterns...)
+	allow := append([]string{}, allowPatterns...)
+	matcher, err := secretmatch.Compile(merged, allow)
+	if err != nil {
+		return err
+	}
+	ingestMatcher, err := secretmatch.Compile(patterns, allow)
+	if err != nil {
+		return err
 	}
 	s.metaMu.Lock()
-	s.secretPatterns = compiled
+	s.secretMatcher = matcher
+	s.secretPatternList = merged
+	s.secretOperatorList = append([]string{}, patterns...)
+	s.secretAllowList = allow
+	s.ingestPolicy = ingestMatcher.Policy()
+	s.ingestPolicyKnown = true
 	s.metaMu.Unlock()
 	return nil
+}
+
+// secretPolicyRecordStore is the optional store capability that reads the
+// secret policy the last ingest transition recorded.
+type secretPolicyRecordStore interface {
+	SecretPolicyIdentity(ctx context.Context) (string, error)
+	SecretPolicyPatterns(ctx context.Context) ([]string, bool, error)
+	SecretPolicyAllowPatterns(ctx context.Context) ([]string, bool, error)
+}
+
+// secretPolicyTransitionPending reports whether the configured policy can
+// match more than the previous one, and ingest has not applied the move yet
+// (SPEC §7.2). Ingest records the new policy and marks every indexed document
+// pending in one transaction at the start of its next scan; from then on each
+// document comes back as soon as the scan decides it again. Until that
+// transaction, no document carries the mark, so this check withholds every
+// indexed document instead. It runs inside every serve path, so the order in
+// which a process starts its transport and its ingest worker, or a process
+// that serves without a scan (ask), cannot expose a document that the new
+// policy withholds. A move that the previous lists prove narrower hides
+// nothing.
+//
+// The previous policy is the one a scan recorded in the store. With no
+// record (a corpus that an older release indexed) it is unknown and counts
+// as broader.
+//
+// A service without the configured lists (no secret setter called) or a store
+// without the record skips the check. A store error is returned: the result
+// cannot be proven safe.
+func (s *Service) secretPolicyTransitionPending(ctx context.Context) (bool, error) {
+	s.metaMu.RLock()
+	active, known := s.ingestPolicy, s.ingestPolicyKnown
+	st := s.store
+	s.metaMu.RUnlock()
+	if !known {
+		return false, nil
+	}
+	rs, ok := st.(secretPolicyRecordStore)
+	if !ok {
+		return false, nil
+	}
+	identity, err := rs.SecretPolicyIdentity(ctx)
+	if err != nil {
+		return false, fmt.Errorf("secret policy: read the recorded secret policy identity: %w", err)
+	}
+	previous, err := recordedSecretPolicy(ctx, rs, identity, active)
+	if err != nil {
+		return false, err
+	}
+	return secretmatch.NeedsIndexedReevaluation(previous, active), nil
+}
+
+// recordedSecretPolicy reads the policy the store recorded, for the
+// transition check. The lists are read only when the recorded identity
+// differs from the active one. With no recorded identity the previous policy
+// is unknown.
+func recordedSecretPolicy(ctx context.Context, rs secretPolicyRecordStore, identity string, active secretmatch.Policy) (secretmatch.Recorded, error) {
+	previous := secretmatch.Recorded{Identity: identity}
+	if identity == "" {
+		return previous, nil
+	}
+	if identity == active.Identity() {
+		previous.Policy, previous.Known = active, true
+		return previous, nil
+	}
+	secret, secretKnown, err := rs.SecretPolicyPatterns(ctx)
+	if err != nil {
+		return previous, fmt.Errorf("secret policy: read the recorded security.secret_patterns list: %w", err)
+	}
+	allow, allowKnown, err := rs.SecretPolicyAllowPatterns(ctx)
+	if err != nil {
+		return previous, fmt.Errorf("secret policy: read the recorded security.secret_allow_patterns list: %w", err)
+	}
+	previous.Policy = secretmatch.Policy{Secret: secret, Allow: allow}
+	previous.Known = secretKnown && allowKnown
+	return previous, nil
 }
 
 func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
@@ -1659,29 +1786,10 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// slot it took (#686). A pool with no summary candidates (every corpus with
 	// the feature off) makes exactly one retrieval call and returns unchanged, so
 	// the flat path is untouched.
-	hits, err := s.searchWithSummaryRefill(ctx, query, poolK)
+	hits, err := s.searchScreenedPool(ctx, query, k, poolK)
 	if err != nil {
 		return nil, err
 	}
-	// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
-	// re-scores each hit by its source-document age, so the floor compares the
-	// decayed score and newer content survives a tie. Config-only; default 0 ⇒
-	// pass-through (no allocation, no lookups).
-	hits = s.applyRecencyDecay(ctx, hits)
-	// Apply the server-side relevance floor: after scoring/fusion/rerank,
-	// the optional HyDE fusion, any cross-lingual fusion, their dedup/truncation,
-	// and the recency decay, using each hit's final authoritative Score.
-	// Config-only; default 0 ⇒ pass-through.
-	hits = s.applyMinScoreFloor(hits)
-	// Truncate to the caller's k only now — after decay reordering and the floor
-	// have run over the wider pool — so decay determines top-k membership and the
-	// floor can surface k+1..k+n survivors. A no-op when poolK == k (#427).
-	hits = truncateSearchHits(hits, k)
-	// Prune (and evict) any chunk the store has since tombstoned — the partial
-	// incremental-reindex staleness of issue #409. Done LAST, on the small final
-	// result set, so at most k store lookups run per query and deleted content is
-	// never returned (nor cited) even before the next restart.
-	hits = s.pruneTombstonedHits(ctx, hits)
 	// Name each hit's absolute evidence verdict (SPEC §9.4.3, spec 0.55.0) as
 	// the last step, so the verdict describes the hit the caller actually
 	// receives, after every re-scoring stage above. The thresholds are the ones
@@ -1689,6 +1797,65 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 	// call computes the null baseline.
 	stampEvidenceVerdicts(s.effectiveEvidenceThresholds(ctx), hits)
 	return hits, nil
+}
+
+// secretScreenRefillRounds bounds how many times search widens its pool to
+// refill slots that the secret screen emptied.
+const secretScreenRefillRounds = 3
+
+// searchScreenedPool retrieves a pool of poolK candidates, applies the recency
+// decay, screens the pool against the secret policy (screenServedHits),
+// applies the relevance floor to the hits that remain, and only then cuts it
+// to k and prunes tombstoned chunks.
+// The screen runs BEFORE the cut, so the next candidate takes the place of a
+// hit that it removes. When the screen removed hits, fewer than k remain and
+// the pool was full, it retrieves a wider pool and tries again, up to
+// secretScreenRefillRounds times, so a credential that ranks first does not
+// cost the caller a result (SPEC §7.2, spec 0.99.0).
+func (s *Service) searchScreenedPool(ctx context.Context, query model.SearchQuery, k, poolK int) ([]model.SearchHit, error) {
+	for round := 0; ; round++ {
+		hits, err := s.searchWithSummaryRefill(ctx, query, poolK)
+		if err != nil {
+			return nil, err
+		}
+		retrieved := len(hits)
+		// Apply the opt-in recency time-decay just BEFORE the relevance floor: it
+		// re-scores each hit by its source-document age, so the floor compares the
+		// decayed score and newer content survives a tie. Config-only; default 0
+		// is a pass-through (no allocation, no lookups).
+		hits = s.applyRecencyDecay(ctx, hits)
+		// Leave out every hit of a document that waits for re-evaluation against
+		// a broader secret policy, and any hit whose text matches the secret
+		// pattern set, so a credential that a changed set finds is not served (and
+		// not placed in an ask prompt) before the scan retires it (spec 0.99.0).
+		// The screen runs BEFORE the relevance floor: the floor is relative to
+		// the best score of the set, so a withheld hit must not set it.
+		decayed := len(hits)
+		hits, err = s.screenServedHits(ctx, hits)
+		if err != nil {
+			return nil, err
+		}
+		screened := decayed - len(hits)
+		// Apply the server-side relevance floor: after scoring/fusion/rerank,
+		// the optional HyDE fusion, any cross-lingual fusion, their dedup/cut,
+		// the recency decay and the secret screen, using each hit's final
+		// authoritative Score. Config-only; default 0 is a pass-through.
+		hits = s.applyMinScoreFloor(hits)
+		if screened > 0 && len(hits) < k && retrieved >= poolK && round < secretScreenRefillRounds {
+			poolK = poolK*2 + screened
+			continue
+		}
+		// Cut to the caller's k only now, after decay reordering, the floor and
+		// the secret screen have run over the pool, so decay determines top-k
+		// membership and the floor and the screen can surface k+1..k+n survivors
+		// (#427).
+		hits = truncateSearchHits(hits, k)
+		// Prune (and evict) any chunk the store has since tombstoned (the partial
+		// incremental-reindex staleness of issue #409). Done on the small final
+		// result set, so at most k store lookups run per query and a tombstoned
+		// chunk is never returned (nor cited) even before the next restart.
+		return s.pruneTombstonedHits(ctx, hits), nil
+	}
 }
 
 // searchByMode runs the index-mode dispatch (text/code/both/auto) for one query
@@ -2207,21 +2374,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		}
 	}
 
-	citations := make([]model.Citation, 0, len(hits))
-	for _, hit := range hits {
-		citations = append(citations, model.Citation{
-			ChunkID: hit.ChunkID,
-			RelPath: hit.RelPath,
-			Title:   hit.Title,
-			Span:    hit.Span,
-		})
-	}
+	citations := citationsForHits(hits)
 
 	if abstained, ok := s.abstainOnWeakEvidence(ctx, question, hits); ok {
 		return abstained, nil
 	}
 
-	answer := buildFallbackAnswer(question, hits)
+	answer := buildFallbackAnswer(question, hits, s.currentSecretMatcher())
 	// faithfulness is the #336 answer-level verdict. It stays Unchecked on
 	// every path that does not verify, which §9.4.4 defines as "no judgement"
 	// rather than as a weak pass.
@@ -2245,7 +2404,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		sourceReason = ""
 	case s.gen != nil && len(hits) > 0:
 		var shown string
-		answer, citations, shown, sourceReason = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		// hits becomes the set that is still eligible after the prompt was
+		// built: a document that became pending in the meantime is left out of
+		// the result, the citations and the fallback answer too (spec 0.99.0).
+		answer, citations, shown, sourceReason, hits = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
 		// Grounding check (#336): read the answer back against the exact
 		// context the model was shown. An unsupported answer is withheld
 		// rather than published, because the absolute evidence threshold
@@ -2331,9 +2493,15 @@ func answerSourceFor(reason string) string {
 // so the #336 grounding check verifies against the exact bytes the model was
 // shown rather than a re-rendered approximation. That region is "" when nothing
 // was placed.
+//
+// The last value is the set of hits that is still eligible once the prompt
+// context was read (promptContext). When a document became pending or changed
+// in the meantime, its hits are not in that set, and the fallback answer and
+// the citations are built again from the set, so the result never names a
+// document that the screen now withholds (SPEC §7.2, spec 0.99.0).
 func (s *Service) generateGroundedAnswer(
 	ctx context.Context, question, fallback string, hits []model.SearchHit, citations []model.Citation,
-) (string, []model.Citation, string, string) {
+) (string, []model.Citation, string, string, []model.SearchHit) {
 	answer := fallback
 	// Empty until something goes wrong: the answer is generated unless this
 	// says otherwise (SPEC §9.4.5).
@@ -2353,9 +2521,13 @@ func (s *Service) generateGroundedAnswer(
 	// per moment stops the generator from counting one event twice. The block
 	// quotes every member the budget affords, and only a member it quoted is
 	// citable (issue #890); see moments.go.
-	moments := groupMoments(hits)
-	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
-	prompt, usedIdx, contextSection := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	eligible, moments, texts := s.promptContext(ctx, hits, maxContextChars)
+	if len(eligible) != len(hits) {
+		hits = eligible
+		citations = citationsForHits(hits)
+		answer = buildFallbackAnswer(question, hits, s.currentSecretMatcher())
+	}
+	prompt, usedIdx, contextSection := s.buildScreenedRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
 	// Report a partial reasoning window. The citation list cannot show it: it
 	// reports provenance, not how much of the retrieved evidence the model read
 	// (issue #891). An aggregate answer built on a partial window is a sample,
@@ -2432,7 +2604,28 @@ func (s *Service) generateGroundedAnswer(
 		}
 	}
 
-	return answer, citations, contextSection, sourceReason
+	return answer, citations, contextSection, sourceReason, hits
+}
+
+// citationsForHits returns one citation for each hit, in order.
+func citationsForHits(hits []model.SearchHit) []model.Citation {
+	citations := make([]model.Citation, 0, len(hits))
+	for _, hit := range hits {
+		citations = append(citations, model.Citation{
+			ChunkID: hit.ChunkID,
+			RelPath: hit.RelPath,
+			Title:   hit.Title,
+			Span:    hit.Span,
+		})
+	}
+	return citations
+}
+
+// currentSecretMatcher returns the secret matcher in effect now.
+func (s *Service) currentSecretMatcher() *secretmatch.Matcher {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	return s.secretMatcher
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -2508,7 +2701,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	stateDir := s.stateDir
 	corpusFS := s.corpusFS
 	pathExcludes := append([]string(nil), s.pathExcludes...)
-	secretPatterns := append([]*regexp.Regexp(nil), s.secretPatterns...)
+	secretPatterns := s.secretMatcher
 	s.metaMu.RUnlock()
 	if strings.TrimSpace(rootDir) == "" {
 		rootDir = "."
@@ -2517,6 +2710,13 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	normalizedRel, realRoot, targetAbs, err := s.resolveFilePath(relPath, rootDir, pathExcludes)
 	if err != nil {
 		return "", false, err
+	}
+	// A document that waits for re-evaluation against a broader secret policy
+	// is withheld whole until the scan reads it again (SPEC §7.2, spec 0.99.0).
+	if pending, err := s.secretReevalPending(ctx, normalizedRel); err != nil {
+		return "", false, err
+	} else if pending {
+		return "", false, model.ErrForbidden
 	}
 
 	// A replace-mode media-only document (SPEC 8.1.7) has direct media chunks
@@ -2529,8 +2729,17 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
-	if content, truncated, handled, err := s.openFileFromMetadata(ctx, normalizedRel, span, maxChars, secretPatterns, kind); handled {
-		return content, truncated, err
+	// A page or time span of a document whose searchable text is DERIVED (a
+	// PDF, an image, audio, video, an office document) is served from the
+	// stored chunks of that derived representation (OCR page, transcript
+	// excerpt). Ingest screened the derived text in full, and the check here
+	// covers the slice (SPEC §15.4). A text-native source is not that case:
+	// the whole-source rule applies to it, so its metadata selection runs
+	// below, after the whole source is read and checked.
+	if hasDerivedText(normalizedRel) {
+		if content, truncated, handled, err := s.openFileFromMetadata(ctx, normalizedRel, span, maxChars, secretPatterns, kind); handled {
+			return content, truncated, err
+		}
 	}
 
 	// Symlink resolution and in-root containment are local-filesystem concerns.
@@ -2557,7 +2766,45 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return s.openBinaryDocText(ctx, corpusFS, stateDir, resolvedAbs, normalizedRel, secretPatterns, kind, maxChars)
 	}
 
-	return s.openFileFromResolvedPath(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
+	return s.openTextNativeFile(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
+}
+
+// openTextNativeFile answers open_file from a source that is read as text. It
+// reads the source once and checks all of it before any selection. A page or
+// time span comes from the stored chunks only when the stored document holds
+// exactly these bytes (its content hash is the hash of the checked read), so
+// the slice belongs to the source that passed the check. Otherwise, as for
+// lines, the span is selected from the checked bytes. A document with derived
+// text was served from its stored chunks earlier, in openFile.
+func (s *Service) openTextNativeFile(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, span model.Span, maxChars int) (string, bool, error) {
+	data, err := s.readCheckedSource(ctx, corpusFS, resolvedAbs, relPath, secretPatterns)
+	if err != nil {
+		return "", false, err
+	}
+	if !hasDerivedText(relPath) && isMetaSpanKind(kind) && s.storedDocumentHolds(ctx, relPath, data) {
+		if content, truncated, handled, err := s.openFileFromMetadata(ctx, relPath, span, maxChars, secretPatterns, kind); handled {
+			return content, truncated, err
+		}
+	}
+	return selectCheckedSpan(secretPatterns, data, kind, span, maxChars)
+}
+
+// storedDocumentHolds reports whether the live document row of relPath has
+// the content hash of data. With no store, no row or a lookup error, it
+// reports false, so the caller selects from data.
+func (s *Service) storedDocumentHolds(ctx context.Context, relPath string, data []byte) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	if store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil || doc.Deleted || doc.ContentHash == "" {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	return doc.ContentHash == hex.EncodeToString(sum[:])
 }
 
 // openBinaryDocText answers open_file for a binary document type
@@ -2574,7 +2821,7 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 // A page or time span that the metadata did not serve has no text to return,
 // so it maps to DOC_TYPE_UNSUPPORTED (SPEC §15.4: "If page provided -> return
 // OCR page text (if available; else error DOC_TYPE_UNSUPPORTED)").
-func (s *Service) openBinaryDocText(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, maxChars int) (string, bool, error) {
+func (s *Service) openBinaryDocText(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, maxChars int) (string, bool, error) {
 	if kind != "" && kind != "lines" {
 		return "", false, model.ErrDocTypeUnsupported
 	}
@@ -2674,6 +2921,24 @@ func isVideoExt(ext string) bool {
 func isMediaDocExt(relPath string) bool {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	return ext == ".pdf" || isImageExt(ext) || isAudioExt(ext) || isVideoExt(ext)
+}
+
+// hasDerivedText reports whether the searchable text of relPath is a derived
+// representation, not the source bytes: OCR text of a PDF or an image, a
+// transcript of audio or video, text extracted from an office document. A
+// page or time span of such a document comes from the stored chunks of that
+// representation. Every other path is text-native: its source bytes are its
+// text, and the whole-source check applies before any selection (SPEC §15.4).
+func hasDerivedText(relPath string) bool {
+	if isMediaDocExt(relPath) {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
+	case ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".odp", ".ods", ".rtf", ".epub":
+		return true
+	default:
+		return false
+	}
 }
 
 // isBinaryDocType reports whether relPath has an extension whose contents are
@@ -2821,7 +3086,7 @@ func (s *Service) hashSourceBytes(ctx context.Context, corpusFS corpusfs.CorpusF
 // bytes-only hash; see ocrCacheKeyForOpen. When no cache file exists (e.g. ingest
 // is still running), the function returns model.ErrOCRNotReady so callers can
 // surface an actionable error rather than fall back to raw bytes.
-func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, maxChars int) (string, bool, error) {
+func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.CorpusFS, stateDir, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, maxChars int) (string, bool, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		stateDir = filepath.Join(".", ".dir2mcp")
@@ -2842,11 +3107,10 @@ func (s *Service) openFileFromOCRCache(ctx context.Context, corpusFS corpusfs.Co
 			return "", false, readErr
 		}
 		text := string(data)
-		if hasSecretMatch(secretPatterns, text) {
+		if secretPatterns.MatchString(text) {
 			return "", false, model.ErrForbidden
 		}
-		out, truncated := truncateRunesWithFlag(text, maxChars)
-		return out, truncated, nil
+		return checkedOutput(secretPatterns, text, false, maxChars)
 	}
 	return "", false, model.ErrOCRNotReady
 }
@@ -2988,100 +3252,441 @@ func foldDerivationCacheKey(contentHash, identity string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string, span model.Span, maxChars int, secretPatterns []*regexp.Regexp, kind string) (content string, truncated bool, handled bool, err error) {
+func (s *Service) openFileFromMetadata(ctx context.Context, normalizedRel string, span model.Span, maxChars int, secretPatterns *secretmatch.Matcher, kind string) (content string, truncated bool, handled bool, err error) {
 	if !isMetaSpanKind(kind) || (kind == "time" && span.EndMS <= 0) {
 		return "", false, false, nil
 	}
 	normalizedSpan := span
 	normalizedSpan.Kind = kind
+	// Generation binding (see documentGenerations): openFile checked the
+	// withholding state before this read, and a broader policy can mark the
+	// document, or a scan can replace it, while the stored chunks are read.
+	// So the generation is read before the chunks, and the pending check and
+	// the generation are read again after them.
+	bound := []model.SearchHit{{RelPath: normalizedRel}}
+	before, err := s.documentGenerations(ctx, bound)
+	if err != nil {
+		return "", false, true, err
+	}
 	fromMeta, ok := s.sliceFromMetadata(ctx, normalizedRel, normalizedSpan)
 	if !ok {
 		return "", false, false, nil
 	}
-	if hasSecretMatch(secretPatterns, fromMeta) {
+	unservable, err := s.unservablePaths(ctx, bound, before)
+	if err != nil {
+		return "", false, true, err
+	}
+	if _, gone := unservable[normalizedRel]; gone {
 		return "", false, true, model.ErrForbidden
 	}
-	out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
-	return out, truncated, true, nil
+	if secretPatterns.MatchString(fromMeta) {
+		return "", false, true, model.ErrForbidden
+	}
+	out, truncated, err := checkedOutput(secretPatterns, fromMeta, false, maxChars)
+	return out, truncated, true, err
 }
 
-// openFileFromResolvedPath serves the raw source of a text-native document. It
-// streams the source and retains at most one read budget of bytes, so memory
-// stays bounded by max_chars and not by the size of the file or object (issue
-// #690). The published tool contract is unchanged: a caller that asks for a
-// legitimate window still gets that window.
+// checkedOutput cuts text to maxChars and checks the text that the tool is
+// about to return (SPEC §7.2: the allow list applies to the text a tool
+// returns). The whole source was checked before, but a selection or a cut can
+// remove the context or the end of an allow cover (for example the `;ok` of
+// the allow pattern `token=A+;ok`), and the returned text then holds a generic
+// token match that nothing covers. Such an answer is refused. alreadyCut
+// carries a truncation that an earlier selection made.
+func checkedOutput(matcher *secretmatch.Matcher, text string, alreadyCut bool, maxChars int) (string, bool, error) {
+	out, cut := truncateRunesWithFlag(text, maxChars)
+	if matchesAsIsOrTrimmed(matcher, out) {
+		return "", false, model.ErrForbidden
+	}
+	return out, alreadyCut || cut, nil
+}
+
+// readCheckedSource is the read behind every answer for a text-native
+// document.
 //
-// The secret policy applies to every byte the request reads, which is the
-// answer window, everything before it, and a fixed margin past it. Three
-// properties follow, and together they satisfy SPEC 15.4:
+// It reads the WHOLE source, bounded by the ingest.max_file_mb cap, and runs the
+// secret matcher (SPEC §7.2) over all of it before it selects or returns any
+// byte (SPEC §15.4: "before reading or returning any data"). The decision is
+// therefore exactly the decision secretmatch.Matcher.Match makes on the whole
+// text, which is the decision ingest makes on the same bytes: ingest also
+// checks a text source in full (#681) and also refuses a file above the cap at
+// discovery. There is no window boundary that could split a match, an allow
+// match or an anchor.
 //
-//  1. Every returned byte was scanned.
-//  2. The read always starts at the first byte of the source, so no answer can
-//     begin after an unscanned region. A caller cannot step over a secret to
-//     reach the text behind it.
-//  3. The scan always covers at least the head bytes that ingest samples
-//     (internal/ingest.secretScanSampleBytes).
+// A source above the cap was never content-checked or indexed by ingest, so it
+// is refused here with FILE_TOO_LARGE (corpusfs.ErrObjectTooLarge, §14.4). The
+// read stops at cap+1 bytes, so memory and bandwidth stay bounded by the cap
+// (#690, #830); the span selection then retains at most one read budget.
 //
-// The buffered path scanned the whole source, so it also refused the head of a
-// document whose only secret sat far past the answer. Reproducing that would
-// mean reading the whole source on every request, which is the cost this fix
-// removes.
-//
-// #681 narrowed what property 3 buys. Ingest now scans a text source in FULL, so
-// a credential past the head sample withholds the whole document from the index;
-// it is no longer true that "a document ingest withholds can never be served
-// here". What still holds is the property SPEC 15.4 actually asks for: the tool
-// never returns the secret. Every byte it returns was scanned and found clean, so
-// the most a caller can obtain from a withheld document is a clean early window,
-// never the credential and never the text behind it. Closing that last gap would
-// require the whole-source read this fix removed, so it is a deliberate trade.
-// The derived-text path (openFileFromOCRCache) has no such gap: it reads its
-// whole cache file and scans all of it.
-func (s *Service) openFileFromResolvedPath(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns []*regexp.Regexp, kind string, span model.Span, maxChars int) (string, bool, error) {
+// It returns the bytes it checked. Every slice of the answer comes from them,
+// and the slice is checked again in the form the tool returns it, because a
+// selection or a cut can split an allow cover (checkedOutput, SPEC §15.4).
+func (s *Service) readCheckedSource(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher) ([]byte, error) {
 	rc, err := s.openSource(ctx, corpusFS, resolvedAbs, relPath)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
 
-	scanner := newSecretScanner(secretPatterns)
-	source := &scanningReader{r: &ctxReader{ctx: ctx, r: rc}, scanner: scanner}
-
-	selection, selErr := selectSpan(source, kind, span, openFileReadBudgetBytes(maxChars))
-	// The buffered path refused a secret-bearing document before it looked at
-	// the span, so a secret outranks an unsatisfiable span. Keep that order:
-	// finish the scan before reporting that the span does not exist.
-	if selErr == nil || errors.Is(selErr, model.ErrDocTypeUnsupported) {
-		if marginErr := scanner.scanMargin(source); marginErr != nil {
-			return "", false, mapSourceReadError(marginErr)
-		}
+	capBytes := s.sourceReadCapBytes()
+	data, err := io.ReadAll(io.LimitReader(&ctxReader{ctx: ctx, r: rc}, capBytes+1))
+	if err != nil {
+		return nil, err
 	}
+	if int64(len(data)) > capBytes {
+		return nil, fmt.Errorf("%w: %s (cap %d bytes)", corpusfs.ErrObjectTooLarge, relPath, capBytes)
+	}
+	// A secret outranks an unsatisfiable span, as the buffered path did: the
+	// check runs before the span is selected.
+	if secretPatterns.Match(data) {
+		return nil, model.ErrForbidden
+	}
+	return data, nil
+}
+
+// selectCheckedSpan selects the requested span from bytes that
+// readCheckedSource checked, and checks the selected text again in the form
+// the tool returns it (checkedOutput).
+func selectCheckedSpan(matcher *secretmatch.Matcher, data []byte, kind string, span model.Span, maxChars int) (string, bool, error) {
+	selection, selErr := selectSpan(bytes.NewReader(data), kind, span, openFileReadBudgetBytes(maxChars))
 	if selErr != nil {
-		return "", false, mapSourceReadError(selErr)
+		return "", false, selErr
 	}
-
-	out, outTruncated := truncateRunesWithFlag(selection.text, maxChars)
-	return out, selection.truncated || outTruncated, nil
+	return checkedOutput(matcher, selection.text, selection.truncated, maxChars)
 }
 
-// mapSourceReadError converts a streaming read failure into the open_file error
-// contract. A secret match becomes the published ErrForbidden; every other
-// error passes through unchanged.
-func mapSourceReadError(err error) error {
-	if errors.Is(err, errSecretMatch) {
-		return model.ErrForbidden
-	}
-	return err
+// MatchesSecret reports whether text matches the secret pattern set that
+// open_file enforces: the built-in baseline plus the operator's
+// security.secret_patterns. Every tool that returns indexed text applies this
+// one set (spec 0.99.0), so a credential that open_file refuses is not served
+// through another tool. The MCP annotate/transcribe gate uses it too.
+func (s *Service) MatchesSecret(text string) bool {
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	return matcher.MatchString(text)
 }
 
-// hasSecretMatch reports whether any of the compiled secret patterns matches s.
-func hasSecretMatch(patterns []*regexp.Regexp, s string) bool {
-	for _, re := range patterns {
-		if re != nil && re.MatchString(s) {
-			return true
+// secretReevalPendingStore is the optional store capability that names the
+// documents waiting for a secret-policy re-evaluation against a broader set.
+type secretReevalPendingStore interface {
+	SecretReevalPendingPaths(ctx context.Context, relPaths []string) (map[string]struct{}, error)
+}
+
+// screenServedHits applies both serve-time secret rules to a result set
+// (SPEC §7.2, spec 0.99.0):
+//
+//   - A document that waits for re-evaluation against a broader pattern set
+//     is withheld whole: none of its hits is returned. A credential can cross
+//     a chunk boundary, and then no single excerpt matches, so screening the
+//     excerpts alone is not enough until the scan has read the document again.
+//   - Every other hit is screened by screenSecretHits.
+//
+// A store error is returned, not ignored: the result cannot be proven safe.
+func (s *Service) screenServedHits(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
+	// The hits are bound to the document generation that the checks below
+	// see (see documentGenerations): the generation is read first, and
+	// dropChangedGenerations reads it again after the checks.
+	before, err := s.documentGenerations(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	hits, err = s.dropSecretReevalPending(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	return s.dropChangedGenerations(ctx, s.screenSecretHits(ctx, hits), before)
+}
+
+// documentGenerationStore is the optional store capability that reports the
+// generation of documents (status and content hash).
+type documentGenerationStore interface {
+	DocumentGenerations(ctx context.Context, relPaths []string) (map[string]string, error)
+}
+
+// documentGenerations reads the generation of each hit's document. It is the
+// first half of the generation binding (SPEC §7.2, spec 0.99.0).
+//
+// The pending mark is looked up by path, at one moment. A broader policy can
+// mark a document after a hit was read, and a scan can replace the document
+// and clear the mark before the lookup: the path is then clean, but the hit
+// text belongs to the earlier generation, which the new policy never
+// evaluated, and a credential split across two such hits passes the per-hit
+// screen. So every path that sends or returns chunk text reads the generation
+// before it reads the text, and again after the pending check
+// (dropChangedGenerations, unservablePaths). A policy reset clears the
+// content hash and a replacement has another one, so a hit whose document
+// changed in between is not used. The text itself is read from the store
+// inside that window (screenSecretHits refreshes each snippet from the stored
+// chunk), so no text of an earlier generation is served.
+//
+// A nil map means the store cannot report generations; the binding is then
+// skipped, as the pending check is for such a store.
+func (s *Service) documentGenerations(ctx context.Context, hits []model.SearchHit) (map[string]string, error) {
+	s.metaMu.RLock()
+	st := s.store
+	s.metaMu.RUnlock()
+	gs, ok := st.(documentGenerationStore)
+	if !ok || len(hits) == 0 {
+		return nil, nil
+	}
+	gens, err := gs.DocumentGenerations(ctx, hitPaths(hits))
+	if err != nil {
+		return nil, fmt.Errorf("secret policy: read the document generations: %w", err)
+	}
+	if gens == nil {
+		gens = map[string]string{}
+	}
+	return gens, nil
+}
+
+// hitPaths returns the distinct document paths of hits.
+func hitPaths(hits []model.SearchHit) []string {
+	paths := make([]string, 0, len(hits))
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		if _, dup := seen[hit.RelPath]; dup || hit.RelPath == "" {
+			continue
+		}
+		seen[hit.RelPath] = struct{}{}
+		paths = append(paths, hit.RelPath)
+	}
+	return paths
+}
+
+// changedGenerationPaths reads the generations again and returns the paths
+// whose generation differs from before. A nil before (no capability) changes
+// nothing.
+func (s *Service) changedGenerationPaths(ctx context.Context, hits []model.SearchHit, before map[string]string) (map[string]struct{}, error) {
+	if before == nil || len(hits) == 0 {
+		return nil, nil
+	}
+	after, err := s.documentGenerations(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	changed := map[string]struct{}{}
+	for _, path := range hitPaths(hits) {
+		b, hadBefore := before[path]
+		a, hasAfter := after[path]
+		if hadBefore != hasAfter || a != b {
+			changed[path] = struct{}{}
 		}
 	}
-	return false
+	return changed, nil
+}
+
+// dropChangedGenerations is the second half of the generation binding for a
+// result set: it leaves out every hit whose document changed since before was
+// read.
+func (s *Service) dropChangedGenerations(ctx context.Context, hits []model.SearchHit, before map[string]string) ([]model.SearchHit, error) {
+	changed, err := s.changedGenerationPaths(ctx, hits, before)
+	if err != nil {
+		return nil, err
+	}
+	if len(changed) == 0 {
+		return hits, nil
+	}
+	kept := hits[:0]
+	for _, hit := range hits {
+		if _, gone := changed[hit.RelPath]; gone {
+			continue
+		}
+		kept = append(kept, hit)
+	}
+	s.logf("security: left out the hits of %d document(s) that changed during the request", len(changed))
+	return kept, nil
+}
+
+// unservablePaths returns the paths of hits whose text must not be used after
+// it was read: documents that wait for re-evaluation now, and documents whose
+// generation changed since before was read. It is the second half of the
+// generation binding for a path that sends chunk text to a provider (the
+// reranker, the ask prompt).
+func (s *Service) unservablePaths(ctx context.Context, hits []model.SearchHit, before map[string]string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	if len(hits) == 0 {
+		return out, nil
+	}
+	kept, err := s.dropSecretReevalPending(ctx, append([]model.SearchHit(nil), hits...))
+	if err != nil {
+		return nil, err
+	}
+	servable := make(map[string]struct{}, len(kept))
+	for _, hit := range kept {
+		servable[hit.RelPath] = struct{}{}
+	}
+	for _, hit := range hits {
+		if _, ok := servable[hit.RelPath]; !ok {
+			out[hit.RelPath] = struct{}{}
+		}
+	}
+	changed, err := s.changedGenerationPaths(ctx, hits, before)
+	if err != nil {
+		return nil, err
+	}
+	for path := range changed {
+		out[path] = struct{}{}
+	}
+	return out, nil
+}
+
+// dropSecretReevalPending leaves out every hit of a document that waits for a
+// secret-policy re-evaluation. One store query covers the whole hit set.
+func (s *Service) dropSecretReevalPending(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
+	if len(hits) == 0 {
+		return hits, nil
+	}
+	transition, err := s.secretPolicyTransitionPending(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if transition {
+		s.logf("security: left out %d hit(s); the secret policy changed and the next scan has not applied it yet", len(hits))
+		return hits[:0], nil
+	}
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	pendingStore, ok := store.(secretReevalPendingStore)
+	if !ok {
+		return hits, nil
+	}
+	paths := make([]string, 0, len(hits))
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		if _, dup := seen[hit.RelPath]; dup || hit.RelPath == "" {
+			continue
+		}
+		seen[hit.RelPath] = struct{}{}
+		paths = append(paths, hit.RelPath)
+	}
+	pending, err := pendingStore.SecretReevalPendingPaths(ctx, paths)
+	if err != nil {
+		return nil, fmt.Errorf("secret policy: read the documents that wait for re-evaluation: %w", err)
+	}
+	if len(pending) == 0 {
+		return hits, nil
+	}
+	kept := hits[:0]
+	for _, hit := range hits {
+		if _, wait := pending[hit.RelPath]; wait {
+			continue
+		}
+		kept = append(kept, hit)
+	}
+	s.logf("security: left out the hits of %d document(s) that wait for secret-policy re-evaluation", len(pending))
+	return kept, nil
+}
+
+// secretReevalPending reports whether one document waits for a secret-policy
+// re-evaluation against a broader set. open_file refuses such a document.
+//
+// While a policy transition waits for the next scan, every indexed document
+// counts as pending. A path with no live document row was never indexed, so
+// the transition does not cover it: open_file then checks its whole source
+// against the current set, as for any other read. A store that cannot report
+// document rows keeps the whole block.
+func (s *Service) secretReevalPending(ctx context.Context, relPath string) (bool, error) {
+	transition, err := s.secretPolicyTransitionPending(ctx)
+	if err != nil {
+		return false, err
+	}
+	if transition {
+		return s.hasLiveDocument(ctx, relPath)
+	}
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	pendingStore, ok := store.(secretReevalPendingStore)
+	if !ok {
+		return false, nil
+	}
+	pending, err := pendingStore.SecretReevalPendingPaths(ctx, []string{relPath})
+	if err != nil {
+		return false, fmt.Errorf("secret policy: read the documents that wait for re-evaluation: %w", err)
+	}
+	_, wait := pending[relPath]
+	return wait, nil
+}
+
+// hasLiveDocument reports whether the store holds a live (not deleted)
+// document row for relPath. A store that cannot report document rows answers
+// true, so a caller that blocks on the answer stays closed.
+func (s *Service) hasLiveDocument(ctx context.Context, relPath string) (bool, error) {
+	s.metaMu.RLock()
+	st := s.store
+	s.metaMu.RUnlock()
+	gs, ok := st.(documentGenerationStore)
+	if !ok {
+		return true, nil
+	}
+	gens, err := gs.DocumentGenerations(ctx, []string{relPath})
+	if err != nil {
+		return false, fmt.Errorf("secret policy: read the document row: %w", err)
+	}
+	_, live := gens[relPath]
+	return live, nil
+}
+
+// screenSecretHits leaves out every hit whose text matches the secret pattern
+// set (SPEC §7.2, spec 0.99.0). After the effective set changes, a background
+// pass retires the chunks that the new set matches. Until the pass reaches a
+// document, its chunks stay in the index, so the screen runs on every result
+// that search, ask and related return.
+//
+// The hit's snippet is checked, and so is the full chunk text, because the ask
+// prompt reads the full text from the store (contextTexts), not the snippet.
+// When the store cannot give the full text, the hit is kept on its snippet:
+// contextTexts then also gets no text for it, so the full text never leaves
+// the server. The matched text is never logged.
+func (s *Service) screenSecretHits(ctx context.Context, hits []model.SearchHit) []model.SearchHit {
+	if len(hits) == 0 {
+		return hits
+	}
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	store := s.store
+	s.metaMu.RUnlock()
+	if !matcher.Enabled() {
+		return hits
+	}
+	fetcher, _ := store.(chunkByIDer)
+	kept := hits[:0]
+	dropped := 0
+	for _, hit := range hits {
+		// A text is checked as it is and trimmed: later steps trim a snippet
+		// or a chunk text before they return it, and a trim changes what an
+		// anchored allow pattern can cover.
+		if matchesAsIsOrTrimmed(matcher, hit.Snippet) {
+			dropped++
+			continue
+		}
+		if fetcher != nil && hit.ChunkID != 0 {
+			if task, _, err := fetcher.ChunkTaskByID(ctx, hit.ChunkID); err == nil {
+				if matchesAsIsOrTrimmed(matcher, task.Text) {
+					dropped++
+					continue
+				}
+				// Serve the snippet of the stored chunk, not the one read
+				// with the hit. The index can hold the snippet of an earlier
+				// generation of the chunk; the stored one is the text that
+				// the generation binding covers (see documentGenerations).
+				if current := task.Metadata.Snippet; current != "" && current != hit.Snippet {
+					if matchesAsIsOrTrimmed(matcher, current) {
+						dropped++
+						continue
+					}
+					hit.Snippet = current
+				}
+			}
+		}
+		kept = append(kept, hit)
+	}
+	if dropped > 0 {
+		s.logf("security: left out %d retrieved chunk(s) that match a secret pattern", dropped)
+	}
+	return kept
 }
 
 // resolveFilePath validates and resolves relPath relative to rootDir.
@@ -3568,6 +4173,17 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if pool <= 0 {
 		pool = defaultRerankCandidatePool
 	}
+	// A hosted reranker receives the candidate text, so the serve-time secret
+	// rules run before it (SPEC §7.2, spec 0.99.0). See rerankSafeCandidates.
+	safe, err := s.rerankSafeCandidates(ctx, hits)
+	if err != nil {
+		s.logf("rerank: skipped, the secret-policy pending lookup failed: %v", err)
+		return s.diversifyAndTruncate(hits, k)
+	}
+	hits = safe
+	if len(hits) <= 1 {
+		return s.diversifyAndTruncate(hits, k)
+	}
 	// fused keeps the full pre-rerank order for fail-open fallback;
 	// cand is the (capped) slice actually sent to the provider. Never
 	// shrink the fallback to the pool: a misconfigured pool < k must
@@ -3578,9 +4194,13 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if len(cand) > pool {
 		cand = cand[:pool]
 	}
-	docs := s.rerankDocs(ctx, cand)
+	poolLen := len(cand)
+	cand, docs := s.rerankDocsNotSecret(ctx, cand)
+	if len(cand) == 0 {
+		return s.diversifyAndTruncate(fused, k)
+	}
 	var results []model.Reranked
-	err := usage.TimeStage(ctx, usage.StageRerank, func() error {
+	err = usage.TimeStage(ctx, usage.StageRerank, func() error {
 		var rerr error
 		results, rerr = rr.Rerank(ctx, rmodel, query, docs, k)
 		return rerr
@@ -3595,26 +4215,31 @@ func (s *Service) rerankPool(ctx context.Context, query string, hits []model.Sea
 	if !ok {
 		return s.diversifyAndTruncate(fused, k)
 	}
+	return s.diversifyAndTruncate(appendUnscoredTail(out, cand, scored, fused, poolLen), k)
+}
+
+// appendUnscoredTail sorts the reranked hits (relevance desc, then chunk_id
+// asc) and appends every candidate the provider did not score, in fused order,
+// so rerank only reorders and never returns fewer than k when more were
+// available (SPEC §9.1.1 "no result loss"). Two sources feed this tail: pool
+// members the provider left out of its response (it may cap the response at
+// top_n), then fused candidates beyond the pool of poolLen.
+func appendUnscoredTail(out, cand []model.SearchHit, scored []bool, fused []model.SearchHit, poolLen int) []model.SearchHit {
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
 			return out[i].Score > out[j].Score
 		}
 		return out[i].ChunkID < out[j].ChunkID
 	})
-	// Preserve every candidate the provider did not score, in fused order, so
-	// rerank only reorders and never returns fewer than k when more were
-	// available (SPEC §9.1.1 "no result loss"). Two sources feed this tail:
-	// pool members the provider left out of its response (it may cap the
-	// response at top_n), then fused candidates beyond the pool.
 	for i, h := range cand {
 		if !scored[i] {
 			out = append(out, h)
 		}
 	}
-	if len(fused) > len(cand) {
-		out = append(out, fused[len(cand):]...)
+	if len(fused) > poolLen {
+		out = append(out, fused[poolLen:]...)
 	}
-	return s.diversifyAndTruncate(out, k)
+	return out
 }
 
 // rerankedHits maps a provider response onto the candidate pool that was sent
@@ -3666,8 +4291,69 @@ func (s *Service) rerankedHits(cand []model.SearchHit, results []model.Reranked)
 // zero, the lookup errors, or the chunk carries no text (media chunks). The
 // per-candidate lookups only run when rerank is enabled, so the common
 // no-reranker path is untouched.
-func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []string {
-	docs := make([]string, len(cand))
+// rerankSafeCandidates leaves out every candidate of a document that waits
+// for a secret-policy re-evaluation, before any candidate text goes to the
+// reranker. It works on a copy, so the caller's slice is not changed. A failed
+// lookup is returned: then no candidate can be proven safe to send, and the
+// caller must not call the provider. The final screen (screenServedHits) runs
+// the same lookup again and reports the error to the caller of the tool.
+func (s *Service) rerankSafeCandidates(ctx context.Context, hits []model.SearchHit) ([]model.SearchHit, error) {
+	return s.dropSecretReevalPending(ctx, append([]model.SearchHit(nil), hits...))
+}
+
+// rerankDocsNotSecret returns the candidates and their reranker texts, without
+// every candidate whose text matches the secret set. That text must not reach
+// a hosted reranker; screenSecretHits leaves the same hit out of the result.
+// The returned candidates keep their order. A candidate left out here is left
+// out of the result as well, as the final screen would do.
+func (s *Service) rerankDocsNotSecret(ctx context.Context, cand []model.SearchHit) ([]model.SearchHit, []string) {
+	// Generation binding (see documentGenerations): read the generations,
+	// read the texts, then leave out every candidate whose document is
+	// pending now or changed in between. On a lookup error no text is sent.
+	before, err := s.documentGenerations(ctx, cand)
+	if err != nil {
+		s.logf("rerank: no candidate text is sent, the document generation lookup failed: %v", err)
+		return nil, nil
+	}
+	docs, raw := s.rerankDocs(ctx, cand)
+	unservable, err := s.unservablePaths(ctx, cand, before)
+	if err != nil {
+		s.logf("rerank: no candidate text is sent, the secret-policy lookup failed: %v", err)
+		return nil, nil
+	}
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	keptHits := make([]model.SearchHit, 0, len(cand))
+	keptDocs := make([]string, 0, len(docs))
+	for i, doc := range docs {
+		if _, gone := unservable[cand[i].RelPath]; gone {
+			continue
+		}
+		if !matcher.Enabled() {
+			keptHits = append(keptHits, cand[i])
+			keptDocs = append(keptDocs, doc)
+			continue
+		}
+		// The stored text is checked as it is, before any normalization:
+		// trimming changes what an anchored allow pattern can cover, so a check
+		// of the trimmed text alone can release a match that the stored text
+		// holds. The text sent to the provider and the snippet are checked too.
+		if matcher.MatchString(raw[i]) || matcher.MatchString(doc) || matcher.MatchString(cand[i].Snippet) {
+			continue
+		}
+		keptHits = append(keptHits, cand[i])
+		keptDocs = append(keptDocs, doc)
+	}
+	return keptHits, keptDocs
+}
+
+// rerankDocs returns the reranker input for each candidate (the trimmed full
+// chunk text, or the snippet when the store cannot give it) and the stored
+// full text as it is, untrimmed ("" when it was not read).
+func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) (docs, raw []string) {
+	docs = make([]string, len(cand))
+	raw = make([]string, len(cand))
 	fetcher, _ := s.store.(chunkByIDer)
 	for i, h := range cand {
 		docs[i] = h.Snippet
@@ -3678,11 +4364,12 @@ func (s *Service) rerankDocs(ctx context.Context, cand []model.SearchHit) []stri
 		if err != nil {
 			continue
 		}
+		raw[i] = task.Text
 		if full := strings.TrimSpace(task.Text); full != "" {
 			docs[i] = full
 		}
 	}
-	return docs
+	return docs, raw
 }
 
 // diversifyAndTruncate applies the optional MMR diversity re-ordering (issue
@@ -4185,7 +4872,27 @@ func LooksLikeCodeQuery(query string) bool {
 	return indicators >= 2
 }
 
-func buildFallbackAnswer(question string, hits []model.SearchHit) string {
+// matchesAsIsOrTrimmed reports whether text matches the secret policy as it
+// is or once its surrounding space is removed.
+func matchesAsIsOrTrimmed(matcher *secretmatch.Matcher, text string) bool {
+	if matcher.MatchString(text) {
+		return true
+	}
+	trimmed := strings.TrimSpace(text)
+	return trimmed != text && matcher.MatchString(trimmed)
+}
+
+// buildFallbackAnswer lists the retrieved snippets as the answer when no
+// generator produced one. Each snippet is trimmed and cut to 300 characters,
+// and both steps can change what an allow pattern covers, so the snippet is
+// checked against the secret policy in the form the answer carries (SPEC §7.2,
+// spec 0.99.0). A snippet that matches is left out of the answer.
+//
+// The line check sees the path prefix, and the assembled answer is checked
+// last. The prefixes and the line breaks can change what an allow pattern
+// covers (an anchored allow pattern stops matching), so an answer that still
+// matches is replaced with fallbackAnswerWithheld.
+func buildFallbackAnswer(question string, hits []model.SearchHit, matcher *secretmatch.Matcher) string {
 	if len(hits) == 0 {
 		return "No relevant context found in the indexed corpus."
 	}
@@ -4211,10 +4918,22 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 		if snippet == "" {
 			snippet = "(no snippet)"
 		}
-		lines = append(lines, fmt.Sprintf("- %s: %s", h.RelPath, snippet))
+		line := fmt.Sprintf("- %s: %s", h.RelPath, snippet)
+		if matcher.MatchString(snippet) || matcher.MatchString(line) {
+			line = fmt.Sprintf("- %s: (snippet withheld)", h.RelPath)
+		}
+		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	answer := strings.Join(lines, "\n")
+	if matcher.MatchString(answer) {
+		return fallbackAnswerWithheld
+	}
+	return answer
 }
+
+// fallbackAnswerWithheld replaces a fallback answer whose assembled text
+// matches the secret policy. It names no text.
+const fallbackAnswerWithheld = "The retrieved context is withheld because it matches the secret policy."
 
 // ragMinDocShareChars is the smallest share of the context budget the builder
 // divides that budget into, and it is what bounds the document count now
@@ -4269,6 +4988,7 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 	// construction, so an unguarded read races with that assignment.
 	s.metaMu.RLock()
 	store := s.store
+	matcher := s.secretMatcher
 	s.metaMu.RUnlock()
 	fetcher, _ := store.(chunkByIDer)
 	if fetcher == nil {
@@ -4283,7 +5003,19 @@ func (s *Service) contextTexts(ctx context.Context, hits []model.SearchHit, mome
 			if err != nil {
 				continue
 			}
-			texts[member] = strings.TrimSpace(task.Text)
+			// The hits passed screenSecretHits in search. The text is read
+			// again here, so test it again at the prompt boundary: a chunk
+			// rewritten between the two reads never reaches the generator
+			// (spec 0.99.0).
+			// Both the stored text and the trimmed text that the prompt takes
+			// are checked: a trim changes what an anchored allow pattern can
+			// cover, so the trimmed text can match where the stored one does
+			// not.
+			trimmed := strings.TrimSpace(task.Text)
+			if matcher.MatchString(task.Text) || matcher.MatchString(trimmed) {
+				continue
+			}
+			texts[member] = trimmed
 		}
 	}
 	return texts
@@ -4472,6 +5204,67 @@ func collapseSpaces(s string) string {
 // mandatory injection guard here, at the one place that also writes the
 // document fence, so the fence and the rule that explains it cannot separate
 // (issue #885).
+// promptContext reads the chunk texts for the prompt and binds them to the
+// current document generation (see documentGenerations). The hits were
+// screened when search returned them, but the texts are read from the store
+// now, and the prompt goes to a generation provider. A document that became
+// pending, or changed, between the generation reading and the end of the text
+// read is left out of the prompt whole: its hits are removed before the
+// moments are grouped, so the prompt names neither its path nor its span, and
+// the model cannot cite it. The returned hits are the eligible ones, with the
+// moments grouped over them and their texts in the same order. When a lookup
+// fails, no hit is eligible.
+func (s *Service) promptContext(ctx context.Context, hits []model.SearchHit, maxContextChars int) ([]model.SearchHit, []moment, []string) {
+	before, err := s.documentGenerations(ctx, hits)
+	moments := groupMoments(hits)
+	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
+	var unservable map[string]struct{}
+	if err == nil {
+		unservable, err = s.unservablePaths(ctx, hits, before)
+	}
+	if err != nil {
+		s.logf("security: the ask prompt carries no context, a secret-policy lookup failed: %v", err)
+		return nil, nil, nil
+	}
+	if len(unservable) == 0 {
+		return hits, moments, texts
+	}
+	eligible := make([]model.SearchHit, 0, len(hits))
+	eligibleTexts := make([]string, 0, len(hits))
+	for i, hit := range hits {
+		if _, gone := unservable[hit.RelPath]; gone {
+			continue
+		}
+		eligible = append(eligible, hit)
+		eligibleTexts = append(eligibleTexts, texts[i])
+	}
+	return eligible, groupMoments(eligible), eligibleTexts
+}
+
+// buildScreenedRAGPrompt builds the prompt and checks the context section it
+// is about to send against the secret policy (SPEC §7.2, spec 0.99.0). Each
+// text was checked in contextTexts, but the prompt cuts or compresses a text
+// to its budget, and a cut can change what an allow pattern covers. When the
+// placed context matches, the prompt is built again from the snippets alone
+// (screenSecretHits checked each one); when that also matches, it is built
+// with no context. The generator never receives a context that matches.
+func (s *Service) buildScreenedRAGPrompt(question string, hits []model.SearchHit, moments []moment, texts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int, string) {
+	s.metaMu.RLock()
+	matcher := s.secretMatcher
+	s.metaMu.RUnlock()
+	prompt, usedIdx, contextSection := buildRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
+	if !matcher.MatchString(contextSection) {
+		return prompt, usedIdx, contextSection
+	}
+	s.logf("security: the ask context matched a secret pattern once it was cut to the budget; the prompt uses the snippets only")
+	prompt, usedIdx, contextSection = buildRAGPrompt(question, hits, moments, make([]string, len(texts)), systemPrompt, maxContextChars, compressor)
+	if !matcher.MatchString(contextSection) {
+		return prompt, usedIdx, contextSection
+	}
+	s.logf("security: the ask context from the snippets also matched a secret pattern; the prompt carries no context")
+	return buildRAGPrompt(question, nil, nil, nil, systemPrompt, maxContextChars, compressor)
+}
+
 func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, fullTexts []string, systemPrompt string, maxContextChars int, compressor contextCompressor) (string, []int, string) {
 	systemPrompt = composeSystemPrompt(systemPrompt)
 	maxContextChars = normalizeMaxContextChars(maxContextChars)
