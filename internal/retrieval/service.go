@@ -1804,8 +1804,9 @@ func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.
 const secretScreenRefillRounds = 3
 
 // searchScreenedPool retrieves a pool of poolK candidates, applies the recency
-// decay and the relevance floor, screens the pool against the secret policy
-// (screenServedHits), and only then cuts it to k and prunes tombstoned chunks.
+// decay, screens the pool against the secret policy (screenServedHits),
+// applies the relevance floor to the hits that remain, and only then cuts it
+// to k and prunes tombstoned chunks.
 // The screen runs BEFORE the cut, so the next candidate takes the place of a
 // hit that it removes. When the screen removed hits, fewer than k remain and
 // the pool was full, it retrieves a wider pool and tries again, up to
@@ -1823,21 +1824,23 @@ func (s *Service) searchScreenedPool(ctx context.Context, query model.SearchQuer
 		// decayed score and newer content survives a tie. Config-only; default 0
 		// is a pass-through (no allocation, no lookups).
 		hits = s.applyRecencyDecay(ctx, hits)
-		// Apply the server-side relevance floor: after scoring/fusion/rerank,
-		// the optional HyDE fusion, any cross-lingual fusion, their dedup/cut,
-		// and the recency decay, using each hit's final authoritative Score.
-		// Config-only; default 0 is a pass-through.
-		hits = s.applyMinScoreFloor(hits)
 		// Leave out every hit of a document that waits for re-evaluation against
 		// a broader secret policy, and any hit whose text matches the secret
 		// pattern set, so a credential that a changed set finds is not served (and
 		// not placed in an ask prompt) before the scan retires it (spec 0.99.0).
-		floored := len(hits)
+		// The screen runs BEFORE the relevance floor: the floor is relative to
+		// the best score of the set, so a withheld hit must not set it.
+		decayed := len(hits)
 		hits, err = s.screenServedHits(ctx, hits)
 		if err != nil {
 			return nil, err
 		}
-		screened := floored - len(hits)
+		screened := decayed - len(hits)
+		// Apply the server-side relevance floor: after scoring/fusion/rerank,
+		// the optional HyDE fusion, any cross-lingual fusion, their dedup/cut,
+		// the recency decay and the secret screen, using each hit's final
+		// authoritative Score. Config-only; default 0 is a pass-through.
+		hits = s.applyMinScoreFloor(hits)
 		if screened > 0 && len(hits) < k && retrieved >= poolK && round < secretScreenRefillRounds {
 			poolK = poolK*2 + screened
 			continue

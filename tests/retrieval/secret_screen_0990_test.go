@@ -240,3 +240,33 @@ func TestSecretScreen_RelatedScreensThePoolBeforeTheCut(t *testing.T) {
 		t.Fatalf("related hits with k=1 = %s, want [12]", got)
 	}
 }
+
+// TestSecretScreen_FloorIsSetByTheHitsThatRemain pins that the relevance
+// floor is computed after the secret screen. The floor is relative to the
+// best score of the set. A withheld hit at 0.90 must not set it: with a floor
+// of 0.5, the clean hit at 0.40 is the best that remains and is returned.
+func TestSecretScreen_FloorIsSetByTheHitsThatRemain(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, vecForCosine(0.90))
+	addVec(t, idx, 2, vecForCosine(0.40))
+	store := &fullTextStore{text: map[uint64]string{
+		1: "alpha notes. The key is " + screenCredential + ".",
+		2: "beta notes without any credential.",
+	}}
+	svc := retrieval.NewService(store, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "alpha notes"})
+	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "beta notes"})
+	svc.SetMinScore(0.5)
+	if err := svc.SetSecretPatterns([]string{screenPattern}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "notes", K: 1, Index: "text"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(hits)); got != "[2]" {
+		t.Fatalf("hits = %s, want [2]", got)
+	}
+}
