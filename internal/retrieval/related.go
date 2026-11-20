@@ -39,8 +39,8 @@ func (s *Service) Related(ctx context.Context, q model.RelatedQuery) (model.Rela
 		return model.RelatedResult{}, err
 	}
 	// Retrieve more than k, so the secret screen below can leave hits out and
-	// the next neighbours take their places (spec 0.99.0). The cut to k runs
-	// after the screen.
+	// the next neighbours take their places (spec 0.99.0). relatedNeighbors
+	// returns the whole ranked pool; the cut to k runs after the screen.
 	hits, indexUsed, err := s.relatedNeighbors(ctx, q, seed, 2*k+relatedExcludeMargin)
 	if err != nil {
 		return model.RelatedResult{}, err
@@ -279,8 +279,10 @@ func resolveRelatedPathSeed(ctx context.Context, cs relatedChunkStore, q model.R
 // resolved seed: it embeds the per-axis seed text(s), searches each active index
 // axis with the §9.5/§9.6 filters, merges any per-axis pools, drops the excluded
 // seed/same-document chunks, orders by descending similarity (ascending chunk_id
-// tiebreak), truncates to k, and prunes tombstoned chunks — exactly as
-// dir2mcp_search does for its final result set.
+// tiebreak), and prunes tombstoned chunks. It returns the whole ranked pool,
+// not only the first k: the caller runs the secret screen over the pool and
+// cuts to k after it, so a pending hit never pushes a safe one out of the
+// result (spec 0.99.0).
 func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, seed *relatedSeed, k int) ([]model.SearchHit, string, error) {
 	filters := model.SearchQuery{
 		K:             k,
@@ -323,7 +325,6 @@ func (s *Service) relatedNeighbors(ctx context.Context, q model.RelatedQuery, se
 	merged := mergeRelatedAxes(perAxis)
 	merged = excludeSeedChunks(merged, seed.excludeIDs)
 	sortRelatedHits(merged)
-	merged = truncateSearchHits(merged, k)
 	return s.pruneTombstonedHits(ctx, merged), effectiveIndexUsed(seed.axis, searched), nil
 }
 

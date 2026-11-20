@@ -207,3 +207,36 @@ func TestSecretScreen_DefaultAllowStopsAtASingleQuote(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretScreen_RelatedScreensThePoolBeforeTheCut pins that related
+// screens its whole ranked pool before the cut to k. With k=1 related asks
+// for ten neighbours; here the first ten all match the pattern and the
+// eleventh is clean. The clean one must reach the caller.
+func TestSecretScreen_RelatedScreensThePoolBeforeTheCut(t *testing.T) {
+	chunks := map[uint64]model.ChunkTask{1: relatedChunk(1, "docs/a.txt", "alpha")}
+	vecByText := map[string][]float32{"alpha": {1, 0}, "gamma": {0.1, 0.99}}
+	for i := uint64(2); i <= 11; i++ {
+		text := fmt.Sprintf("beta-%02d", i)
+		chunks[i] = relatedChunk(i, fmt.Sprintf("docs/b%02d.txt", i), text)
+		vecByText[text] = []float32{0.8, 0.6}
+	}
+	chunks[12] = relatedChunk(12, "other/c.txt", "gamma")
+	idx := index.NewHNSWIndex("")
+	for id, task := range chunks {
+		addVecP(t, idx, id, vecByText[task.Text], task.Metadata.RelPath, task.Metadata.DocType)
+	}
+	svc := retrieval.NewService(&relatedFakeStore{chunks: chunks}, idx, &textVecEmbedder{vecByText: vecByText}, nil)
+	for id, task := range chunks {
+		svc.SetChunkMetadata(id, task.Metadata.ToSearchHit())
+	}
+	if err := svc.SetSecretPatterns([]string{`^beta-`}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	res, err := svc.Related(context.Background(), model.RelatedQuery{SourceChunkID: 1, K: 1, ExcludeSameDocument: true})
+	if err != nil {
+		t.Fatalf("Related: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(res.Hits)); got != "[12]" {
+		t.Fatalf("related hits with k=1 = %s, want [12]", got)
+	}
+}
