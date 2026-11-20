@@ -79,11 +79,15 @@ func computeExtractionCoverage(ctx context.Context, counter extractableExtension
 		cov.Remedy = "ingest.extractor is off; set it to auto (or pin an engine) to extract these formats."
 		return cov, nil
 	}
+	pandocHint := ""
+	if !engines.Pandoc {
+		pandocHint = ingest.PandocInstallHint(cfg)
+	}
 	libreofficeHint := ""
 	if !engines.LibreOffice {
 		libreofficeHint = ingest.LibreOfficeInstallHint(cfg)
 	}
-	cov.Remedy = uncoveredExtractionRemedy(uncovered, engines, libreofficeHint)
+	cov.Remedy = uncoveredExtractionRemedy(uncovered, engines, pandocHint, libreofficeHint)
 	if decision.Name == "" {
 		// No primary engine resolved at all: the cascade's own reason ("docling
 		// not found on PATH, no docling-serve URL, and no Mistral credential") is

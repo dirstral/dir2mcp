@@ -648,11 +648,14 @@ func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, e
 // OpenDocument/RTF/EPUB family, and the libreoffice engine (T2, spec 0.99.0) for
 // legacy .doc. Formats no installable engine can read (e.g. .gif/.svg/.odp/.ods)
 // get a pre-conversion hint. `engines` reports which engines are already active,
-// so an already-active engine is never suggested. libreofficeHint is the
+// so an already-active engine is never suggested. pandocHint is the remedy
+// that names the missing pandoc binary and the policy change when another
+// engine is pinned (ingest.PandocInstallHint); it is used only when a
+// pandoc-readable format is uncovered. libreofficeHint is the
 // remedy that names the missing soffice and/or pandoc binary, the TMPDIR step,
 // and the policy change when another engine is pinned
 // (ingest.LibreOfficeInstallHint); it is used only when a .doc is uncovered.
-func uncoveredExtractionRemedy(uncovered []string, engines ingest.ActiveEngines, libreofficeHint string) string {
+func uncoveredExtractionRemedy(uncovered []string, engines ingest.ActiveEngines, pandocHint, libreofficeHint string) string {
 	// The §7.7 coverage report MUST, for each uncovered class, name the engine to
 	// add AND the ingest.on_unsupported knob that governs whether the gap is a
 	// warning (lenient, the default) or a per-document error (strict).
@@ -676,7 +679,13 @@ func uncoveredExtractionRemedy(uncovered []string, engines ingest.ActiveEngines,
 		fixes = append(fixes, "install docling (or set ingest.extractor=docling) for the Office/tiff/bmp formats")
 	}
 	if pandocWouldCover {
-		fixes = append(fixes, "install pandoc (#393) for the born-digital OpenDocument/RTF/EPUB formats")
+		// A pin that excludes pandoc needs a policy change: installing pandoc
+		// alone does not activate the engine (ingest.PandocInstallHint).
+		hint := strings.TrimSpace(pandocHint)
+		if hint == "" {
+			hint = "install pandoc (#393) for the born-digital OpenDocument/RTF/EPUB formats"
+		}
+		fixes = append(fixes, hint)
 	}
 	if libreofficeWouldCover {
 		// The hint names every step still necessary, the policy change

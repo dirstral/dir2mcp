@@ -129,7 +129,7 @@ func TestExtractorIsStructured(t *testing.T) {
 func TestUncoveredExtractionRemedy_TailoredToEngine(t *testing.T) {
 	// Flat path (no docling, no pandoc): .docx is docling-coverable and .odt is
 	// pandoc-coverable → recommend both, never the stale "future extractor" wording.
-	got := uncoveredExtractionRemedy([]string{".docx", ".odt"}, noEngines, "")
+	got := uncoveredExtractionRemedy([]string{".docx", ".odt"}, noEngines, "", "")
 	if !strings.Contains(got, "docling") || !strings.Contains(got, "pandoc") {
 		t.Errorf("flat remedy %q should recommend installing docling and pandoc", got)
 	}
@@ -138,16 +138,16 @@ func TestUncoveredExtractionRemedy_TailoredToEngine(t *testing.T) {
 	}
 	// Neither-engine formats (no installable extractor reads them) → pre-convert,
 	// no docling/pandoc suggestion.
-	if got := uncoveredExtractionRemedy([]string{".gif", ".svg"}, noEngines, ""); strings.Contains(got, "docling") || strings.Contains(got, "pandoc") {
+	if got := uncoveredExtractionRemedy([]string{".gif", ".svg"}, noEngines, "", ""); strings.Contains(got, "docling") || strings.Contains(got, "pandoc") {
 		t.Errorf("neither-engine remedy %q should not recommend an extractor", got)
 	}
 	// docling active, pandoc not: an uncovered .odt is pandoc-coverable → suggest
 	// pandoc, and do NOT re-suggest the already-active docling.
-	if got := uncoveredExtractionRemedy([]string{".odt"}, structuredOnly, ""); !strings.Contains(got, "pandoc") || strings.Contains(got, "install docling") {
+	if got := uncoveredExtractionRemedy([]string{".odt"}, structuredOnly, "", ""); !strings.Contains(got, "pandoc") || strings.Contains(got, "install docling") {
 		t.Errorf("docling-active remedy %q should recommend pandoc and not re-suggest docling", got)
 	}
 	// Both engines active: nothing installable helps → pre-convert only.
-	if got := uncoveredExtractionRemedy([]string{".odp", ".gif"}, doclingAndPandoc, ""); strings.Contains(got, "install") {
+	if got := uncoveredExtractionRemedy([]string{".odp", ".gif"}, doclingAndPandoc, "", ""); strings.Contains(got, "install") {
 		t.Errorf("both-active remedy %q should only advise pre-conversion", got)
 	}
 }
@@ -158,7 +158,7 @@ func TestUncoveredExtractionRemedy_TailoredToEngine(t *testing.T) {
 // re-suggested, and that a pin which excludes the engine names the knob.
 func TestUncoveredExtractionRemedy_LegacyDocNamesMissingBinary(t *testing.T) {
 	hint := "install soffice (LibreOffice) for legacy .doc"
-	got := uncoveredExtractionRemedy([]string{".doc"}, doclingAndPandoc, hint)
+	got := uncoveredExtractionRemedy([]string{".doc"}, doclingAndPandoc, "", hint)
 	if !strings.Contains(got, hint) {
 		t.Errorf("remedy %q should carry the libreoffice hint %q", got, hint)
 	}
@@ -166,11 +166,26 @@ func TestUncoveredExtractionRemedy_LegacyDocNamesMissingBinary(t *testing.T) {
 		t.Errorf("remedy %q must not suggest the already-active pandoc engine", got)
 	}
 	active := ingest.ActiveEngines{Structured: true, Pandoc: true, LibreOffice: true}
-	if got := uncoveredExtractionRemedy([]string{".doc"}, active, ""); strings.Contains(got, "soffice") {
+	if got := uncoveredExtractionRemedy([]string{".doc"}, active, "", ""); strings.Contains(got, "soffice") {
 		t.Errorf("remedy %q must not suggest LibreOffice when the engine is active", got)
 	}
-	if got := uncoveredExtractionRemedy([]string{".doc"}, structuredOnly, ""); !strings.Contains(got, "ingest.extractor") {
+	if got := uncoveredExtractionRemedy([]string{".doc"}, structuredOnly, "", ""); !strings.Contains(got, "ingest.extractor") {
 		t.Errorf("remedy %q should name ingest.extractor when the binaries exist but a pin excludes the engine", got)
+	}
+}
+
+// TestUncoveredExtractionRemedy_PinExcludesPandoc: under a libreoffice pin the
+// pandoc engine is off even when pandoc is installed. The remedy must carry the
+// policy change from ingest.PandocInstallHint, not "install pandoc".
+func TestUncoveredExtractionRemedy_PinExcludesPandoc(t *testing.T) {
+	pinOnly := ingest.ActiveEngines{LibreOffice: true}
+	hint := "set ingest.extractor to auto or pandoc for the born-digital OpenDocument/RTF/EPUB formats"
+	got := uncoveredExtractionRemedy([]string{".odt"}, pinOnly, hint, "")
+	if !strings.Contains(got, hint) {
+		t.Errorf("remedy %q should carry the pandoc policy hint %q", got, hint)
+	}
+	if strings.Contains(got, "install pandoc") {
+		t.Errorf("remedy %q must not tell the operator to install an installed pandoc", got)
 	}
 }
 

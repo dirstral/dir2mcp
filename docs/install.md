@@ -71,6 +71,8 @@ The image also holds no pandoc and no LibreOffice, so `.odt`, `.rtf`, `.epub`
 and legacy `.doc` files are skipped as `unsupported_format` in it. To read them,
 build an image on top of this one that adds both packages, or run the binary
 on a host that has them ([optional extraction binaries](#optional-extraction-binaries)).
+Then set `ingest.extractor: auto`. A pin such as `ingest.extractor: mistral`
+turns the pandoc and libreoffice engines off, also when both packages are installed.
 `docker build -t dir2mcp .` builds the same image from source.
 
 ### Nix (macOS + Linux)
@@ -239,7 +241,9 @@ Pick the row that matches how you run `dir2mcp`:
 ### Optional extraction binaries
 
 dir2mcp finds these binaries on `PATH` and turns on the related extraction
-engine when the binary passes a short probe. You do not set a flag. When a
+engine when the binary passes a short probe. Under `ingest.extractor: auto`
+(the default) you do not set a flag. A pin of another engine (for example
+`ingest.extractor: mistral` or `docling`) turns an engine off. When a
 binary is missing, another active engine can still read some of its formats:
 for example, docling reads `.docx`, and `.html` always has a raw-text
 baseline. A format that no active engine reads is skipped as

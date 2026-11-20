@@ -153,6 +153,35 @@ func TestLibreOfficeInstallHint_PinNamesPolicy(t *testing.T) {
 	}
 }
 
+// TestPandocInstallHint_LibreOfficePinNamesPolicy: a libreoffice pin excludes
+// the pandoc engine, so an uncovered .odt needs a policy change. Installing
+// pandoc alone does not help, so the remedy must not stop at "install pandoc".
+func TestPandocInstallHint_LibreOfficePinNamesPolicy(t *testing.T) {
+	usePathOnly(t, map[string]string{"soffice": fakeSofficeOK, "pandoc": fakePandocOK})
+	pin := config.Config{IngestExtractor: "libreoffice"}
+	if ingest.PandocActive(pin) {
+		t.Fatal("pandoc must be inactive under a libreoffice pin")
+	}
+	want := "set ingest.extractor to auto or pandoc for the born-digital OpenDocument/RTF/EPUB formats"
+	if hint := ingest.PandocInstallHint(pin); hint != want {
+		t.Fatalf("hint with pandoc installed under a libreoffice pin = %q, want %q", hint, want)
+	}
+	usePathOnly(t, map[string]string{"soffice": fakeSofficeOK})
+	hint := ingest.PandocInstallHint(pin)
+	for _, w := range []string{"install pandoc (#393)", "set ingest.extractor to auto or pandoc"} {
+		if !strings.Contains(hint, w) {
+			t.Fatalf("hint %q misses %q", hint, w)
+		}
+	}
+	if hint := ingest.PandocInstallHint(config.Config{IngestExtractor: "auto"}); hint != "install pandoc (#393) for the born-digital OpenDocument/RTF/EPUB formats" {
+		t.Fatalf("hint with no pandoc under auto = %q, want only the install step", hint)
+	}
+	usePathOnly(t, map[string]string{"pandoc": fakePandocOK})
+	if hint := ingest.PandocInstallHint(config.Config{IngestExtractor: "auto"}); hint != "" {
+		t.Fatalf("hint with an active pandoc = %q, want empty", hint)
+	}
+}
+
 func TestDescribeLibreOffice_PinAndAuto(t *testing.T) {
 	usePathOnly(t, map[string]string{"soffice": fakeSofficeOK, "pandoc": fakePandocOK})
 	isolateTempDir(t)
