@@ -623,7 +623,7 @@ func extractorIsStructured(name string) bool {
 // uses (ingest.ExtractionCovered → selectExtractionRoute), so the doctor names
 // exactly the formats that will be skipped with an unsupported-format diagnostic
 // (#394/#395) — including the pandoc (T2, #393) tier the coarse structured/flat
-// boolean cannot express, and the libreoffice (T2, spec 0.97.0) tier for legacy
+// boolean cannot express, and the libreoffice (T2, spec 0.99.0) tier for legacy
 // .doc. `engines` are the active engines derived from the extractor decision;
 // `policy` is ingest.extractor. Extension-less assets (bucketed under "") are
 // ignored: they carry no format to name.
@@ -645,7 +645,7 @@ func uncoveredExtractableExtensions(extCounts map[string]int64, policy string, e
 // uncoveredExtractionRemedy tailors the remediation hint to the engines NOT yet
 // active. It names only engines that would actually help: docling for the
 // OpenXML-Office/tiff/bmp formats, pandoc (T2, #393) for the born-digital
-// OpenDocument/RTF/EPUB family, and the libreoffice engine (T2, spec 0.97.0) for
+// OpenDocument/RTF/EPUB family, and the libreoffice engine (T2, spec 0.99.0) for
 // legacy .doc. Formats no installable engine can read (e.g. .gif/.svg/.odp/.ods)
 // get a pre-conversion hint. `engines` reports which engines are already active,
 // so an already-active engine is never suggested. libreofficeHint is the

@@ -144,7 +144,7 @@ const DefaultDoclingTimeoutSec = 3600
 
 // DefaultLibreOfficeTimeoutSec is the shipped time limit, in seconds, for one
 // headless LibreOffice conversion of one legacy .doc file to .docx (the
-// libreoffice extraction engine, spec 0.97.0, ingest.libreoffice.timeout_sec).
+// libreoffice extraction engine, spec 0.99.0, ingest.libreoffice.timeout_sec).
 // A conversion starts a fresh LibreOffice profile, which costs a few seconds,
 // and a large .doc converts in well under a minute, so five minutes is ample
 // headroom while a hung conversion still stops.
@@ -343,13 +343,13 @@ type Config struct {
 	// IngestLibreOfficeTimeoutSec is the time limit, in seconds, for one
 	// headless LibreOffice conversion of one legacy .doc file (config
 	// `ingest.libreoffice.timeout_sec`, env DIR2MCP_LIBREOFFICE_TIMEOUT_SEC,
-	// spec 0.97.0). It must be greater than 0. When the limit expires the whole
+	// spec 0.99.0). It must be greater than 0. When the limit expires the whole
 	// LibreOffice process group is killed and the document gets a per-document
 	// error.
 	IngestLibreOfficeTimeoutSec int
 	// IngestLibreOfficeCommand optionally overrides the LibreOffice binary of
 	// the libreoffice extraction engine (config `ingest.libreoffice.command`,
-	// spec 0.97.0). The whole value is one path (spaces allowed), not a command
+	// spec 0.99.0). The whole value is one path (spaces allowed), not a command
 	// template. Empty resolves `soffice`,
 	// then `libreoffice`, from PATH.
 	IngestLibreOfficeCommand string
@@ -2167,7 +2167,7 @@ func Default() Config {
 		IngestWatchDebounce:    500 * time.Millisecond,
 		// One docling CLI call on one document (SPEC 7.4.B, #1105).
 		IngestDoclingTimeoutSec: DefaultDoclingTimeoutSec,
-		// One LibreOffice .doc conversion (spec 0.97.0).
+		// One LibreOffice .doc conversion (spec 0.99.0).
 		IngestLibreOfficeTimeoutSec: DefaultLibreOfficeTimeoutSec,
 		// "auto", not "mistral" (SPEC §8.2, §8.1.3): transcription is an optional
 		// capability selected by precedence among eligible profiles, and it stays
@@ -3802,7 +3802,8 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 			continue
 		}
 
-		if err := handleYAMLScalarValue(&cfg, key, value, !inSideParsedBlock); err != nil {
+		collectUnknown := collectsUnknownKey(inSideParsedBlock, key, len(sectionByIndent), lineKeyWrittenDotted(line))
+		if err := handleYAMLScalarValue(&cfg, key, value, collectUnknown); err != nil {
 			return fileConfig{}, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 	}
@@ -3819,7 +3820,8 @@ func parseConfigYAML(raw []byte) (fileConfig, error) {
 // (`first`/`all`) of media.stt.tracks would be silently dropped by the scalar path,
 // which has no such field.
 // `collectUnknown` is false while the parser is inside a side-parsed top-level
-// block, whose children legitimately never reach a scalar setter (#628).
+// block, whose children legitimately never reach a scalar setter (#628), and
+// for a nested side-parsed key (isNestedSideParsedKey).
 func handleYAMLScalarValue(cfg *fileConfig, key, value string, collectUnknown bool) error {
 	value = unquoteYAMLScalar(value)
 	if strings.Contains(value, "\\n") {
@@ -3862,11 +3864,63 @@ var sideParsedTopLevelBlocks = map[string]bool{
 	"carbon":    true,
 }
 
-// sideParsedKeyPrefixes are the nested maps decoded separately that DO arrive
+// sideParsedKeys are the nested maps decoded separately that DO arrive
 // prefixed, because they sit under the registered `media` section (#574, #566).
-var sideParsedKeyPrefixes = []string{
-	"media.translate.glossary.",
-	"media.stt.language_providers.",
+// The flat parser sees one of them in two shapes. In block form it sees each
+// child key under the map key (media.stt.language_providers.ru). In flow form
+// (`language_providers: {ru: gigaam}`) it sees the map key itself with the
+// whole flow map as a scalar value. Both shapes are read by the yaml.v3 pass,
+// so neither is an unrecognized key. The yaml.v3 pass reads only the nested
+// `media:` block, so a dotted spelling (`media.stt.language_providers: ...`)
+// is read by no parser and keeps the warning (isNestedSideParsedKey).
+var sideParsedKeys = []string{
+	"media.translate.glossary",
+	"media.stt.language_providers",
+}
+
+// isSideParsedKey reports whether a yaml.v3 pass reads key: the map key
+// itself or a key below it. A sibling that only shares the leading text
+// (media.stt.language_providerz) does not match.
+func isSideParsedKey(key string) bool {
+	for _, mapKey := range sideParsedKeys {
+		if key == mapKey || strings.HasPrefix(key, mapKey+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// isNestedSideParsedKey reports whether key is a side-parsed key that the
+// flat parser built from nested sections only, one segment per line. Then the
+// yaml.v3 pass reads it too. sections is the number of enclosing sections of
+// the line, and writtenDotted reports whether the line itself wrote its key
+// with a dot. Both conditions are needed:
+//   - A key the line writes with a dot (media.stt.language_providers, at the
+//     top level or under media: and stt:) is kept as written, so its segment
+//     count can match the section count by chance. yaml.v3 reads it as one
+//     literal key and never as the side-parsed map.
+//   - A key built from a dotted section line (media.stt: then
+//     language_providers:) has more segments than enclosing sections plus one.
+//     yaml.v3 does not read that key either.
+//
+// Such keys stay eligible for the warning.
+func isNestedSideParsedKey(key string, sections int, writtenDotted bool) bool {
+	return !writtenDotted && isSideParsedKey(key) && strings.Count(key, ".") == sections
+}
+
+// collectsUnknownKey reports whether the flat parser must check a scalar key
+// for the unrecognized-key warning. It does not for a line inside a
+// side-parsed top-level block or for a nested side-parsed key: a yaml.v3 pass
+// reads both.
+func collectsUnknownKey(inSideParsedBlock bool, key string, sections int, writtenDotted bool) bool {
+	return !inSideParsedBlock && !isNestedSideParsedKey(key, sections, writtenDotted)
+}
+
+// lineKeyWrittenDotted reports whether a "key: value" line writes its key with
+// a dot, before any section prefix is added.
+func lineKeyWrittenDotted(line string) bool {
+	k, _, _ := strings.Cut(line, ":")
+	return strings.Contains(strings.TrimSpace(k), ".")
 }
 
 // scalarKeyIsRecognized reports whether any setter claims key.
@@ -3877,11 +3931,6 @@ var sideParsedKeyPrefixes = []string{
 // in #624. Every fileConfig field is a pointer, so applying the key to a fresh
 // fileConfig and finding it unchanged proves nothing assigned it.
 func scalarKeyIsRecognized(key, value string) bool {
-	for _, prefix := range sideParsedKeyPrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
 	var probe fileConfig
 	if err := setFileScalarValue(&probe, key, value); err != nil {
 		// A parse/validation error means a setter DID claim the key; the caller
@@ -4240,8 +4289,7 @@ func isMapSectionKey(key string) bool {
 	// sub-entries as a section so children prefix into that namespace
 	// (media.stt.language_providers.<lang>) — a guaranteed no-op — instead of
 	// leaking a language code up to a real media.stt.<key>.
-	if key == "media.translate.glossary" || strings.HasPrefix(key, "media.translate.glossary.") ||
-		key == "media.stt.language_providers" || strings.HasPrefix(key, "media.stt.language_providers.") {
+	if isSideParsedKey(key) {
 		return true
 	}
 	switch key {
@@ -6347,7 +6395,7 @@ func emitDirInsideCorpus(dir, root string) bool {
 // the same rules as the media.subtitles.emit.dir check (emitDirInsideCorpus):
 // the paths as written and the paths with symlinks resolved are both checked.
 // A blank root is never a match. The libreoffice engine uses it to keep its
-// temporary directories outside the corpus root (spec 0.97.0 §7.4.B).
+// temporary directories outside the corpus root (spec 0.99.0 §7.4.B).
 func PathInsideRoot(dir, root string) bool {
 	return emitDirInsideCorpus(dir, root)
 }
@@ -6978,7 +7026,7 @@ func (c *Config) validateDoclingTimeout() error {
 }
 
 // validateLibreOfficeTimeout checks ingest.libreoffice.timeout_sec (spec
-// 0.97.0) with the same bounds as ingest.docling.timeout_sec: greater than 0,
+// 0.99.0) with the same bounds as ingest.docling.timeout_sec: greater than 0,
 // and small enough to convert to a time.Duration without overflow.
 func (c *Config) validateLibreOfficeTimeout() error {
 	if c.IngestLibreOfficeTimeoutSec <= 0 {

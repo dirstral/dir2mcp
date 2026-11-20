@@ -561,14 +561,12 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 			Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence(),
 		}, nil
 	}
+	// An answer with no text is the provider saying it heard no speech: silence
+	// is an outcome, not a failure (SPEC §8.6.6, spec 0.98.0). It is returned as
+	// an empty transcript so the caller can cache it and record the item as
+	// skip_reason=no_speech, rather than as an error retried on every run. A
+	// failed request, a non-200 status and an undecodable body stay errors above.
 	text := strings.TrimSpace(parsed.Text)
-	if text == "" {
-		return model.TranscriptResult{}, &model.ProviderError{
-			Code:      "WHISPER_FAILED",
-			Message:   "transcription response had no text content",
-			Retryable: false,
-		}
-	}
 	// Flat-text fallback (no segments): words have no segment frame to anchor
 	// against, so emit text only.
 	return model.TranscriptResult{Text: text, Language: parsed.identifiedLanguage(), LanguageConfidence: parsed.languageConfidence()}, nil

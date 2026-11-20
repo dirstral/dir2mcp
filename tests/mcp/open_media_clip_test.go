@@ -204,6 +204,36 @@ func TestOpenMediaClip_ByRelPathAndRange(t *testing.T) {
 	}
 }
 
+// TestOpenMediaClip_VideoContainerMIME: a clip is a stream copy of its source,
+// so it keeps the source container's MIME type for every container that ingest
+// classifies as video. A .ts transport stream (video by content) is
+// video/mp2t, and a camcorder .mod is muxed as an MPEG program stream.
+func TestOpenMediaClip_VideoContainerMIME(t *testing.T) {
+	for _, tc := range []struct{ relPath, want string }{
+		{"clip.mkv", "video/x-matroska"},
+		{"clip.avi", "video/x-msvideo"},
+		{"TAPE.MPG", "video/mpeg"},
+		{"news.ts", "video/mp2t"},
+		{"MOV001.MOD", "video/mpeg"},
+	} {
+		t.Run(tc.relPath, func(t *testing.T) {
+			cfg, st, _ := setupMCPToolStore(t, tc.relPath, "video", []byte("data"))
+			clip := &clipExtractStub{data: []byte("VIDEO")}
+			server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st), mcp.WithExtractSegment(clip.extract)).Handler())
+			defer server.Close()
+
+			sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+			resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"dir2mcp_open_media_clip","arguments":{"rel_path":"`+tc.relPath+`","start_ms":0,"end_ms":2000}}}`)
+			defer func() { _ = resp.Body.Close() }()
+
+			sc := decodeClipResult(t, resp)
+			if sc["mime_type"] != tc.want {
+				t.Fatalf("mime_type = %#v, want %s", sc["mime_type"], tc.want)
+			}
+		})
+	}
+}
+
 func TestOpenMediaClip_OverDuration_ClipTooLarge(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.mp3", "audio", []byte("data"))
 	cfg.MediaClipMaxDurationMS = 5000

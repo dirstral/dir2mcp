@@ -17,7 +17,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// Tests for the libreoffice extraction engine (spec 0.97.0): legacy .doc is
+// Tests for the libreoffice extraction engine (spec 0.99.0): legacy .doc is
 // converted to .docx by headless LibreOffice and read by the pandoc docx path.
 
 const loStubPath = "PATH=/usr/bin:/bin\nexport PATH\n"
@@ -242,7 +242,7 @@ func TestLibreOfficeEngine_SecretInOutputPurgesCache(t *testing.T) {
 	}
 }
 
-// TestLibreOfficeEngine_FailedConversionIsRetriedOnNextScan pins spec 0.97.0
+// TestLibreOfficeEngine_FailedConversionIsRetriedOnNextScan pins spec 0.99.0
 // §7.4.B.1 ("A conversion that failed") and §7.7: a .doc at status=error after
 // a conversion failure is processed again on the next scan, also when its
 // content_hash is unchanged. Scan 1 fails (status=error). Scan 2 has the same

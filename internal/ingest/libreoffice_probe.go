@@ -12,7 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 )
 
-// The libreoffice extraction engine (T2, spec 0.97.0) reads legacy binary Word
+// The libreoffice extraction engine (T2, spec 0.99.0) reads legacy binary Word
 // (.doc). It converts the file to .docx with headless LibreOffice and reads the
 // .docx with the pandoc docx path, so it is capability-activated on TWO
 // binaries: a functional `soffice` (or `libreoffice`) AND a functional pandoc.
@@ -20,7 +20,7 @@ import (
 // deactivates the pandoc engine, and a .doc is a §7.4.B.2 coverage gap.
 
 // sofficeProbeTimeout bounds the `soffice --version` functional check so a hung
-// LibreOffice cannot stall startup or `dir2mcp doctor`. Spec 0.97.0 §7.4.B: the
+// LibreOffice cannot stall startup or `dir2mcp doctor`. Spec 0.99.0 §7.4.B: the
 // check MUST have a time limit (the reference value is 10 seconds), and a check
 // that reaches it counts as failed, so the engine is unavailable. The same
 // limit bounds the work-directory probe (libreofficeWorkDirUsable). The result
@@ -46,7 +46,7 @@ var (
 
 // resolveSofficeBinary returns the LibreOffice executable for cfg and whether
 // one resolved: ingest.libreoffice.command when it is set, else soffice on
-// PATH, else libreoffice on PATH (spec 0.97.0 §7.4.B). The configured value is
+// PATH, else libreoffice on PATH (spec 0.99.0 §7.4.B). The configured value is
 // one path, not a command template: it is not split on spaces, so a path such
 // as `C:\Program Files\LibreOffice\program\soffice.exe` works. A relative
 // path (one with a separator) is made absolute against the working directory,
@@ -123,7 +123,7 @@ func libreofficeMissing(ctx context.Context, cfg config.Config) []string {
 
 // libreofficeAvailable reports whether BOTH binaries of the libreoffice engine
 // resolve and pass their functional checks AND a temporary directory outside
-// the corpus root is usable (libreofficeMakeWorkDir, spec 0.97.0 §7.4.B).
+// the corpus root is usable (libreofficeMakeWorkDir, spec 0.99.0 §7.4.B).
 func libreofficeAvailable(cfg config.Config) bool {
 	return libreofficeUnavailableReason(context.Background(), cfg) == ""
 }

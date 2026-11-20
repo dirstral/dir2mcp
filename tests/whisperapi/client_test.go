@@ -618,6 +618,47 @@ func TestClientImplementsStructuredTranscriber(t *testing.T) {
 	var _ model.StructuredTranscriber = whisperapi.NewClient("http://x", "")
 }
 
+// TestTranscribeEmptyTextIsNoSpeech is the #1182 guard: an HTTP 200 whose body
+// carries no text is the provider answering that it heard no speech. Silence is
+// an outcome, not a failure (SPEC §8.6.6), so both entry points return an empty
+// transcript with no error, and the reported language survives.
+func TestTranscribeEmptyTextIsNoSpeech(t *testing.T) {
+	for _, body := range []string{
+		`{"text": "", "language": "en"}`,
+		`{"text": "   ", "language": "en", "segments": []}`,
+		`{"text": "", "language": "en", "segments": [{"start": 0.0, "end": 3.0, "text": "  "}]}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		c := newClient(srv.URL, "k")
+		res, err := c.TranscribeStructured(context.Background(), "a.wav", []byte("x"))
+		if err != nil {
+			t.Errorf("TranscribeStructured(%s): err = %v, want nil (an empty answer is no speech, not an error)", body, err)
+		}
+		if res.Text != "" || res.Language != "en" {
+			t.Errorf("TranscribeStructured(%s) = text %q language %q, want empty text, language en", body, res.Text, res.Language)
+		}
+		text, err := c.Transcribe(context.Background(), "a.wav", []byte("x"))
+		if err != nil || text != "" {
+			t.Errorf("Transcribe(%s) = %q, %v, want empty text and no error", body, text, err)
+		}
+		srv.Close()
+	}
+}
+
+// TestTranscribeUndecodableBodyStaysError: only a successful answer is
+// silence. A body that is not a transcription response is still a failure.
+func TestTranscribeUndecodableBodyStaysError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"text": [1, 2]}`)
+	}))
+	defer srv.Close()
+	if _, err := newClient(srv.URL, "k").TranscribeStructured(context.Background(), "a.wav", []byte("x")); err == nil {
+		t.Fatal("TranscribeStructured on an undecodable body: err = nil, want a provider error")
+	}
+}
+
 // TestBaseURLNormalizationSingleV1 asserts that whatever base_url shape an
 // operator configures — host root, a trailing slash, or a stray trailing /v1
 // (as an old README example suggested) — the client posts to exactly one
