@@ -3,6 +3,8 @@ package tests
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -154,5 +156,40 @@ func TestSecretPolicyTransition_EverySetterUpdatesTheIngestPolicy(t *testing.T) 
 	}
 	if got := g.searchIDs(t); got != "[]" {
 		t.Fatalf("hits after SetSecretAllowPatterns removed the allow list = %s, want []", got)
+	}
+}
+
+// TestSecretPolicyTransition_UnindexedPathIsCheckedNotBlocked pins that the
+// pre-scan block covers only indexed documents. A path with no document row
+// was never indexed, so open_file checks its whole source against the current
+// set: a clean new file is returned, a new file that the set matches is
+// refused, and an indexed document stays withheld.
+func TestSecretPolicyTransition_UnindexedPathIsCheckedNotBlocked(t *testing.T) {
+	defaults := config.Default()
+	f := newPendingFixture(t)
+	ctx := context.Background()
+	// No recorded policy: a transition waits for the next scan.
+	if err := f.svc.SetSecretPolicy(defaults.SecretPatterns, defaults.SecretAllowPatterns); err != nil {
+		t.Fatalf("SetSecretPolicy: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "notes.txt"), []byte("new notes, nothing secret\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := f.svc.OpenFile(ctx, "notes.txt", model.Span{}, 200)
+	if err != nil {
+		t.Fatalf("open_file of a new clean file during the transition: %v", err)
+	}
+	if !strings.Contains(got, "new notes") {
+		t.Fatalf("open_file returned %q", got)
+	}
+	secret := "GITHUB_" + "TO" + "KEN=" + strings.Repeat("Xy7Zq9Wv", 5)
+	if err := os.WriteFile(filepath.Join(f.root, "leak.txt"), []byte(secret+"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := f.svc.OpenFile(ctx, "leak.txt", model.Span{}, 200); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("open_file of a new file that matches: err = %v, want ErrForbidden", err)
+	}
+	if _, err := f.svc.OpenFile(ctx, "clean.md", model.Span{}, 200); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("open_file of an indexed document during the transition: err = %v, want ErrForbidden", err)
 	}
 }

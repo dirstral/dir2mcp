@@ -3561,13 +3561,19 @@ func (s *Service) dropSecretReevalPending(ctx context.Context, hits []model.Sear
 
 // secretReevalPending reports whether one document waits for a secret-policy
 // re-evaluation against a broader set. open_file refuses such a document.
+//
+// While a policy transition waits for the next scan, every indexed document
+// counts as pending. A path with no live document row was never indexed, so
+// the transition does not cover it: open_file then checks its whole source
+// against the current set, as for any other read. A store that cannot report
+// document rows keeps the whole block.
 func (s *Service) secretReevalPending(ctx context.Context, relPath string) (bool, error) {
 	transition, err := s.secretPolicyTransitionPending(ctx)
 	if err != nil {
 		return false, err
 	}
 	if transition {
-		return true, nil
+		return s.hasLiveDocument(ctx, relPath)
 	}
 	s.metaMu.RLock()
 	store := s.store
@@ -3582,6 +3588,25 @@ func (s *Service) secretReevalPending(ctx context.Context, relPath string) (bool
 	}
 	_, wait := pending[relPath]
 	return wait, nil
+}
+
+// hasLiveDocument reports whether the store holds a live (not deleted)
+// document row for relPath. A store that cannot report document rows answers
+// true, so a caller that blocks on the answer stays closed.
+func (s *Service) hasLiveDocument(ctx context.Context, relPath string) (bool, error) {
+	s.metaMu.RLock()
+	st := s.store
+	s.metaMu.RUnlock()
+	gs, ok := st.(documentGenerationStore)
+	if !ok {
+		return true, nil
+	}
+	gens, err := gs.DocumentGenerations(ctx, []string{relPath})
+	if err != nil {
+		return false, fmt.Errorf("secret policy: read the document row: %w", err)
+	}
+	_, live := gens[relPath]
+	return live, nil
 }
 
 // screenSecretHits leaves out every hit whose text matches the secret pattern
