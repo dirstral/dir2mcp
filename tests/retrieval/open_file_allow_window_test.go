@@ -2,8 +2,11 @@ package tests
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/dirstral/dir2mcp/internal/store"
 	"io"
 	"math/rand"
 	"os"
@@ -247,30 +250,52 @@ func TestOpenFile_SliceComesFromTheCheckedBytes(t *testing.T) {
 // TestOpenFile_TextNativeMetadataSpanChecksTheWholeSource pins SPEC §15.4 for
 // a text-native path that has page or time chunks in the index. The stored
 // chunks can serve the span, but the whole-source rule still applies: a
-// credential outside the requested span refuses the call, and a clean source
-// returns the stored slice. A document with derived text (a PDF) keeps the
-// stored-chunk route and needs no source read.
+// credential outside the requested span refuses the call. A clean source
+// returns the stored slice only when the stored document holds those exact
+// bytes; after an edit that the index has not seen, the span comes from the
+// checked bytes, not from the stored chunks of the earlier version. A
+// document with derived text (a PDF) keeps the stored-chunk route and needs
+// no source read.
 func TestOpenFile_TextNativeMetadataSpanChecksTheWholeSource(t *testing.T) {
 	credential := "GITHUB_" + "TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv"
 	spans := map[string]model.Span{
 		"page": {Kind: "page", Page: 2},
 		"time": {Kind: "time", StartMS: 1000, EndMS: 3000},
 	}
+	indexed := "stored slice\nmore text\n"
+	edited := "first page\f\n00:00:02 edited slice\n"
 	for name, span := range spans {
 		root := testutil.TempDir(t)
-		svc := newBoundedService(root)
+		st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
+		if err := st.Init(context.Background()); err != nil {
+			t.Fatalf("store init: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		sum := sha256.Sum256([]byte(indexed))
+		if err := st.UpsertDocument(context.Background(), model.Document{RelPath: "docs/notes.txt", DocType: "txt", Status: "ok", ContentHash: hex.EncodeToString(sum[:])}); err != nil {
+			t.Fatalf("UpsertDocument: %v", err)
+		}
+		svc := retrieval.NewService(st, nil, nil, nil)
+		svc.SetRootDir(root)
+		svc.SetStateDir(filepath.Join(root, ".dir2mcp"))
 		svc.SetChunkMetadata(1, model.SearchHit{RelPath: "docs/notes.txt", Snippet: "stored slice", Span: span})
 		svc.SetChunkMetadata(2, model.SearchHit{RelPath: "docs/scan.pdf", Snippet: "stored pdf slice", Span: span})
 
-		writeRootFile(t, root, "docs/notes.txt", []byte("stored slice\nmore text\n"+credential+"\n"))
+		writeRootFile(t, root, "docs/notes.txt", []byte(indexed+credential+"\n"))
 		if _, err := svc.OpenFile(context.Background(), "docs/notes.txt", span, 200); !errors.Is(err, model.ErrForbidden) {
 			t.Errorf("%s span: a credential outside the span: err = %v, want ErrForbidden", name, err)
 		}
 
-		writeRootFile(t, root, "docs/notes.txt", []byte("stored slice\nmore text\n"))
+		writeRootFile(t, root, "docs/notes.txt", []byte(indexed))
 		out, err := svc.OpenFile(context.Background(), "docs/notes.txt", span, 200)
 		if err != nil || out != "stored slice" {
-			t.Errorf("%s span: clean source = (%q, %v), want the stored slice", name, out, err)
+			t.Errorf("%s span: clean indexed source = (%q, %v), want the stored slice", name, out, err)
+		}
+
+		writeRootFile(t, root, "docs/notes.txt", []byte(edited))
+		out, err = svc.OpenFile(context.Background(), "docs/notes.txt", span, 200)
+		if err != nil || strings.Contains(out, "stored slice") || !strings.Contains(out, "edited slice") {
+			t.Errorf("%s span: edited source = (%q, %v), want the span of the checked bytes", name, out, err)
 		}
 
 		out, err = svc.OpenFile(context.Background(), "docs/scan.pdf", span, 200)

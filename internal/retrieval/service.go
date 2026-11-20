@@ -2770,21 +2770,41 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 }
 
 // openTextNativeFile answers open_file from a source that is read as text. It
-// reads the source once and checks all of it before any selection. For a
-// text-native path, the selection from the stored chunks (a page or time
-// span) runs only after that check; a document with derived text was served
-// from its stored chunks earlier, in openFile.
+// reads the source once and checks all of it before any selection. A page or
+// time span comes from the stored chunks only when the stored document holds
+// exactly these bytes (its content hash is the hash of the checked read), so
+// the slice belongs to the source that passed the check. Otherwise, as for
+// lines, the span is selected from the checked bytes. A document with derived
+// text was served from its stored chunks earlier, in openFile.
 func (s *Service) openTextNativeFile(ctx context.Context, corpusFS corpusfs.CorpusFS, resolvedAbs, relPath string, secretPatterns *secretmatch.Matcher, kind string, span model.Span, maxChars int) (string, bool, error) {
 	data, err := s.readCheckedSource(ctx, corpusFS, resolvedAbs, relPath, secretPatterns)
 	if err != nil {
 		return "", false, err
 	}
-	if !hasDerivedText(relPath) {
+	if !hasDerivedText(relPath) && isMetaSpanKind(kind) && s.storedDocumentHolds(ctx, relPath, data) {
 		if content, truncated, handled, err := s.openFileFromMetadata(ctx, relPath, span, maxChars, secretPatterns, kind); handled {
 			return content, truncated, err
 		}
 	}
 	return selectCheckedSpan(secretPatterns, data, kind, span, maxChars)
+}
+
+// storedDocumentHolds reports whether the live document row of relPath has
+// the content hash of data. With no store, no row or a lookup error, it
+// reports false, so the caller selects from data.
+func (s *Service) storedDocumentHolds(ctx context.Context, relPath string, data []byte) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	if store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil || doc.Deleted || doc.ContentHash == "" {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	return doc.ContentHash == hex.EncodeToString(sum[:])
 }
 
 // openBinaryDocText answers open_file for a binary document type
