@@ -44,9 +44,9 @@ func sortedCopy(in []string) []string {
 	return out
 }
 
-// preSpec0970SecretPatterns is the default list every release before spec
-// 0.97.0 shipped (since #443).
-var preSpec0970SecretPatterns = []string{
+// preSpec0990SecretPatterns is the default list every release before spec
+// 0.99.0 shipped (since #443).
+var preSpec0990SecretPatterns = []string{
 	`AKIA[0-9A-Z]{16}`,
 	`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
@@ -56,17 +56,17 @@ var preSpec0970SecretPatterns = []string{
 	`[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}`,
 }
 
-// PreSpec0970DefaultPolicy returns the default policy that every release
-// before spec 0.97.0 shipped: its secret defaults and no allow list.
-func PreSpec0970DefaultPolicy() Policy {
-	return Policy{Secret: append([]string{}, preSpec0970SecretPatterns...)}
+// PreSpec0990DefaultPolicy returns the default policy that every release
+// before spec 0.99.0 shipped: its secret defaults and no allow list.
+func PreSpec0990DefaultPolicy() Policy {
+	return Policy{Secret: append([]string{}, preSpec0990SecretPatterns...)}
 }
 
 // narrowedSecretPatterns maps a pattern to the older pattern it narrows: every
 // string the new pattern matches, the old one matches too. Each new pattern
 // keeps the old pattern's core as a literal suffix and only adds a left
-// boundary, so this holds by construction (spec 0.97.0). The generic token
-// rule is not here: spec 0.97.0 keeps it broad and releases benign keys with
+// boundary, so this holds by construction (spec 0.99.0). The generic token
+// rule is not here: spec 0.99.0 keeps it broad and releases benign keys with
 // the allow list instead.
 var narrowedSecretPatterns = map[string]string{
 	`(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`: `sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
@@ -136,7 +136,7 @@ func IsNarrower(previous, active Policy) bool {
 // Recorded is the secret policy that the store recorded at the last policy
 // transition of a scan: the policy the corpus was last evaluated against.
 // Identity is empty when the store has no record (a corpus that a release
-// before spec 0.97.0 indexed). Known is false when the recorded lists cannot
+// before spec 0.99.0 indexed). Known is false when the recorded lists cannot
 // be established.
 type Recorded struct {
 	Identity string

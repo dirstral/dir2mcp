@@ -15,7 +15,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.97.0): the pending mark is looked up by path, at one
+// SPEC §7.2 (spec 0.99.0): the pending mark is looked up by path, at one
 // moment. A broader policy can mark a document after a hit was read, and a
 // scan can replace the document and clear the mark before that lookup. The
 // hit text then belongs to a generation that the new policy never evaluated,

@@ -12,7 +12,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.97.0): after a configuration change that can match more,
+// SPEC §7.2 (spec 0.99.0): after a configuration change that can match more,
 // the next ingest scan marks every indexed document pending. A process can
 // serve before that scan starts (up starts its transport before its ingest
 // worker; ask serves with no scan at all). Retrieval therefore compares the

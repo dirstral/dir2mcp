@@ -214,7 +214,7 @@ func TestMCPRelated_SourceNotFoundIsInvalidField(t *testing.T) {
 
 // TestMCPRelated_PendingSeedIsForbidden pins the error contract for a seed
 // document that waits for a secret-policy re-evaluation (SPEC §7.2, spec
-// 0.97.0): the retriever refuses it with ErrForbidden, and the tool reports
+// 0.99.0): the retriever refuses it with ErrForbidden, and the tool reports
 // FORBIDDEN, as open_file does for the same document.
 func TestMCPRelated_PendingSeedIsForbidden(t *testing.T) {
 	cfg := config.Default()

@@ -114,3 +114,24 @@ func TestPriorityList_ConfigKeyLoads(t *testing.T) {
 		t.Fatalf("nested key must load, got %q err=%v", loaded.IngestPriorityList, err)
 	}
 }
+
+// TestPriorityList_WildcardPlacesUncoveredFiles pins the "*" line: it stands
+// for every file no other line covers, at that line's place, in relative-path
+// order. First in the list it puts files the list does not name (new uploads)
+// ahead of the listed ones; a second "*" is ignored.
+func TestPriorityList_WildcardPlacesUncoveredFiles(t *testing.T) {
+	cases := map[string]struct {
+		list string
+		want string
+	}{
+		"first":                  {"*\nb\n", "a.txt,e/f.txt,g.txt,order.txt,b/c.txt,b/d.txt"},
+		"middle, second ignored": {"e\n*\nb/d.txt\n*\n", "e/f.txt,a.txt,b/c.txt,g.txt,order.txt,b/d.txt"},
+	}
+	for name, c := range cases {
+		root := priorityCorpus(t)
+		mustWriteFile(t, filepath.Join(root, "order.txt"), []byte(c.list))
+		if got := strings.Join(runOrder(t, root, "order.txt"), ","); got != c.want {
+			t.Fatalf("%s: processing order = %s\nwant %s", name, got, c.want)
+		}
+	}
+}

@@ -14,7 +14,7 @@ import (
 )
 
 // TestSecretScreen_RefillsAfterTheScreen pins that the secret screen runs
-// before the final cut to k (SPEC §7.2, spec 0.97.0). With k=1, the best
+// before the final cut to k (SPEC §7.2, spec 0.99.0). With k=1, the best
 // candidate holds a credential and the second one is clean: the caller gets
 // the clean one, not an empty result.
 func TestSecretScreen_RefillsAfterTheScreen(t *testing.T) {
@@ -183,7 +183,7 @@ func TestSecretScreen_FallbackAnswerChecksTheTrimmedSnippet(t *testing.T) {
 }
 
 // TestSecretScreen_FallbackAnswerChecksTheAssembledAnswer pins the last check
-// of the fallback answer (SPEC §7.2, spec 0.97.0). The answer adds a path
+// of the fallback answer (SPEC §7.2, spec 0.99.0). The answer adds a path
 // prefix, a question line and line breaks. These can stop an anchored allow
 // pattern from covering a snippet, or join a path and a snippet into a match.
 // Such a line is withheld, and an answer that still matches is replaced.

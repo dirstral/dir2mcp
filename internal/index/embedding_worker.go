@@ -683,11 +683,14 @@ func mediaMIMEType(relPath string) string {
 		return "audio/mp3"
 	case "wav":
 		return "audio/wav"
-	case "mp4":
-		return "video/mp4"
-	case "mov":
-		return "video/quicktime"
 	default:
+		// Video containers come from the avutil table that ingest classification
+		// uses, so every container classified as video has its own type here. A
+		// media chunk exists only for a document ingest classified as media, so a
+		// content-sniffed extension (.ts) here is a transport stream.
+		if mime, ok := avutil.VideoContainerMIME(filepath.Ext(relPath)); ok {
+			return mime
+		}
 		return "application/octet-stream"
 	}
 }

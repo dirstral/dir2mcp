@@ -176,3 +176,30 @@ func TestTranscribe_MapsAuthErrors(t *testing.T) {
 		t.Fatal("auth errors should not be retryable")
 	}
 }
+
+// TestTranscribe_EmptyTextIsNoSpeech is the #1182 guard: an HTTP 200 whose body
+// carries no text is Voxtral answering that it heard no speech. Silence is an
+// outcome, not a failure (SPEC §8.6.6): an empty transcript with no error, and
+// no retry either.
+func TestTranscribe_EmptyTextIsNoSpeech(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"  ","segments":[]}`))
+	}))
+	defer server.Close()
+
+	client := mistral.NewClient(server.URL, "k")
+	client.MaxRetries = 2
+	text, err := client.Transcribe(context.Background(), "silence.mp3", []byte("audio"))
+	if err != nil {
+		t.Fatalf("Transcribe: err = %v, want nil (an empty answer is no speech, not an error)", err)
+	}
+	if text != "" {
+		t.Fatalf("Transcribe = %q, want empty", text)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1 (no speech is an answer, not something to retry)", got)
+	}
+}

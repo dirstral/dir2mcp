@@ -42,6 +42,9 @@ type Document struct {
 	// field is intentionally not part of the MCP `list_files` tool
 	// output (that schema is fixed by SPEC §15.5 with
 	// additionalProperties:false); it is a diagnostic-bundle field.
+	// A status="skipped" row with SkipReason == SkipReasonNoSpeech also carries
+	// a detail here: the STT identity token the item was judged with, which the
+	// incremental gates compare to re-derive it when that identity changes.
 	ErrorMessage string
 	// SkipReason is the stable classification of *why* a document was
 	// recorded as skipped (never indexed) rather than ingested — one of
@@ -100,6 +103,14 @@ const (
 	// declared not-indexed coverage rather than a transcript that silently answers
 	// "no" for the audio no window decoded.
 	SkipReasonTranscriptPartial = "transcript_partial"
+	// SkipReasonNoSpeech: audio or video whose STT provider answered
+	// successfully with no speech (an empty transcript for the whole item), or
+	// which has no audio track at all, and which therefore has no
+	// representation (SPEC §8.6.6 "Silence is an outcome", spec 0.98.0).
+	// Silence is an outcome, not a failure: the empty transcript is cached like
+	// any other, and the item is re-derived only when its content or the STT
+	// identity changes.
+	SkipReasonNoSpeech = "no_speech"
 )
 
 type Representation struct {

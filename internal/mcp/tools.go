@@ -2421,6 +2421,9 @@ func isMediaDocType(docType string) bool {
 // mediaClipMIMEForPath picks a container MIME type for an extracted clip from
 // the source file extension (stream-copy keeps the source muxer), falling back
 // to a generic audio/video type by doc_type when the extension is unknown.
+// Video containers come from the avutil table, so every container ingest
+// classifies as video has its own type here. A .mod clip is muxed as an MPEG
+// program stream (avutil.SegmentOutputExt), which video/mpeg names.
 func mediaClipMIMEForPath(relPath, docType string) string {
 	switch strings.ToLower(filepath.Ext(strings.TrimSpace(relPath))) {
 	case ".mp3":
@@ -2433,12 +2436,17 @@ func mediaClipMIMEForPath(relPath, docType string) string {
 		return "audio/flac"
 	case ".ogg", ".opus":
 		return "audio/ogg"
-	case ".mp4":
-		return "video/mp4"
-	case ".mov":
-		return "video/quicktime"
 	}
-	if strings.EqualFold(strings.TrimSpace(docType), "video") {
+	isVideo := strings.EqualFold(strings.TrimSpace(docType), "video")
+	ext := filepath.Ext(strings.TrimSpace(relPath))
+	// A content-sniffed extension (.ts, .mts, .mod) names a video container only
+	// when the document is video; a .ts that is TypeScript has no clip MIME.
+	if avutil.IsVideoContainerExt(ext) || (isVideo && avutil.IsContentSniffedVideoExt(ext)) {
+		if mime, ok := avutil.VideoContainerMIME(ext); ok {
+			return mime
+		}
+	}
+	if isVideo {
 		return "video/mp4"
 	}
 	return "audio/mpeg"
@@ -3430,7 +3438,7 @@ func readBoundedFile(path string, maxBytes int64) (content []byte, tooLarge bool
 //
 // When the retriever exposes its secret pattern set (retrieval.Service does),
 // the gate uses that set, so annotate/transcribe refuse exactly what open_file,
-// search, ask and related refuse (spec 0.97.0). Otherwise it compiles
+// search, ask and related refuse (spec 0.99.0). Otherwise it compiles
 // security.secret_patterns and security.secret_allow_patterns itself.
 func (s *Server) refuseIfSecretContent(text string) *toolExecutionError {
 	if screener, ok := s.retriever.(secretMatcher); ok {
@@ -5125,7 +5133,7 @@ func statsOutputSchema() map[string]interface{} {
 						"reason": map[string]interface{}{
 							"type":        "string",
 							"minLength":   1,
-							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, symlink_ignored. Render an unrecognized value verbatim.",
+							"description": "Why these documents were not indexed. Canonical values for this spec minor: unsupported_format, binary_ignored, archive, ignore_rule, secret_excluded, path_excluded, size_cap, language_uncovered, transcript_partial, symlink_ignored, no_speech. Render an unrecognized value verbatim.",
 						},
 						"count": map[string]interface{}{"type": "integer", "minimum": 1},
 					},

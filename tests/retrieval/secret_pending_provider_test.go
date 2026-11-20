@@ -16,7 +16,7 @@ import (
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
 
-// SPEC §7.2 (spec 0.97.0): the text of a document that waits for a
+// SPEC §7.2 (spec 0.99.0): the text of a document that waits for a
 // secret-policy re-evaluation must not reach a provider: not the hosted
 // reranker that search runs before the final screen, and not the embedder that
 // related runs on its seed. A failed pending lookup must never send the text.
