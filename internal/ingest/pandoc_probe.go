@@ -164,6 +164,26 @@ func PandocActive(cfg config.Config) bool {
 	return pandocEngineActive(cfg)
 }
 
+// PandocInstallHint returns the coverage remedy for the pandoc engine: what to
+// do so the born-digital OpenDocument/RTF/EPUB formats are read. It names each
+// step that is still necessary: install pandoc when no functional pandoc
+// resolves, and change ingest.extractor when the policy excludes the engine
+// (for example a libreoffice or mistral pin). Installing pandoc alone does not
+// help under such a pin. It returns "" when the engine is active.
+func PandocInstallHint(cfg config.Config) string {
+	var steps []string
+	if !pandocAvailable(cfg) {
+		steps = append(steps, "install pandoc (#393)")
+	}
+	if !pandocPolicyAllows(cfg.IngestExtractor) {
+		steps = append(steps, "set ingest.extractor to auto or pandoc")
+	}
+	if len(steps) == 0 {
+		return ""
+	}
+	return strings.Join(steps, " and ") + " for the born-digital OpenDocument/RTF/EPUB formats"
+}
+
 // PandocSupportsExt is the exported wrapper over the pandoc engine's readable set
 // so the doctor coverage check can report pandoc-covered formats. ext is expected
 // lowercased with its leading dot.

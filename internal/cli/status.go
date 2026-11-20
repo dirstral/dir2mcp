@@ -322,7 +322,7 @@ func (a *App) renderCoverageBlock(s styles, snapshot corpusSnapshot) {
 func skipReasonHint(reason string) string {
 	switch reason {
 	case model.SkipReasonUnsupportedFormat:
-		return "no active extraction engine reads these formats — install a richer extractor (e.g. the docling-enabled build) or set ingest.extractor"
+		return "no active extraction engine reads these formats: install a richer extractor (e.g. the docling-enabled build; legacy .doc needs LibreOffice soffice and pandoc) or set ingest.extractor"
 	case model.SkipReasonSizeCap:
 		return "larger than ingest.max_file_mb — raise the cap to include them"
 	case model.SkipReasonPathExcluded:

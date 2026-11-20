@@ -108,7 +108,7 @@ the reason. `dir2mcp down` stops the server; `up` resumes incrementally.
   | Capability | Providers |
   |---|---|
   | Embedding | Mistral, OpenAI, Gemini, any OpenAI-compatible endpoint, self-hosted |
-  | Extraction / OCR | docling (local), docling-serve (HTTP), pandoc, Mistral OCR |
+  | Extraction / OCR | docling (local), docling-serve (HTTP), pandoc, libreoffice (legacy .doc), Mistral OCR |
   | Transcription | Voxtral, Whisper (self-hosted or OpenAI-compatible) |
   | Answers | Mistral, OpenAI, Anthropic, Gemini, OpenRouter, any OpenAI-compatible endpoint |
   | Reranking | Cohere, ColBERT, self-hosted |
