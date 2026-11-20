@@ -30,7 +30,6 @@ func TestTranscribe_EmptyGeneratedTextIsNoSpeech(t *testing.T) {
 		"empty text":      `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}`,
 		"whitespace text": `{"candidates":[{"content":{"parts":[{"text":" \n\t "}]},"finishReason":"STOP"}]}`,
 		"no parts":        `{"candidates":[{"content":{"role":"model"},"finishReason":"STOP"}]}`,
-		"no finishReason": `{"candidates":[{"content":{"parts":[{"text":""}]}}]}`,
 		// A part with no text field is as before: no generated text.
 		"part with no text field": `{"candidates":[{"content":{"parts":[{}]},"finishReason":"STOP"}]}`,
 		"empty parts array":       `{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}`,
@@ -55,6 +54,9 @@ func TestTranscribe_NoGeneratedTextFieldStaysAnError(t *testing.T) {
 		"prompt blocked":   `{"promptFeedback":{"blockReason":"SAFETY"}}`,
 		"safety stop":      `{"candidates":[{"finishReason":"SAFETY"}]}`,
 		"token limit":      `{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"MAX_TOKENS"}]}`,
+		// An absent finishReason means the generation has not stopped, so
+		// empty text is not a no-speech result.
+		"no finishReason": `{"candidates":[{"content":{"parts":[{"text":""}]}}]}`,
 		// Only whitespace and not finished: the model did not complete the
 		// transcription. The same text with STOP is a no-speech result (above).
 		"whitespace, token limit": `{"candidates":[{"content":{"parts":[{"text":" \n\t "}]},"finishReason":"MAX_TOKENS"}]}`,

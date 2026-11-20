@@ -445,8 +445,13 @@ func (s *Service) rerouteWindow(ctx context.Context, relPath string, pieces []wi
 	}
 	rerouted, derr := s.decodePieces(ctx, relPath, want.stt, pieces, plan)
 	// Spec 0.99.0: a route that hears no speech where the first decode heard
-	// some has produced nothing either, so the first decode stands.
-	if len(rerouted) == 0 || !resultsHaveContent(rerouted) {
+	// some has produced nothing either, so the first decode stands. When the
+	// first decode heard no speech either, a complete silent reroute replaces
+	// it: the first decode can have lost a piece of a split window, and the
+	// reroute then gives the window a whole no-speech result.
+	silentReroute := !resultsHaveContent(rerouted)
+	keepFirst := resultsHaveContent(results) || len(rerouted) < len(pieces)
+	if len(rerouted) == 0 || (silentReroute && keepFirst) {
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s resolved to %q but route %q returned nothing (%v); keeping the %q decode",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, want.route, derr, cur.route)
 		return results, cur

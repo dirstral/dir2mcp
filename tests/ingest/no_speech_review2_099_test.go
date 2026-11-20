@@ -311,6 +311,37 @@ func TestNoSpeech_FailedPieceOfASingleWindowIsNotNoSpeech(t *testing.T) {
 	}
 }
 
+// TestNoSpeech_CompleteSilentRerouteReplacesALostPiece: under window scope a
+// short recording over the provider cap is one window of two pieces. On the
+// first route one piece fails and the other holds no speech. The identifier
+// routes the window to another profile, which decodes both pieces with no
+// speech. That complete result replaces the first decode, so the window is a
+// whole no-speech window and the recording is a no-speech recording.
+//
+// Mutant killed: keeping the incomplete first decode on every silent reroute,
+// which turns the window into a failed window and the recording into an error.
+func TestNoSpeech_CompleteSilentRerouteReplacesALostPiece(t *testing.T) {
+	t.Parallel()
+	const totalMS = 20 * 1000
+	content := make([]byte, 300_000)
+	first := &cappedSilentTranscriber{limit: 200_000, failAt: map[int]error{1: windowProviderFailure}}
+	routed := &cappedSilentTranscriber{limit: 200_000}
+	h := newWindowSTTHarness(t, &windowRecordingTranscriber{}, totalMS, content)
+	h.svc.SetTranscriber(first)
+	h.svc.SetSTTIdentity("whisper", "large-v3")
+	h.svc.SetLanguageScope("window")
+	h.svc.SetLanguageIdentifier(&replyTranscriber{def: model.TranscriptResult{Text: "[00:00] салам", Language: "ky", LanguageConfidence: 0.9}}, "lid")
+	h.svc.SetRouteTranscriber("ky", routed, "whisper-ky", []string{"ky"})
+
+	err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/jingle.m4a"), content)
+	if routed.calls != 2 {
+		t.Fatalf("routed decode requests = %d, want 2: the window must be decoded again on the identified route\n%s", routed.calls, h.logs.String())
+	}
+	if err != nil || !strings.Contains(h.logs.String(), "stt: no speech in") {
+		t.Fatalf("err=%v, want a no-speech recording: the complete silent reroute replaces the decode that lost a piece\n%s", err, h.logs.String())
+	}
+}
+
 // TestNoSpeech_SilentCandidateDoesNotDependOnCandidateOrder: a route candidate
 // that does not declare the window's language can stay in the candidate list.
 // Window 1: the first candidate decodes a loop that the gate refuses,
@@ -402,7 +433,11 @@ func TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript(t *testing.T) {
 	transcriptID := repIDForType(t, st, "talk.mp3", ingest.RepTypeTranscript)
 	summaryID := repIDForType(t, st, "talk.mp3", model.SummaryRepType)
 	for _, word := range []string{"talkwordzq", "summarywordzq"} {
-		if hits, _ := st.SearchBM25(ctx, word, 5, ""); len(hits) == 0 {
+		hits, err := st.SearchBM25(ctx, word, 5, "")
+		if err != nil {
+			t.Fatalf("SearchBM25(%q): %v", word, err)
+		}
+		if len(hits) == 0 {
 			t.Fatalf("%q gives no lexical hit after scan 1; the fixture is wrong", word)
 		}
 	}
@@ -418,7 +453,11 @@ func TestNoSpeech_RetiresTheSummaryOfTheEarlierTranscript(t *testing.T) {
 	assertChunksTombstoned(t, st, transcriptID)
 	assertChunksTombstoned(t, st, summaryID)
 	for _, word := range []string{"talkwordzq", "summarywordzq"} {
-		if hits, _ := st.SearchBM25(ctx, word, 5, ""); len(hits) != 0 {
+		hits, err := st.SearchBM25(ctx, word, 5, "")
+		if err != nil {
+			t.Fatalf("SearchBM25(%q): %v", word, err)
+		}
+		if len(hits) != 0 {
 			t.Errorf("%q still gives %d lexical hit(s) after the no-speech result", word, len(hits))
 		}
 	}
@@ -681,7 +720,11 @@ func TestNoSpeech_SettleOutsideScanLeavesTheScanState(t *testing.T) {
 		t.Errorf("live representations = %v, want none: the transcript and its summary are retired", types)
 	}
 	for _, word := range []string{"talkwordzq", "summarywordzq"} {
-		if hits, _ := st.SearchBM25(ctx, word, 5, ""); len(hits) != 0 {
+		hits, err := st.SearchBM25(ctx, word, 5, "")
+		if err != nil {
+			t.Fatalf("SearchBM25(%q): %v", word, err)
+		}
+		if len(hits) != 0 {
 			t.Errorf("%q still gives %d lexical hit(s)", word, len(hits))
 		}
 	}

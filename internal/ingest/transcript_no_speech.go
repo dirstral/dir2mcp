@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -277,7 +278,8 @@ func (s *Service) TranscriptCached(content []byte, language string) bool {
 
 // SettleNoSpeechOutsideScan leaves a document whose first audio track was a
 // no-speech result in the state that a scan writes (SPEC §8.6.13). It serves
-// the MCP transcribe tool, which decodes outside a scan:
+// the MCP transcribe tool, which decodes outside a scan and decodes only the
+// first audio track:
 //
 //   - an earlier transcript of the track is retired with its chunks, its
 //     translations and the summaries derived from it;
@@ -289,10 +291,30 @@ func (s *Service) TranscriptCached(content []byte, language string) bool {
 //     The row keeps its content_hash, so the next scan does not decode the
 //     recording again.
 //
-// A retirement or a record write that fails is returned, as in a scan.
+// no_speech needs every selected track to hold no speech (§8.6.12). When
+// media.stt.tracks selects more than the first track, the first track alone
+// does not decide it, so the stored state is left to the next scan, which
+// decodes every selected track.
+//
+// A retirement or a record write that fails is returned, as in a scan. The
+// document is then recorded as status="error", so the next scan processes it
+// again: a document whose transcript was retired must not be skipped as
+// unchanged.
 func (s *Service) SettleNoSpeechOutsideScan(ctx context.Context, doc model.Document) error {
-	tc := trackContext{audioIndex: 0}
-	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
+	if sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks); err != nil || sel.Mode != config.STTTracksFirst {
+		s.getLogger().Printf("stt: the first audio track of %s holds no speech; media.stt.tracks selects more tracks, so the next scan settles the document (SPEC §8.6.12)", doc.RelPath)
+		return nil
+	}
+	if err := s.settleNoSpeechOutsideScan(ctx, doc); err != nil {
+		s.persistNonFatalDocError(ctx, doc, err, nil)
+		return err
+	}
+	return nil
+}
+
+// settleNoSpeechOutsideScan is the body of SettleNoSpeechOutsideScan.
+func (s *Service) settleNoSpeechOutsideScan(ctx context.Context, doc model.Document) error {
+	if err := s.retireTrackTranscripts(ctx, doc, trackContext{audioIndex: 0}); err != nil {
 		return err
 	}
 	if err := s.recordNoSpeechIdentity(ctx, doc.RelPath); err != nil {

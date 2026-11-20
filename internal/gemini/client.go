@@ -744,11 +744,13 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	return text, nil
 }
 
-// generationFinished reports whether a candidate ended normally. An absent
-// finish reason counts as normal.
+// generationFinished reports whether a candidate ended normally: its finish
+// reason is STOP. An absent finish reason means the generation has not stopped
+// (Gemini v1beta), so empty text with no finish reason is not a no-speech
+// result (SPEC §8.2, spec 0.99.0: a finishReason other than STOP stays a
+// provider error).
 func generationFinished(reason string) bool {
-	reason = strings.TrimSpace(reason)
-	return reason == "" || strings.EqualFold(reason, "STOP")
+	return strings.EqualFold(strings.TrimSpace(reason), "STOP")
 }
 
 // firstCandidateText concatenates the text parts of the first candidate.
