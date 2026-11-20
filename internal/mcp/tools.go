@@ -3320,12 +3320,14 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
 			return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
 		}
-		indexed = true
 		if strings.TrimSpace(language) == "" {
 			// The recording holds speech now, so a no-speech outcome of an
 			// earlier decode no longer describes it.
-			ing.SettleSpeechOutsideScan(ctx, doc)
+			if settleErr := ing.SettleSpeechOutsideScan(ctx, doc); settleErr != nil {
+				return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", settleErr)
+			}
 		}
+		indexed = true
 	}
 	return transcript, transcribedNow, indexed, nil
 }

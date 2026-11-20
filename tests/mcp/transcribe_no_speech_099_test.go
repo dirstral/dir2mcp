@@ -92,13 +92,20 @@ func (e *transcribeEnv096) call(t *testing.T, tool string, args map[string]inter
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	var envelope struct {
-		Result struct {
+		Error  json.RawMessage `json:"error"`
+		Result *struct {
 			IsError           bool                   `json:"isError"`
 			StructuredContent map[string]interface{} `json:"structuredContent"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatalf("decode %s response: %v (body=%s)", tool, err, raw)
+	}
+	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+		t.Fatalf("%s returned a JSON-RPC error: %s", tool, raw)
+	}
+	if envelope.Result == nil {
+		t.Fatalf("%s returned no result: %s", tool, raw)
 	}
 	if envelope.Result.IsError {
 		t.Fatalf("%s returned an error, want a success result: %s", tool, raw)

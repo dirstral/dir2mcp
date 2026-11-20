@@ -331,16 +331,18 @@ func (s *Service) settleNoSpeechOutsideScan(ctx context.Context, doc model.Docum
 // earlier decode no longer describes the recording, so it is deleted, as a
 // scan does at the start of each derivation. A row that an earlier decode
 // recorded as status="skipped" with skip_reason="no_speech" becomes
-// status="ok": the document has a transcript now.
-func (s *Service) SettleSpeechOutsideScan(ctx context.Context, doc model.Document) {
+// status="ok": the document has a transcript now. A failed write of that row
+// is returned, so the caller does not report the document as indexed.
+func (s *Service) SettleSpeechOutsideScan(ctx context.Context, doc model.Document) error {
 	s.clearNoSpeechIdentity(ctx, doc.RelPath)
 	if doc.Status != string(model.DocumentStatusSkipped) || doc.SkipReason != model.SkipReasonNoSpeech {
-		return
+		return nil
 	}
 	doc.Status = string(model.DocumentStatusOK)
 	doc.SkipReason = ""
 	doc.ErrorMessage = ""
 	if err := s.store.UpsertDocument(ctx, doc); err != nil {
-		s.getLogger().Printf("stt: record %s as indexed after a decode with speech: %v", doc.RelPath, err)
+		return fmt.Errorf("record %s as indexed after a decode with speech: %w", doc.RelPath, err)
 	}
+	return nil
 }
