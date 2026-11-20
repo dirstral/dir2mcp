@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // GenericTokenPattern is the generic bearer-token default of
@@ -40,7 +41,23 @@ const GenericTokenPattern = `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
 // built, so one value can serve concurrent callers.
 type Matcher struct {
 	secret []*regexp.Regexp
-	allow  []*regexp.Regexp
+	allow  []allowPattern
+}
+
+// allowPattern is one allow pattern and the form the cover search uses
+// to find a match at or after a given position, with the text before that
+// position as context (see eachMatch).
+type allowPattern struct {
+	rx *regexp.Regexp
+	// after finds the leftmost match that starts after the first rune of the
+	// text it searches: `(?s:.)(?:P)`. A search of text[q-n:], where n is the
+	// size of the rune before q, finds the leftmost match that starts at or
+	// after q, and the assertions of P (^, \b) see the rune before q.
+	after *regexp.Regexp
+}
+
+func newAllowPattern(rx *regexp.Regexp) allowPattern {
+	return allowPattern{rx: rx, after: regexp.MustCompile(`(?s:.)(?:` + rx.String() + `)`)}
 }
 
 // Compile builds a Matcher from the configured lists. Blank entries are
@@ -55,12 +72,17 @@ func Compile(secretPatterns, allowPatterns []string) (*Matcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Matcher{secret: secret, allow: allow}, nil
+	return New(secret, allow), nil
 }
 
 // New builds a Matcher from compiled lists. Nil entries are skipped.
 func New(secret, allow []*regexp.Regexp) *Matcher {
-	return &Matcher{secret: nonNil(secret), allow: nonNil(allow)}
+	compiled := nonNil(allow)
+	patterns := make([]allowPattern, 0, len(compiled))
+	for _, rx := range compiled {
+		patterns = append(patterns, newAllowPattern(rx))
+	}
+	return &Matcher{secret: nonNil(secret), allow: patterns}
 }
 
 func compileList(kind string, patterns []string) ([]*regexp.Regexp, error) {
@@ -108,7 +130,11 @@ func (m *Matcher) AllowSources() []string {
 	if m == nil {
 		return nil
 	}
-	return sources(m.allow)
+	out := make([]string, 0, len(m.allow))
+	for _, ap := range m.allow {
+		out = append(out, ap.rx.String())
+	}
+	return out
 }
 
 func sources(list []*regexp.Regexp) []string {
@@ -133,54 +159,45 @@ func (m *Matcher) Match(text []byte) bool {
 	if !m.Enabled() || len(text) == 0 {
 		return false
 	}
-	var cover *coverIndex
 	for _, rx := range m.secret {
-		if !m.cancellable(rx) {
-			// No allow match can cancel this pattern: one match is enough.
-			if rx.Match(text) {
-				return true
-			}
-			continue
-		}
 		if !rx.Match(text) {
 			continue
 		}
-		if cover == nil {
-			cover = newCoverIndex(m.allowSpans(text))
+		if !m.cancellable(rx) {
+			// No allow match can cancel this pattern: one match is enough.
+			return true
 		}
-		if uncoveredAtAnyStart(rx, text, cover) {
+		if m.anyUncovered(genericMatches(rx, text), text) {
 			return true
 		}
 	}
 	return false
 }
 
-// uncoveredAtAnyStart reports whether rx has a match, at ANY start position in
-// text, that no allow span covers (SPEC §7.2, spec 0.99.0). A search for
-// non-overlapping matches resumes after a match, so a match that starts inside
-// a cancelled match would never be judged: in `redir_token=<20 chars>GITHUB_TOKEN=<20 chars>`
-// the first match (`token=<20 chars>GITHUB_TOKEN`) is cancelled, and the second
-// assignment starts inside it. So after a cancelled match the search starts
-// again one byte after the start of that match, not after its end.
+// genericMatches returns the match of rx at every start position in text, in
+// order of start (SPEC §7.2, spec 0.99.0). A search for non-overlapping
+// matches resumes after a match, so a match that starts inside another match
+// would never be judged: in `redir_token=<20 chars>GITHUB_TOKEN=<20 chars>`
+// the first match (`token=<20 chars>GITHUB_TOKEN`) is cancelled, and the
+// second assignment starts inside it. So the search starts again one byte
+// after the start of each match, not after its end.
 //
-// The cost stays linear in practice: each new search scans from the start of
-// the last match to the end of the next one, so the extra work per cancelled
-// match is bounded by the length of that match, which an allow span covers.
-// The generic token pattern has no anchor and no word-boundary assertion, so a
-// search in text[pos:] finds exactly the matches that start at or after pos.
-func uncoveredAtAnyStart(rx *regexp.Regexp, text []byte, cover *coverIndex) bool {
+// The generic token pattern has no anchor and no word-boundary assertion, so
+// a search in text[pos:] finds exactly the matches that start at or after pos.
+// Each match starts with the literal `token`, so the list holds at most one
+// span for each occurrence of that word.
+func genericMatches(rx *regexp.Regexp, text []byte) [][2]int {
+	var spans [][2]int
 	for pos := 0; pos < len(text); {
 		loc := rx.FindIndex(text[pos:])
 		if loc == nil {
-			return false
+			break
 		}
-		start, end := pos+loc[0], pos+loc[1]
-		if !cover.covers(start, end) {
-			return true
-		}
+		start := pos + loc[0]
+		spans = append(spans, [2]int{start, pos + loc[1]})
 		pos = start + 1
 	}
-	return false
+	return spans
 }
 
 // cancellable reports whether an allow match can cancel a match of rx: only
@@ -190,79 +207,160 @@ func (m *Matcher) cancellable(rx *regexp.Regexp) bool {
 	return len(m.allow) > 0 && rx.String() == GenericTokenPattern
 }
 
-// allowSpans returns the cover of every match of every allow pattern in text
-// (SPEC §7.2, spec 0.99.0). The cover of a match is the text of the first
-// capture group of the pattern when it has one, and the whole match when it
-// has none. The rest of the match is context: it must be present, but it
-// cancels nothing. A match whose first group took no part in it (an optional
-// group, or a group in an alternative that did not match) has no cover and
-// cancels nothing.
-func (m *Matcher) allowSpans(text []byte) [][]int {
-	var spans [][]int
-	for _, rx := range m.allow {
-		if rx.NumSubexp() == 0 {
-			spans = append(spans, rx.FindAllIndex(text, -1)...)
-			continue
-		}
-		for _, loc := range rx.FindAllSubmatchIndex(text, -1) {
-			if loc[2] < 0 || loc[3] < 0 {
-				continue
-			}
-			spans = append(spans, []int{loc[2], loc[3]})
-		}
-	}
-	return spans
-}
-
-// coverIndex answers "does ONE allow cover span cover [start, end)?" in O(log n).
+// anyUncovered reports whether one of the generic matches (sorted by start)
+// has no allow cover that holds it whole (SPEC §7.2, spec 0.99.0). The cover
+// of an allow match is the text of the first capture group of the pattern
+// when it has one, and the whole match when it has none. The rest of the
+// match is context: it must be present, but it cancels nothing. A match whose
+// first group took no part in it has no cover. One cover must hold the whole
+// generic match; two covers are never joined.
 //
-// The spans are sorted by start once. maxEnd[i] is the largest end among the
-// spans 0..i, so for a secret match at start, maxEnd at the last span with
-// span.start <= start is the end of one single span that starts at or before
-// the match. That span covers the match exactly when its end is at or after
-// the match end. A running maximum therefore never joins two spans into a
-// cover: the value it reports is the end of one span, and every span it looks
-// at starts at or before the match.
-type coverIndex struct {
-	starts []int
-	maxEnd []int
-}
-
-func newCoverIndex(spans [][]int) *coverIndex {
-	sorted := append([][]int(nil), spans...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i][0] < sorted[j][0] })
-	ci := &coverIndex{
-		starts: make([]int, len(sorted)),
-		maxEnd: make([]int, len(sorted)),
+// The allow matches are read one at a time and are not kept, so the memory
+// stays bounded by the number of generic matches, also for a dense allow rule
+// on a large text. The search stops when every generic match is cancelled, or
+// when the next allow match starts after the last generic match that is still
+// uncancelled (a cover never starts before its match, so no later match can
+// cancel it).
+func (m *Matcher) anyUncovered(generic [][2]int, text []byte) bool {
+	if len(generic) == 0 {
+		return false
 	}
-	runEnd := -1
-	for i, span := range sorted {
-		ci.starts[i] = span[0]
-		if span[1] > runEnd {
-			runEnd = span[1]
+	cancelled := make([]bool, len(generic))
+	last := len(generic) - 1
+	for _, ap := range m.allow {
+		ap.eachMatch(text, func(start int) bool { return start <= generic[last][0] }, func(loc []int) bool {
+			cover, ok := coverOf(loc)
+			if ok {
+				cancelCovered(generic, cancelled, cover)
+			}
+			for last >= 0 && cancelled[last] {
+				last--
+			}
+			return last >= 0
+		})
+		if last < 0 {
+			return false
 		}
-		ci.maxEnd[i] = runEnd
 	}
-	return ci
+	return true
 }
 
-// covers reports whether one allow span covers [start, end).
-func (ci *coverIndex) covers(start, end int) bool {
-	i := sort.Search(len(ci.starts), func(i int) bool { return ci.starts[i] > start }) - 1
-	return i >= 0 && ci.maxEnd[i] >= end
+// coverOf returns the cover of one allow match: its first capture group when
+// the pattern has one, and the whole match when it has none. ok is false when
+// the first group took no part in the match.
+func coverOf(loc []int) ([2]int, bool) {
+	if len(loc) < 4 {
+		return [2]int{loc[0], loc[1]}, true
+	}
+	if loc[2] < 0 || loc[3] < 0 {
+		return [2]int{}, false
+	}
+	return [2]int{loc[2], loc[3]}, true
+}
+
+// cancelCovered marks each generic match that cover holds whole.
+func cancelCovered(generic [][2]int, cancelled []bool, cover [2]int) {
+	i := sort.Search(len(generic), func(i int) bool { return generic[i][0] >= cover[0] })
+	for ; i < len(generic) && generic[i][0] <= cover[1]; i++ {
+		if generic[i][1] <= cover[1] {
+			cancelled[i] = true
+		}
+	}
+}
+
+// eachMatch calls visit with the submatch indexes of the match of the allow
+// pattern at every start position in text, in order of start, while want
+// accepts the start and visit returns true. Two matches can share context: in
+// `;token=<20 chars>;token=<20 chars>;` the pattern `;(token=A{20});` matches
+// at the first `;` and at the second, and a search for non-overlapping
+// matches would miss the second. So, as for the generic matches, the search
+// starts again one rune after the start of each match, not after its end.
+// Each search keeps the rune before its start as context, so ^, \b and the
+// other assertions keep the meaning they have in the whole text.
+func (ap allowPattern) eachMatch(text []byte, want func(start int) bool, visit func(loc []int) bool) {
+	for q := 0; q <= len(text); {
+		loc := ap.leftmostFrom(text, q)
+		if loc == nil || !want(loc[0]) || !visit(loc) {
+			return
+		}
+		q = nextRune(text, loc[0])
+	}
+}
+
+// leftmostFrom returns the leftmost match that starts at or after q.
+func (ap allowPattern) leftmostFrom(text []byte, q int) []int {
+	if q == 0 {
+		return ap.rx.FindSubmatchIndex(text)
+	}
+	if q > len(text) {
+		return nil
+	}
+	_, size := utf8.DecodeLastRune(text[:q])
+	return shiftMatch(ap.after.FindSubmatchIndex(text[q-size:]), q-size, size)
+}
+
+// shiftMatch maps the submatch indexes of a `(?s:.)(?:P)` match in
+// text[base:] to the indexes of the P match in text: the whole match starts
+// one rune (size bytes) later, and each group moves by base.
+func shiftMatch(loc []int, base, size int) []int {
+	if loc == nil {
+		return nil
+	}
+	out := make([]int, len(loc))
+	for i, v := range loc {
+		if v >= 0 {
+			v += base
+		}
+		out[i] = v
+	}
+	out[0] += size
+	return out
+}
+
+// nextRune returns the position of the rune after the one at pos.
+func nextRune(text []byte, pos int) int {
+	if pos >= len(text) {
+		return pos + 1
+	}
+	_, size := utf8.DecodeRune(text[pos:])
+	return pos + size
 }
 
 // Redact replaces every secret match in msg with "[REDACTED]". It ignores the
 // allow list: a diagnostic message loses nothing it needs when a redirect
 // parameter is hidden, and a redaction must not depend on context that a
-// truncated message may have lost.
+// truncated message may have lost. Every pattern is matched against the
+// original message, and overlapping matches are joined, so one replacement
+// never hides a match from the next pattern.
 func (m *Matcher) Redact(msg string) string {
 	if m == nil || msg == "" {
 		return msg
 	}
-	out := msg
+	var spans [][2]int
 	for _, rx := range m.secret {
-		out = rx.ReplaceAllString(out, "[REDACTED]")
+		for _, loc := range rx.FindAllStringIndex(msg, -1) {
+			if loc[1] > loc[0] {
+				spans = append(spans, [2]int{loc[0], loc[1]})
+			}
+		}
 	}
-	return out
+	if len(spans) == 0 {
+		return msg
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	var b strings.Builder
+	prev := 0
+	for i := 0; i < len(spans); {
+		start, end := spans[i][0], spans[i][1]
+		for i++; i < len(spans) && spans[i][0] < end; i++ {
+			if spans[i][1] > end {
+				end = spans[i][1]
+			}
+		}
+		b.WriteString(msg[prev:start])
+		b.WriteString("[REDACTED]")
+		prev = end
+	}
+	b.WriteString(msg[prev:])
+	return b.String()
 }
