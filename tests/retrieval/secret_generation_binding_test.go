@@ -285,3 +285,75 @@ func TestSecretGeneration_ResetOfAnUnfinalizedDocumentChangesTheGeneration(t *te
 		t.Fatalf("generation before = %q, after = %q; a broader reset must change it", before["wip.md"], after["wip.md"])
 	}
 }
+
+// pendSplitDuringPrompt makes split.md wait for re-evaluation between the
+// final screen of search (lookup 1) and the prompt context (lookup 2). The
+// scan decides clean.md again with unchanged content, so it stays eligible.
+func (f *generationFixture) pendSplitDuringPrompt(t *testing.T) {
+	t.Helper()
+	f.store.hookAt = 2
+	f.store.atPendingLookup = func() {
+		ctx := context.Background()
+		if _, err := f.store.ResetForSecretPolicy(ctx, "v2:later", []string{`BLUEHERON`, `GITHUB_TOKEN=\S+`}, nil, true); err != nil {
+			t.Fatalf("ResetForSecretPolicy: %v", err)
+		}
+		if err := f.store.UpsertDocument(model.WithSecretPolicyIdentity(ctx, "v2:later"), model.Document{RelPath: "clean.md", DocType: "md", Status: "ok", ContentHash: "h1"}); err != nil {
+			t.Fatalf("UpsertDocument: %v", err)
+		}
+	}
+}
+
+func requireOnlyClean(t *testing.T, res model.AskResult) {
+	t.Helper()
+	if got := fmt.Sprint(hitIDs(res.Hits)); got != "[3]" {
+		t.Fatalf("ask hits = %s, want [3] (split.md became pending)", got)
+	}
+	for _, c := range res.Citations {
+		if c.RelPath == "split.md" {
+			t.Fatalf("the ask result cites split.md, which became pending: %+v", res.Citations)
+		}
+	}
+	if strings.Contains(res.Answer, "split.md") {
+		t.Fatalf("the answer names split.md, which became pending:\n%s", res.Answer)
+	}
+}
+
+// TestSecretGeneration_PendingHitIsNotInThePrompt: a document that becomes
+// pending before the prompt is built is left out of the prompt whole. The
+// prompt names neither its path nor its span, and the result does not hold
+// it (SPEC §7.2, spec 0.99.0).
+func TestSecretGeneration_PendingHitIsNotInThePrompt(t *testing.T) {
+	f := newGenerationFixture(t)
+	f.pendSplitDuringPrompt(t)
+	res, err := f.svc.Ask(context.Background(), "what do the staging notes say", model.SearchQuery{K: 5, Index: "text"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if f.store.lookups < 2 || f.gen.lastPrompt == "" {
+		t.Fatalf("the hook or the generator did not run (lookups %d); the test proves nothing", f.store.lookups)
+	}
+	if strings.Contains(f.gen.lastPrompt, "split.md") {
+		t.Fatalf("the ask prompt names split.md, which became pending:\n%s", f.gen.lastPrompt)
+	}
+	if !strings.Contains(f.gen.lastPrompt, genCleanTxt) {
+		t.Fatalf("the ask prompt lost the eligible clean.md:\n%s", f.gen.lastPrompt)
+	}
+	requireOnlyClean(t, res)
+}
+
+// TestSecretGeneration_PendingHitIsNotInTheFallback: the same race, and the
+// generator fails. The fallback answer and its citations are built from the
+// eligible hits only.
+func TestSecretGeneration_PendingHitIsNotInTheFallback(t *testing.T) {
+	f := newGenerationFixture(t)
+	f.gen.err = errors.New("generator down")
+	f.pendSplitDuringPrompt(t)
+	res, err := f.svc.Ask(context.Background(), "what do the staging notes say", model.SearchQuery{K: 5, Index: "text"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if f.store.lookups < 2 {
+		t.Fatalf("only %d pending lookup(s) ran; the test proves nothing", f.store.lookups)
+	}
+	requireOnlyClean(t, res)
+}

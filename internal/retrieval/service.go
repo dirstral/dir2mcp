@@ -2374,24 +2374,13 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		}
 	}
 
-	citations := make([]model.Citation, 0, len(hits))
-	for _, hit := range hits {
-		citations = append(citations, model.Citation{
-			ChunkID: hit.ChunkID,
-			RelPath: hit.RelPath,
-			Title:   hit.Title,
-			Span:    hit.Span,
-		})
-	}
+	citations := citationsForHits(hits)
 
 	if abstained, ok := s.abstainOnWeakEvidence(ctx, question, hits); ok {
 		return abstained, nil
 	}
 
-	s.metaMu.RLock()
-	fallbackMatcher := s.secretMatcher
-	s.metaMu.RUnlock()
-	answer := buildFallbackAnswer(question, hits, fallbackMatcher)
+	answer := buildFallbackAnswer(question, hits, s.currentSecretMatcher())
 	// faithfulness is the #336 answer-level verdict. It stays Unchecked on
 	// every path that does not verify, which §9.4.4 defines as "no judgement"
 	// rather than as a weak pass.
@@ -2415,7 +2404,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		sourceReason = ""
 	case s.gen != nil && len(hits) > 0:
 		var shown string
-		answer, citations, shown, sourceReason = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
+		// hits becomes the set that is still eligible after the prompt was
+		// built: a document that became pending in the meantime is left out of
+		// the result, the citations and the fallback answer too (spec 0.99.0).
+		answer, citations, shown, sourceReason, hits = s.generateGroundedAnswer(ctx, question, answer, hits, citations)
 		// Grounding check (#336): read the answer back against the exact
 		// context the model was shown. An unsupported answer is withheld
 		// rather than published, because the absolute evidence threshold
@@ -2501,9 +2493,15 @@ func answerSourceFor(reason string) string {
 // so the #336 grounding check verifies against the exact bytes the model was
 // shown rather than a re-rendered approximation. That region is "" when nothing
 // was placed.
+//
+// The last value is the set of hits that is still eligible once the prompt
+// context was read (promptContext). When a document became pending or changed
+// in the meantime, its hits are not in that set, and the fallback answer and
+// the citations are built again from the set, so the result never names a
+// document that the screen now withholds (SPEC §7.2, spec 0.99.0).
 func (s *Service) generateGroundedAnswer(
 	ctx context.Context, question, fallback string, hits []model.SearchHit, citations []model.Citation,
-) (string, []model.Citation, string, string) {
+) (string, []model.Citation, string, string, []model.SearchHit) {
 	answer := fallback
 	// Empty until something goes wrong: the answer is generated unless this
 	// says otherwise (SPEC §9.4.5).
@@ -2523,9 +2521,13 @@ func (s *Service) generateGroundedAnswer(
 	// per moment stops the generator from counting one event twice. The block
 	// quotes every member the budget affords, and only a member it quoted is
 	// citable (issue #890); see moments.go.
-	moments := groupMoments(hits)
-	promptHits, texts := s.promptContext(ctx, hits, moments, maxContextChars)
-	prompt, usedIdx, contextSection := s.buildScreenedRAGPrompt(question, promptHits, moments, texts, systemPrompt, maxContextChars, compressor)
+	eligible, moments, texts := s.promptContext(ctx, hits, maxContextChars)
+	if len(eligible) != len(hits) {
+		hits = eligible
+		citations = citationsForHits(hits)
+		answer = buildFallbackAnswer(question, hits, s.currentSecretMatcher())
+	}
+	prompt, usedIdx, contextSection := s.buildScreenedRAGPrompt(question, hits, moments, texts, systemPrompt, maxContextChars, compressor)
 	// Report a partial reasoning window. The citation list cannot show it: it
 	// reports provenance, not how much of the retrieved evidence the model read
 	// (issue #891). An aggregate answer built on a partial window is a sample,
@@ -2602,7 +2604,28 @@ func (s *Service) generateGroundedAnswer(
 		}
 	}
 
-	return answer, citations, contextSection, sourceReason
+	return answer, citations, contextSection, sourceReason, hits
+}
+
+// citationsForHits returns one citation for each hit, in order.
+func citationsForHits(hits []model.SearchHit) []model.Citation {
+	citations := make([]model.Citation, 0, len(hits))
+	for _, hit := range hits {
+		citations = append(citations, model.Citation{
+			ChunkID: hit.ChunkID,
+			RelPath: hit.RelPath,
+			Title:   hit.Title,
+			Span:    hit.Span,
+		})
+	}
+	return citations
+}
+
+// currentSecretMatcher returns the secret matcher in effect now.
+func (s *Service) currentSecretMatcher() *secretmatch.Matcher {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	return s.secretMatcher
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -5141,10 +5164,14 @@ func collapseSpaces(s string) string {
 // screened when search returned them, but the texts are read from the store
 // now, and the prompt goes to a generation provider. A document that became
 // pending, or changed, between the generation reading and the end of the text
-// read gives the prompt no text: its full text and its snippet are blanked in
-// the returned copy of the hits. When a lookup fails, no hit gives any text.
-func (s *Service) promptContext(ctx context.Context, hits []model.SearchHit, moments []moment, maxContextChars int) ([]model.SearchHit, []string) {
+// read is left out of the prompt whole: its hits are removed before the
+// moments are grouped, so the prompt names neither its path nor its span, and
+// the model cannot cite it. The returned hits are the eligible ones, with the
+// moments grouped over them and their texts in the same order. When a lookup
+// fails, no hit is eligible.
+func (s *Service) promptContext(ctx context.Context, hits []model.SearchHit, maxContextChars int) ([]model.SearchHit, []moment, []string) {
 	before, err := s.documentGenerations(ctx, hits)
+	moments := groupMoments(hits)
 	texts := s.contextTexts(ctx, hits, moments, maxContextChars)
 	var unservable map[string]struct{}
 	if err == nil {
@@ -5152,18 +5179,21 @@ func (s *Service) promptContext(ctx context.Context, hits []model.SearchHit, mom
 	}
 	if err != nil {
 		s.logf("security: the ask prompt carries no context, a secret-policy lookup failed: %v", err)
+		return nil, nil, nil
 	}
-	if err == nil && len(unservable) == 0 {
-		return hits, texts
+	if len(unservable) == 0 {
+		return hits, moments, texts
 	}
-	promptHits := append([]model.SearchHit(nil), hits...)
-	for i := range promptHits {
-		if _, gone := unservable[promptHits[i].RelPath]; gone || err != nil {
-			promptHits[i].Snippet = ""
-			texts[i] = ""
+	eligible := make([]model.SearchHit, 0, len(hits))
+	eligibleTexts := make([]string, 0, len(hits))
+	for i, hit := range hits {
+		if _, gone := unservable[hit.RelPath]; gone {
+			continue
 		}
+		eligible = append(eligible, hit)
+		eligibleTexts = append(eligibleTexts, texts[i])
 	}
-	return promptHits, texts
+	return eligible, groupMoments(eligible), eligibleTexts
 }
 
 // buildScreenedRAGPrompt builds the prompt and checks the context section it
