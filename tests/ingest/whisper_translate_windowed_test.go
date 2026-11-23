@@ -327,6 +327,66 @@ func TestWhisperTranslate_FailedWindowIsSkippedAndRetried(t *testing.T) {
 	assertAbsoluteEnglishTrack(t, stateDir, starts)
 }
 
+// TestWhisperTranslate_WindowThatLostAPieceIsIncomplete pins that a window split
+// under the payload cap counts as failed for the translation when one of its
+// pieces fails, although its other piece decoded (SPEC §8.6.2): the partial
+// track is indexed for the run but not cached, and the next run completes it.
+func TestWhisperTranslate_WindowThatLostAPieceIsIncomplete(t *testing.T) {
+	t.Parallel()
+	starts := broadcastWindowStarts()
+	dense := starts[2]                              // this window's cut overshoots the cap
+	lostHalf := dense + ingest.DefaultSTTWindowMS/2 // its second half fails on run 1
+	fake := &translateServer{maxAudioMS: translateServerMaxAudioMS, rejectStarts: map[int]bool{lostHalf: true}}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	stateDir := testutil.TempDir(t)
+	const capBytes = 1000
+	newSvc := func(st *fakeIngestStore) *ingest.Service {
+		client := translateClient(srv)
+		client.MaxPayloadBytes = capBytes
+		svc := newBroadcastService(t, stateDir, st, client, config.Config{})
+		svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+			data := fakeAudio(startMS, endMS)
+			if startMS == dense && endMS-startMS == ingest.DefaultSTTWindowMS {
+				// A variable-bitrate stretch: the whole window is over the cap, so
+				// it is split in two halves that each fit.
+				data = append(data, make([]byte, 2*capBytes)...)
+			}
+			return data, nil
+		}
+		return svc
+	}
+
+	st := &fakeIngestStore{}
+	if err := newSvc(st).GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+	meta, text := englishRep(t, st)
+	if !strings.Contains(meta, `"translation_incomplete":true`) {
+		t.Fatalf("a window that lost a piece must make the translation incomplete, meta %s", meta)
+	}
+	if want := fmt.Sprintf("english-at-%d", dense/1000); !strings.Contains(text, want) {
+		t.Fatalf("the decoded half of the split window must stay in the track (%s):\n%s", want, text)
+	}
+	if cached, _ := translateCache(t, stateDir); cached != "" {
+		t.Fatalf("a translation that lost a piece must not be cached, got:\n%s", cached)
+	}
+
+	fake.mu.Lock()
+	fake.rejectStarts = nil
+	fake.mu.Unlock()
+	st2 := &fakeIngestStore{}
+	if err := newSvc(st2).GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if meta, _ = englishRep(t, st2); strings.Contains(meta, "translation_incomplete") {
+		t.Fatalf("a complete translation must not be marked incomplete, meta %s", meta)
+	}
+	if cached, _ := translateCache(t, stateDir); !strings.Contains(cached, fmt.Sprintf("english-at-%d", lostHalf/1000)) {
+		t.Fatalf("run 2 must cache the complete track, got:\n%s", cached)
+	}
+}
+
 // englishRep returns the meta_json and the chunk text of the English transcript
 // representation the fake store holds.
 func englishRep(t *testing.T, st *fakeIngestStore) (string, string) {

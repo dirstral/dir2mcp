@@ -520,30 +520,21 @@ func withoutCoverage(text string, words []model.TimedWord, err error) (string, [
 // (it bounds timestamp drift); it never widens a request past the window the
 // transcription schedule uses.
 //
-// failedWindows counts the scheduled windows that did not decode when the
+// failedWindows counts the scheduled windows that failed in whole OR IN PART
+// (a window split under the payload cap that lost one of its pieces) when the
 // translation is returned with at least one decoded window (SPEC §8.6.2: such a
 // translation is indexed for this run but not cached). It is 0 for a
 // single-request decode and for a complete windowed one.
 func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Document, content []byte) (text string, words []model.TimedWord, failedWindows, attemptedWindows int, err error) {
-	text, words, coverage, err := s.translateDecode(ctx, doc, content)
-	if err == nil && coverage != nil && coverage.WindowsDecoded < coverage.WindowsAttempted {
-		failedWindows, attemptedWindows = coverage.WindowsAttempted-coverage.WindowsDecoded, coverage.WindowsAttempted
-	}
-	return text, words, failedWindows, attemptedWindows, err
-}
-
-// translateDecode is translateStructuredWindowed's decode: one request or the
-// windowed schedule. The coverage it returns (nil for one request) is read only
-// to tell a complete translation from a partial one; §8.6.13 records coverage
-// on the source transcript, never on the translation (issue #961).
-func (s *Service) translateDecode(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if len(content) == 0 {
-		return withoutCoverage(s.translateStructured(ctx, doc, content))
+		text, words, err = s.translateStructured(ctx, doc, content)
+		return text, words, 0, 0, err
 	}
 	tmpPath, cleanup, err := stageMediaTemp(content, filepath.Ext(doc.RelPath))
 	if err != nil {
 		s.getLogger().Printf("windowed translate %s: stage failed (%v); decoding in one pass", doc.RelPath, err)
-		return withoutCoverage(s.translateStructured(ctx, doc, content))
+		text, words, err = s.translateStructured(ctx, doc, content)
+		return text, words, 0, 0, err
 	}
 	defer cleanup()
 
@@ -553,18 +544,38 @@ func (s *Service) translateDecode(ctx context.Context, doc model.Document, conte
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
 	windowMS := s.translateWindowMS(totalMS, len(content))
 	if windowMS <= 0 || totalMS <= windowMS {
-		return withoutCoverage(s.translateOneRequest(ctx, doc, content, totalMS))
+		text, words, err = s.translateOneRequest(ctx, doc, content, totalMS)
+		return text, words, 0, 0, err
 	}
 	// A failed window is skipped as in a transcription; every window failing
 	// comes back as an error, so nothing is cached and the next run translates
 	// again.
-	text, words, coverage, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
+	text, words, failedWindows, attemptedWindows, err = s.decodeWindowedTranslation(ctx, doc.RelPath, tmpPath, totalMS, windowMS)
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		s.getLogger().Printf("windowed translate %s: the audio cannot be sliced (%v); decoding in one pass", doc.RelPath, err)
-		return withoutCoverage(s.translateOneRequest(ctx, doc, content, totalMS))
+		text, words, err = s.translateOneRequest(ctx, doc, content, totalMS)
+		return text, words, 0, 0, err
 	}
-	return text, words, coverage, err
+	return text, words, failedWindows, attemptedWindows, err
+}
+
+// decodeWindowedTranslation decodes the staged audio in overlapping windows
+// through the translate transcriber, on the same decodeTranscriptWindows
+// machinery and merge as a transcription. It records no §8.6.13 coverage: that
+// is the source transcript's (issue #961). failed counts the windows that
+// produced nothing plus the windows that lost a piece (windowStats.lossy), so
+// a translation missing any audio is never taken as complete; the shared
+// decoded/attempted counts that transcription coverage reads are unchanged.
+func (s *Service) decodeWindowedTranslation(ctx context.Context, relPath, tmpPath string, totalMS, windowMS int) (text string, words []model.TimedWord, failed, attempted int, err error) {
+	plan := newWindowSchedule(s.translateSTT, totalMS, windowMS, "translate")
+	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, s.translateSTT, plan, nil)
+	if err != nil {
+		return "", nil, 0, 0, err
+	}
+	s.logWindowedDecode(plan, relPath, stats)
+	text, words = MergeTranscriptWindows(windows, plan.stepMS)
+	return text, words, stats.attempted - stats.decoded + stats.lossy, stats.attempted, nil
 }
 
 // translateWindowMS is the translate decode window: the transcription schedule's
@@ -594,11 +605,6 @@ func (s *Service) translateOneRequest(ctx context.Context, doc model.Document, c
 // result routed the item. Only then does the §8.6.13 low-confidence rule run on
 // an item-scoped transcription (spec 0.88.0).
 func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, totalMS, windowMS int, label string, unhinted bool) (string, []model.TimedWord, *TranscriptCoverage, error) {
-	overlapMS := TranscriptWindowOverlapMS(windowMS)
-	stepMS := windowMS - overlapMS
-	if stepMS <= 0 {
-		stepMS = windowMS
-	}
 	// §8.2.2: under window scope the transcription path carries a language state
 	// across windows; the translate path (a fixed English target) never does.
 	var st *windowLanguageState
@@ -608,20 +614,13 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 			return s.extractMediaSegment(ctx, tmpPath, startMS, endMS)
 		}
 	}
-	plan := windowSchedule{
-		totalMS:  totalMS,
-		windowMS: windowMS,
-		stepMS:   stepMS,
-		capBytes: sttPayloadCapBytes(stt),
-		label:    label,
-	}
+	plan := newWindowSchedule(stt, totalMS, windowMS, label)
+	stepMS := plan.stepMS
 	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, plan, st)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	// One progress line per document: how much of the recording actually decoded.
-	s.getLogger().Printf("windowed %s %s: %d/%d windows decoded (window %ds, overlap %ds, duration %ds)",
-		label, relPath, stats.decoded, stats.attempted, windowMS/1000, overlapMS/1000, totalMS/1000)
+	s.logWindowedDecode(plan, relPath, stats)
 	// §8.6.13: the counts and the decoded ranges leave this function instead of
 	// dying in the log line above, so the transcript representation can record what
 	// it does and does not cover.
@@ -637,6 +636,29 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	coverage := withWindowMS(newTranscriptCoverage(stats.attempted, stats.decoded, totalMS, stats.ranges), windowMS)
 	rd.stamp(coverage)
 	return text, words, coverage, nil
+}
+
+// newWindowSchedule plans a windowed decode of totalMS of audio in windows of
+// windowMS through stt: the step is the window minus its overlap.
+func newWindowSchedule(stt model.Transcriber, totalMS, windowMS int, label string) windowSchedule {
+	stepMS := windowMS - TranscriptWindowOverlapMS(windowMS)
+	if stepMS <= 0 {
+		stepMS = windowMS
+	}
+	return windowSchedule{
+		totalMS:  totalMS,
+		windowMS: windowMS,
+		stepMS:   stepMS,
+		capBytes: sttPayloadCapBytes(stt),
+		label:    label,
+	}
+}
+
+// logWindowedDecode writes the one progress line per document: how much of the
+// recording actually decoded.
+func (s *Service) logWindowedDecode(plan windowSchedule, relPath string, stats windowStats) {
+	s.getLogger().Printf("windowed %s %s: %d/%d windows decoded (window %ds, overlap %ds, duration %ds)",
+		plan.label, relPath, stats.decoded, stats.attempted, plan.windowMS/1000, TranscriptWindowOverlapMS(plan.windowMS)/1000, plan.totalMS/1000)
 }
 
 // windowSchedule is the plan for one windowed decode: the recording length, the
@@ -669,6 +691,11 @@ type windowStats struct {
 	// reports are the decoder's language reports of the decoded windows under
 	// item scope, in schedule order, for the §8.6.13 low-confidence rule.
 	reports []windowReport
+	// lossy counts the decoded windows that ALSO lost a piece (a window split
+	// under the payload cap whose other piece failed). They stay in decoded,
+	// which transcription coverage reads unchanged; only the translate pass
+	// reads lossy, to decide that a translation is incomplete (SPEC §8.6.2).
+	lossy int
 }
 
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
@@ -718,6 +745,9 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		}
 		if len(wd.decoded) == 0 {
 			continue
+		}
+		if wd.err != nil {
+			stats.lossy++
 		}
 		stats.decoded++
 		stats.ranges = append(stats.ranges, wd.covered...)
