@@ -18,6 +18,8 @@ import (
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/providerhttp"
+	"github.com/dirstral/dir2mcp/internal/store"
+	"github.com/dirstral/dir2mcp/internal/subexport"
 	"github.com/dirstral/dir2mcp/internal/whisperapi"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -89,10 +91,15 @@ func (f *translateServer) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sec := startMS / 1000
-	segment := func(relSec int, text string) map[string]any {
+	// The segment text varies per window so the English track passes the §8.6.6
+	// repetition gate; its one timed word is the "english-at-<abs s>" marker.
+	topics := []string{"elections", "weather", "economy", "sport", "culture", "science", "transport", "schools", "medicine", "art", "travel", "music", "history", "energy", "farming", "housing", "space", "law"}
+	segment := func(relSec int, marker string) map[string]any {
+		topic := topics[(sec+relSec)/10%len(topics)]
 		return map[string]any{
-			"start": float64(relSec), "end": float64(relSec + 4), "text": text,
-			"words": []map[string]any{{"word": text, "start": float64(relSec), "end": float64(relSec + 1)}},
+			"start": float64(relSec), "end": float64(relSec + 4),
+			"text":  fmt.Sprintf("the anchor turns to %s, segment %s", topic, marker),
+			"words": []map[string]any{{"word": marker, "start": float64(relSec), "end": float64(relSec + 1)}},
 		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -263,10 +270,12 @@ func fmtMarker(sec int) string {
 	return fmt.Sprintf("[%02d:%02d]", sec/60, sec%60)
 }
 
-// TestWhisperTranslate_FailedWindowIsSkipped pins the §8.6.13 failed-window rule
-// on the translate pass: one window the server rejects is skipped with the rest
-// of the recording still translated and cached.
-func TestWhisperTranslate_FailedWindowIsSkipped(t *testing.T) {
+// TestWhisperTranslate_FailedWindowIsSkippedAndRetried pins the failed-window
+// rules on the translate pass (SPEC §8.6.2, 0.100.0): a window the server
+// rejects is skipped, the partial English track is indexed for the run but not
+// cached, and the next run translates the recording again and caches the
+// complete track.
+func TestWhisperTranslate_FailedWindowIsSkippedAndRetried(t *testing.T) {
 	t.Parallel()
 	starts := broadcastWindowStarts()
 	failed := starts[3]
@@ -274,27 +283,68 @@ func TestWhisperTranslate_FailedWindowIsSkipped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
 	defer srv.Close()
 	stateDir := testutil.TempDir(t)
+
+	// Run 1: one window fails. The partial English track is indexed, marked
+	// incomplete, and NOT cached.
 	st := &fakeIngestStore{}
 	svc := newBroadcastService(t, stateDir, st, translateClient(srv), config.Config{})
-
 	if err := svc.GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
 		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
 	}
-	if !hasEnglishRep(st) {
-		t.Fatalf("one failed window must not cost the English track, got %+v", st.reps)
+	meta, text := englishRep(t, st)
+	if !strings.Contains(meta, `"translation_incomplete":true`) {
+		t.Fatalf("a partial translation must record translation_incomplete, meta %s", meta)
 	}
-	text, _ := translateCache(t, stateDir)
 	if strings.Contains(text, fmt.Sprintf("english-at-%d", failed/1000)) {
 		t.Fatalf("the rejected window's text is in the track:\n%s", text)
 	}
 	for _, start := range starts {
-		if start == failed {
-			continue
-		}
-		if want := fmt.Sprintf("english-at-%d", start/1000); !strings.Contains(text, want) {
-			t.Fatalf("window at %d ms missing from the track (%s):\n%s", start, want, text)
+		if want := fmt.Sprintf("english-at-%d", start/1000); start != failed && !strings.Contains(text, want) {
+			t.Fatalf("window at %d ms missing from the partial track (%s):\n%s", start, want, text)
 		}
 	}
+	if cached, _ := translateCache(t, stateDir); cached != "" {
+		t.Fatalf("a partial translation must not be cached, got:\n%s", cached)
+	}
+
+	// Run 2: the server is healthy. The recording is translated again in full,
+	// and only now cached.
+	fake.mu.Lock()
+	fake.rejectStarts = nil
+	fake.mu.Unlock()
+	st2 := &fakeIngestStore{}
+	svc2 := newBroadcastService(t, stateDir, st2, translateClient(srv), config.Config{})
+	if err := svc2.GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if audio, _ := fake.requests(); len(audio) != 2*len(starts) {
+		t.Fatalf("run 2 must translate every window again, got %d requests over both runs", len(audio))
+	}
+	meta, _ = englishRep(t, st2)
+	if strings.Contains(meta, "translation_incomplete") {
+		t.Fatalf("a complete translation must not be marked incomplete, meta %s", meta)
+	}
+	assertAbsoluteEnglishTrack(t, stateDir, starts)
+}
+
+// englishRep returns the meta_json and the chunk text of the English transcript
+// representation the fake store holds.
+func englishRep(t *testing.T, st *fakeIngestStore) (string, string) {
+	t.Helper()
+	for i, r := range st.reps {
+		if r.RepType != ingest.TranscriptRepType("en") {
+			continue
+		}
+		var text strings.Builder
+		for _, c := range st.chunks {
+			if c.RepID == int64(i+1) {
+				text.WriteString(c.Text + "\n")
+			}
+		}
+		return r.MetaJSON, text.String()
+	}
+	t.Fatalf("expected an English transcript representation, got %+v", st.reps)
+	return "", ""
 }
 
 // TestWhisperTranslate_AllWindowsFailedIsRetried pins that a translation whose
@@ -370,4 +420,111 @@ func TestWhisperTranslate_ConfiguredWindowNarrowsOnly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTwoPhase_PartialWhisperTranslationIsNotDone pins that a partial English
+// track does not count as done in the two-phase derivation pass (SPEC §8.6.2,
+// §8.6.11): the next run reads the recording and translates it again, and once
+// the complete track exists a further run does not.
+func TestTwoPhase_PartialWhisperTranslationIsNotDone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	mustWriteFile(t, filepath.Join(root, "media", "broadcast.mp3"), fakeAudio(0, broadcastMS))
+	stateDir := testutil.TempDir(t)
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	starts := broadcastWindowStarts()
+	fake := &translateServer{maxAudioMS: translateServerMaxAudioMS, rejectStarts: map[int]bool{starts[2]: true}}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+
+	run := func() int {
+		t.Helper()
+		before, _ := fake.requests()
+		svc := newTwoPhaseBroadcastService(t, root, stateDir, st, translateClient(srv))
+		if err := svc.Run(ctx); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		after, _ := fake.requests()
+		return len(after) - len(before)
+	}
+
+	if n := run(); n != len(starts) {
+		t.Fatalf("run 1 translate requests = %d, want %d", n, len(starts))
+	}
+	if !storedEnglishIncomplete(t, st, "media/broadcast.mp3") {
+		t.Fatalf("run 1 lost a window; its English track must be stored as incomplete")
+	}
+	fake.mu.Lock()
+	fake.rejectStarts = nil
+	fake.mu.Unlock()
+	if n := run(); n != len(starts) {
+		t.Fatalf("run 2 must translate the partial track again, got %d requests", n)
+	}
+	if storedEnglishIncomplete(t, st, "media/broadcast.mp3") {
+		t.Fatalf("run 2 translated every window; its English track must be complete")
+	}
+	if n := run(); n != 0 {
+		t.Fatalf("a complete translation must not be translated again, got %d requests", n)
+	}
+}
+
+// newTwoPhaseBroadcastService wires a two-phase service over root whose one
+// recording is the 4318 s broadcast in fakeAudio slices.
+func newTwoPhaseBroadcastService(t *testing.T, root, stateDir string, st *store.SQLiteStore, tr model.Transcriber) *ingest.Service {
+	t.Helper()
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = stateDir
+	cfg.STTProvider = "off"
+	cfg.MediaBatchTwoPhase = true
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetTranscriber(&variedSourceTranscriber{})
+	svc.SetSTTIdentity("whisper", "large-v3")
+	svc.SetTranscriptLanguage("ru")
+	svc.SetTranslateTranscriber(tr, "whisper", "large-v3", []string{"en"})
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) {
+		return broadcastMS * time.Millisecond, nil
+	}
+	svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+		return fakeAudio(startMS, endMS), nil
+	}
+	return svc
+}
+
+// variedSourceTranscriber answers each source window with different Russian
+// text, so the source transcript passes the §8.6.6 repetition gate.
+type variedSourceTranscriber struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (v *variedSourceTranscriber) Transcribe(_ context.Context, _ string, data []byte) (string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.n++
+	topics := []string{"выборы", "погода", "экономика", "спорт", "культура", "наука", "транспорт", "образование", "медицина", "искусство"}
+	a, b := topics[v.n%len(topics)], topics[(v.n*3+1)%len(topics)]
+	return fmt.Sprintf("[00:00] выпуск %d начинается с темы %s\n[05:00] далее ведущий говорит про %s и отвечает на вопросы %d", v.n, a, b, len(data)), nil
+}
+
+// storedEnglishIncomplete reports whether the stored English translation of
+// relPath is marked translation_incomplete.
+func storedEnglishIncomplete(t *testing.T, st *store.SQLiteStore, relPath string) bool {
+	t.Helper()
+	reps, err := st.TranscriptRepresentations(context.Background(), relPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rep := range reps {
+		if subexport.RepIsTranslation(rep.MetaJSON) && subexport.RepLanguage(rep.MetaJSON) == "en" {
+			return strings.Contains(rep.MetaJSON, `"translation_incomplete":true`)
+		}
+	}
+	t.Fatalf("no English translation stored for %s", relPath)
+	return false
 }
