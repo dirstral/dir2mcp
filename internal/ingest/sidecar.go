@@ -143,6 +143,12 @@ type transcriptMeta struct {
 	// translation without it carries the older next-start spans. Omitted on
 	// every other transcript.
 	SpanRule string `json:"span_rule,omitempty"`
+	// TranslationIncomplete marks a whisper-engine translation whose windowed
+	// decode lost at least one window (SPEC §8.6.2, 0.100.0). It is indexed for
+	// the run but not cached, and the derivation pass does not count it as a
+	// translation already present, so the next run translates again. Omitted on
+	// every complete translation and on every other transcript.
+	TranslationIncomplete bool `json:"translation_incomplete,omitempty"`
 
 	// Diarized / DiarizeProvider / DiarizeModel / Speakers record speaker
 	// attribution on a diarized transcript (Source any; spec §8.6.8/§5.2).
