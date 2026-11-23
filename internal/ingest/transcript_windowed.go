@@ -503,19 +503,24 @@ func withoutCoverage(text string, words []model.TimedWord, err error) (string, [
 	return text, words, nil, err
 }
 
-// translateStructuredWindowed is the media.translate.whisper_window_sec-aware
-// wrapper around translateStructured. With no window configured (<= 0) it is a
-// straight pass-through, so existing corpora are unchanged. With a window it
-// decodes the audio in overlapping windows via Whisper's translate task and
-// merges them, so timestamp drift cannot accumulate across a long recording.
-// Windowing requires the structured (word-timing) transcriber; when the
-// transcriber is text-only it transparently falls back to the single-pass decode.
+// translateStructuredWindowed decodes the whisper translate pass on the SAME
+// schedule as the source transcription (decodeStagedTranscript, #954; SPEC
+// §8.6.2, §8.6.13): a recording that fits one request is one request, and one
+// that does not (its audio is over the provider's payload cap, or it runs longer
+// than DefaultSTTWindowMS) is decoded in overlapping windows through the same
+// decodeWindowedTranscript machinery and merged into one absolute-time English
+// transcript. Every request is sized to the audio it carries (#962).
+//
+// Before this, audio under the payload cap went to the translate task in ONE
+// request whatever its length, and on a client with no duration-derived timeout:
+// a 72-minute broadcast that transcribed as 8/8 windows of 600 s timed out its
+// translation at the 120 s default on every scan and never got an English track.
+//
+// media.translate.whisper_window_sec still applies when it is the SMALLER window
+// (it bounds timestamp drift); it never widens a request past the window the
+// transcription schedule uses.
 func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
-	windowMS := s.cfg.MediaTranslateWhisperWindowSec * 1000
-	capBytes := sttPayloadCapBytes(s.translateSTT)
-	overCap := capBytes > 0 && len(content) > capBytes
-	_, structured := s.translateSTT.(model.StructuredTranscriber)
-	if (windowMS <= 0 && !overCap) || !structured || len(content) == 0 {
+	if len(content) == 0 {
 		return s.translateStructured(ctx, doc, content)
 	}
 	tmpPath, cleanup, err := stageMediaTemp(content, filepath.Ext(doc.RelPath))
@@ -525,42 +530,43 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	}
 	defer cleanup()
 
-	// A recording that fits in a single window would be decoded once anyway, so skip
-	// the slicing and the duplicate calls (timestamp drift accumulates over LENGTH,
-	// so a sub-window recording has nothing to correct). A failed duration probe
-	// lands here too and degrades to the single pass, because a missing ffprobe must
-	// not fail a document that one request can still translate.
+	// A failed duration probe yields 0 and degrades to the single request, because
+	// a missing ffprobe must not fail a document that one request can still
+	// translate (the source transcription degrades the same way).
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
-	// Audio over the provider's payload cap is decoded in windows small enough to
-	// fit, as the source transcription does (#954), whatever whisper_window_sec
-	// says; the configured window still applies when it is the smaller one.
-	if capWindow := translateCapWindowMS(overCap, totalMS, len(content), capBytes); capWindow > 0 && (windowMS <= 0 || capWindow < windowMS) {
-		windowMS = capWindow
-	}
+	windowMS := s.translateWindowMS(totalMS, len(content))
 	if windowMS <= 0 || totalMS <= windowMS {
-		// translateStructured with the request sized to the whole recording (#962).
-		return s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.translateSTT, totalMS), doc.RelPath, content)
+		return s.translateOneRequest(ctx, doc, content, totalMS)
 	}
 	// The translate pass re-decodes the SOURCE audio into a second, derived
 	// transcript; §8.6.13 scopes the recorded coverage to the authoritative source
-	// transcript, so the coverage is dropped here and the decode is otherwise
-	// unchanged (issue #961).
+	// transcript, so the coverage is dropped here (issue #961). A failed window is
+	// skipped as in a transcription; every window failing comes back as an error,
+	// so nothing is cached and the next run translates again.
 	text, words, _, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate", false)
 	var cut *windowExtractError
 	if errors.As(err, &cut) {
 		s.getLogger().Printf("windowed translate %s: the audio cannot be sliced (%v); decoding in one pass", doc.RelPath, err)
-		return s.translateStructured(ctx, doc, content)
+		return s.translateOneRequest(ctx, doc, content, totalMS)
 	}
 	return text, words, err
 }
 
-// translateCapWindowMS is the decode window that keeps a translate request under
-// the provider's payload cap, or 0 when the audio fits or its duration is unknown.
-func translateCapWindowMS(overCap bool, totalMS, payloadBytes, capBytes int) int {
-	if !overCap || totalMS <= 0 {
-		return 0
+// translateWindowMS is the translate decode window: the transcription schedule's
+// window (STTWindowMS, its payload-cap and duration rules) narrowed by
+// media.translate.whisper_window_sec when that is smaller. 0 means one request.
+func (s *Service) translateWindowMS(totalMS, payloadBytes int) int {
+	windowMS := STTWindowMS(totalMS, payloadBytes, sttPayloadCapBytes(s.translateSTT))
+	if configured := s.cfg.MediaTranslateWhisperWindowSec * 1000; configured > 0 && (windowMS <= 0 || configured < windowMS) {
+		windowMS = configured
 	}
-	return STTWindowMS(totalMS, payloadBytes, capBytes)
+	return windowMS
+}
+
+// translateOneRequest sends the whole recording to the translate task as ONE
+// request, with a timeout sized to the whole recording (#962).
+func (s *Service) translateOneRequest(ctx context.Context, doc model.Document, content []byte, totalMS int) (string, []model.TimedWord, error) {
+	return s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.translateSTT, totalMS), doc.RelPath, content)
 }
 
 // decodeWindowedTranscript decodes the staged audio at tmpPath in overlapping

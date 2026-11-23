@@ -911,7 +911,9 @@ type Config struct {
 	// single full-audio translate decode drifts its timestamps on long recordings;
 	// when this is > 0 the audio is decoded in overlapping windows of this length
 	// and each window's timestamps are offset by its start, so drift cannot
-	// accumulate. 0 (default) preserves the historical single-pass behavior. Only
+	// accumulate. 0 (default) uses the source transcription's schedule alone: one
+	// request when the audio fits, otherwise windows of at most 10 minutes (SPEC
+	// §8.6.13). A value only ever narrows that window, never widens it. Only
 	// consulted for MediaTranslateEngine="whisper".
 	MediaTranslateWhisperWindowSec int
 	// MediaTranslateWindowLines sets how many consecutive transcript cues the
