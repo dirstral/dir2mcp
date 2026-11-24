@@ -91,92 +91,108 @@ func translateCacheExists(t *testing.T, stateDir string) bool {
 // although a window holds no speech.
 func TestWhisperTranslate_NoSpeechWindowAndLostPiece(t *testing.T) {
 	t.Parallel()
-	for _, silentAll := range []bool{false, true} {
-		silentAll := silentAll
-		name := "speech elsewhere"
-		if silentAll {
-			name = "no speech in any decoded piece"
+	t.Run("speech elsewhere", func(t *testing.T) {
+		t.Parallel()
+		assertNoSpeechAndLostPiece(t, false)
+	})
+	t.Run("no speech in any decoded piece", func(t *testing.T) {
+		t.Parallel()
+		assertNoSpeechAndLostPiece(t, true)
+	})
+}
+
+// noSpeechLostPieceCase is one recording for the test above: a fake translate
+// server and a service factory whose window at dense is split under the cap.
+type noSpeechLostPieceCase struct {
+	fake     *silentTranslateServer
+	stateDir string
+	quiet    int
+	newSvc   func(st *fakeIngestStore) *ingest.Service
+}
+
+func newNoSpeechLostPieceCase(t *testing.T, silentAll bool) *noSpeechLostPieceCase {
+	t.Helper()
+	starts := broadcastWindowStarts()
+	quiet := starts[1]                              // a window with no speech
+	dense := starts[2]                              // this window's cut overshoots the cap
+	lostHalf := dense + ingest.DefaultSTTWindowMS/2 // its second half fails on run 1
+	fake := &silentTranslateServer{
+		translateServer: &translateServer{maxAudioMS: translateServerMaxAudioMS, rejectStarts: map[int]bool{lostHalf: true}},
+		silent:          map[int]bool{quiet: true},
+		silentAll:       silentAll,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(srv.Close)
+	stateDir := testutil.TempDir(t)
+	const capBytes = 1000
+	newSvc := func(st *fakeIngestStore) *ingest.Service {
+		client := translateClient(srv)
+		client.MaxPayloadBytes = capBytes
+		svc := newBroadcastService(t, stateDir, st, client, config.Config{})
+		svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
+			data := fakeAudio(startMS, endMS)
+			if startMS == dense && endMS-startMS == ingest.DefaultSTTWindowMS {
+				data = append(data, make([]byte, 2*capBytes)...)
+			}
+			return data, nil
 		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			starts := broadcastWindowStarts()
-			quiet := starts[1]                              // a window with no speech
-			dense := starts[2]                              // this window's cut overshoots the cap
-			lostHalf := dense + ingest.DefaultSTTWindowMS/2 // its second half fails on run 1
-			fake := &silentTranslateServer{
-				translateServer: &translateServer{maxAudioMS: translateServerMaxAudioMS, rejectStarts: map[int]bool{lostHalf: true}},
-				silent:          map[int]bool{quiet: true},
-				silentAll:       silentAll,
-			}
-			srv := httptest.NewServer(http.HandlerFunc(fake.handler))
-			defer srv.Close()
-			stateDir := testutil.TempDir(t)
-			const capBytes = 1000
-			newSvc := func(st *fakeIngestStore) *ingest.Service {
-				client := translateClient(srv)
-				client.MaxPayloadBytes = capBytes
-				svc := newBroadcastService(t, stateDir, st, client, config.Config{})
-				svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
-					data := fakeAudio(startMS, endMS)
-					if startMS == dense && endMS-startMS == ingest.DefaultSTTWindowMS {
-						data = append(data, make([]byte, 2*capBytes)...)
-					}
-					return data, nil
-				}
-				return svc
-			}
+		return svc
+	}
+	return &noSpeechLostPieceCase{fake: fake, stateDir: stateDir, quiet: quiet, newSvc: newSvc}
+}
 
-			// Run 1: a no-speech window and a window that lost a piece.
-			st := &fakeIngestStore{}
-			if err := newSvc(st).GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
-				t.Fatalf("GenerateTranscriptRepresentation: %v", err)
-			}
-			if translateCacheExists(t, stateDir) {
-				t.Fatalf("a translation that lost a piece must not be cached (spec 0.100.0), also when the other windows hold no speech")
-			}
-			if !silentAll {
-				meta, text := englishRep(t, st)
-				if !strings.Contains(meta, `"translation_incomplete":true`) {
-					t.Fatalf("the translation must be marked incomplete, meta %s", meta)
-				}
-				if strings.Contains(text, fmt.Sprintf("english-at-%d", quiet/1000)) {
-					t.Fatalf("the no-speech window must add no text:\n%s", text)
-				}
-			}
-			audio, _ := fake.requests()
-			firstRun := len(audio)
-			if firstRun <= len(starts) {
-				t.Fatalf("run 1 sent %d requests, want every window plus the split halves", firstRun)
-			}
+// run indexes the recording once and returns the store and the total number of
+// translate requests the fake server saw so far.
+func (c *noSpeechLostPieceCase) run(t *testing.T) (*fakeIngestStore, int) {
+	t.Helper()
+	st := &fakeIngestStore{}
+	if err := c.newSvc(st).GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
+		t.Fatalf("GenerateTranscriptRepresentation: %v", err)
+	}
+	audio, _ := c.fake.requests()
+	return st, len(audio)
+}
 
-			// Run 2: the piece decodes; the no-speech window stays silent.
-			fake.translateServer.mu.Lock()
-			fake.rejectStarts = nil
-			fake.translateServer.mu.Unlock()
-			st2 := &fakeIngestStore{}
-			if err := newSvc(st2).GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
-				t.Fatalf("second run: %v", err)
-			}
-			audio, _ = fake.requests()
-			if len(audio) != 2*firstRun {
-				t.Fatalf("run 2 must translate every window again: %d requests after run 1, %d after run 2", firstRun, len(audio))
-			}
-			if !translateCacheExists(t, stateDir) {
-				t.Fatalf("a complete translation must be cached; a no-speech window is decoded, not failed")
-			}
-			if !silentAll {
-				if meta, _ := englishRep(t, st2); strings.Contains(meta, "translation_incomplete") {
-					t.Fatalf("a no-speech window must not make the translation incomplete, meta %s", meta)
-				}
-			}
+func assertNoSpeechAndLostPiece(t *testing.T, silentAll bool) {
+	c := newNoSpeechLostPieceCase(t, silentAll)
 
-			// Run 3 reads the cache.
-			if err := newSvc(&fakeIngestStore{}).GenerateTranscriptRepresentation(context.Background(), broadcastDoc, []byte("VIDEO")); err != nil {
-				t.Fatalf("third run: %v", err)
-			}
-			if after, _ := fake.requests(); len(after) != len(audio) {
-				t.Fatalf("run 3 sent %d translate requests, want 0: the complete translation is cached", len(after)-len(audio))
-			}
-		})
+	// Run 1: a no-speech window and a window that lost a piece.
+	st, firstRun := c.run(t)
+	if translateCacheExists(t, c.stateDir) {
+		t.Fatalf("a translation that lost a piece must not be cached (spec 0.100.0), also when the other windows hold no speech")
+	}
+	if !silentAll {
+		meta, text := englishRep(t, st)
+		if !strings.Contains(meta, `"translation_incomplete":true`) {
+			t.Fatalf("the translation must be marked incomplete, meta %s", meta)
+		}
+		if strings.Contains(text, fmt.Sprintf("english-at-%d", c.quiet/1000)) {
+			t.Fatalf("the no-speech window must add no text:\n%s", text)
+		}
+	}
+	if firstRun <= len(broadcastWindowStarts()) {
+		t.Fatalf("run 1 sent %d requests, want every window plus the split halves", firstRun)
+	}
+
+	// Run 2: the piece decodes; the no-speech window stays silent.
+	c.fake.translateServer.mu.Lock()
+	c.fake.rejectStarts = nil
+	c.fake.translateServer.mu.Unlock()
+	st2, total := c.run(t)
+	if total != 2*firstRun {
+		t.Fatalf("run 2 must translate every window again: %d requests after run 1, %d after run 2", firstRun, total)
+	}
+	if !translateCacheExists(t, c.stateDir) {
+		t.Fatalf("a complete translation must be cached; a no-speech window is decoded, not failed")
+	}
+	if !silentAll {
+		if meta, _ := englishRep(t, st2); strings.Contains(meta, "translation_incomplete") {
+			t.Fatalf("a no-speech window must not make the translation incomplete, meta %s", meta)
+		}
+	}
+
+	// Run 3 reads the cache.
+	if _, after := c.run(t); after != total {
+		t.Fatalf("run 3 sent %d translate requests, want 0: the complete translation is cached", after-total)
 	}
 }
