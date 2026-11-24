@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -323,6 +324,10 @@ type Config struct {
 	TrustedProxies []string
 	PathExcludes   []string
 	SecretPatterns []string
+	// SecretAllowPatterns lists text that looks like a credential but is not
+	// one (security.secret_allow_patterns, SPEC §7.2). A secret match that an
+	// allow match covers is cancelled. An empty list cancels nothing.
+	SecretAllowPatterns []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
 	ResolvedAuthToken string
@@ -1585,20 +1590,21 @@ type fileConfig struct {
 	// Config, only in the warning surfaced after load.
 	unknownKeys []string
 
-	RootDir         *string
-	StateDir        *string
-	ListenAddr      *string
-	MCPPath         *string
-	ProtocolVersion *string
-	Public          *bool
-	AuthMode        *string
-	ServerName      *string
-	RateLimitRPS    *int
-	RateLimitBurst  *int
-	TrustedProxies  []string
-	PathExcludes    []string
-	SecretPatterns  []string
-	DoclingCommand  *string
+	RootDir             *string
+	StateDir            *string
+	ListenAddr          *string
+	MCPPath             *string
+	ProtocolVersion     *string
+	Public              *bool
+	AuthMode            *string
+	ServerName          *string
+	RateLimitRPS        *int
+	RateLimitBurst      *int
+	TrustedProxies      []string
+	PathExcludes        []string
+	SecretPatterns      []string
+	SecretAllowPatterns []string
+	DoclingCommand      *string
 
 	IngestDoclingServeURL               *string
 	IngestDoclingTimeoutSec             *int
@@ -1782,23 +1788,24 @@ type fileConfig struct {
 }
 
 type persistedConfig struct {
-	RootDir            string   `yaml:"root_dir"`
-	StateDir           string   `yaml:"state_dir"`
-	ListenAddr         string   `yaml:"listen_addr"`
-	MCPPath            string   `yaml:"mcp_path"`
-	ProtocolVersion    string   `yaml:"protocol_version"`
-	Public             bool     `yaml:"public"`
-	AuthMode           string   `yaml:"auth_mode"`
-	ServerName         string   `yaml:"server_name"`
-	RateLimitRPS       int      `yaml:"rate_limit_rps"`
-	RateLimitBurst     int      `yaml:"rate_limit_burst"`
-	TrustedProxies     []string `yaml:"trusted_proxies"`
-	PathExcludes       []string `yaml:"path_excludes"`
-	SecretPatterns     []string `yaml:"secret_patterns"`
-	DoclingCommand     string   `yaml:"docling_command"`
-	DoclingServeURL    string   `yaml:"docling_serve_url"`
-	PandocCommand      string   `yaml:"pandoc_command"`
-	LibreOfficeCommand string   `yaml:"libreoffice_command"`
+	RootDir             string   `yaml:"root_dir"`
+	StateDir            string   `yaml:"state_dir"`
+	ListenAddr          string   `yaml:"listen_addr"`
+	MCPPath             string   `yaml:"mcp_path"`
+	ProtocolVersion     string   `yaml:"protocol_version"`
+	Public              bool     `yaml:"public"`
+	AuthMode            string   `yaml:"auth_mode"`
+	ServerName          string   `yaml:"server_name"`
+	RateLimitRPS        int      `yaml:"rate_limit_rps"`
+	RateLimitBurst      int      `yaml:"rate_limit_burst"`
+	TrustedProxies      []string `yaml:"trusted_proxies"`
+	PathExcludes        []string `yaml:"path_excludes"`
+	SecretPatterns      []string `yaml:"secret_patterns"`
+	SecretAllowPatterns []string `yaml:"secret_allow_patterns"`
+	DoclingCommand      string   `yaml:"docling_command"`
+	DoclingServeURL     string   `yaml:"docling_serve_url"`
+	PandocCommand       string   `yaml:"pandoc_command"`
+	LibreOfficeCommand  string   `yaml:"libreoffice_command"`
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
@@ -2045,19 +2052,32 @@ func Default() Config {
 			`AKIA[0-9A-Z]{16}`,
 			`(?i)(?:aws(?:[_\s.]{0,20})?secret(?:[_\s.]*(?:access[_\s.]*)?key)?|secret[_\s.]*access[_\s.]*key)\s*[:=]\s*[0-9A-Za-z/+=]{20,}`,
 			`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
+			// Generic bearer token (SPEC §7.2). The rule is broad on purpose: it
+			// matches any key that ends in `token`, so it catches the credential
+			// keys of every provider (GITHUB_TOKEN, VERCEL_TOKEN, id_token). Known
+			// benign keys (a redirect or pagination parameter) are released by
+			// SecretAllowPatterns, not by a narrower rule: a rule that lists
+			// credential key names misses every provider it does not name.
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
-			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
+			// Stripe-style `sk_` and generic `api_` keys. The leading boundary
+			// requires the prefix to start a word (an underscore does not start
+			// one), so an identifier that holds `sk_` or `api_` in the middle
+			// (`task_...`, `task_sk_...`, `rapi_...`) is not a key.
+			`(?:^|[^A-Za-z0-9_])(?:sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32})`,
 			// OpenAI/Mistral-style hyphenated secret keys, e.g. "sk-proj-..."
 			// and "sk-...". Case-sensitive lowercase "sk-" prefix; the {20,}
 			// run of key chars keeps this from matching ordinary hyphenated
-			// prose (issue #443).
-			`sk-[A-Za-z0-9-]{20,}`,
+			// prose (issue #443). The leading boundary requires `sk-` to start
+			// a word, so a transliterated URL slug such as `...krasnoyarsk-...`
+			// or `...pusk-soyuz-...` is not a key (SPEC §7.2, 0.99.0).
+			`(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}`,
 			// Generic provider-key assignment, e.g. "MISTRAL_API_KEY=<32 alnum>",
 			// "COHERE_API_KEY: ...", "GEMINI_API_KEY=...". Requires an
 			// uppercase provider prefix plus a 16+ char non-whitespace value so
 			// it gates real credentials without flagging plain text (issue #443).
 			`[A-Z][A-Z0-9_]*API_KEY\s*[:=]\s*\S{16,}`,
 		},
+		SecretAllowPatterns:  DefaultSecretAllowPatterns(),
 		ElevenLabsAPIKey:     "",
 		ElevenLabsBaseURL:    "",
 		ElevenLabsTTSVoiceID: "JBFqnCBsd6RMkjVDRZzb",
@@ -2313,6 +2333,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		TrustedProxies:                      append([]string(nil), cfg.TrustedProxies...),
 		PathExcludes:                        append([]string(nil), cfg.PathExcludes...),
 		SecretPatterns:                      append([]string(nil), cfg.SecretPatterns...),
+		SecretAllowPatterns:                 append([]string(nil), cfg.SecretAllowPatterns...),
 		DoclingCommand:                      cfg.DoclingCommand,
 		DoclingServeURL:                     cfg.IngestDoclingServeURL,
 		PandocCommand:                       cfg.IngestPandocCommand,
@@ -3011,6 +3032,9 @@ func applyServerNetworkFileParsed(cfg *Config, fc fileConfig) {
 	}
 	if fc.SecretPatterns != nil {
 		cfg.SecretPatterns = normalizeStringSlice(fc.SecretPatterns)
+	}
+	if fc.SecretAllowPatterns != nil {
+		cfg.SecretAllowPatterns = normalizeStringSlice(fc.SecretAllowPatterns)
 	}
 	if fc.AllowedOrigins != nil {
 		cfg.AllowedOrigins = normalizeStringSlice(fc.AllowedOrigins)
@@ -4003,10 +4027,35 @@ func handleYAMLInlineList(cfg *fileConfig, key, value string, lineNo int) error 
 		setFileListValue(cfg, key, "")
 		return nil
 	}
-	for _, token := range strings.Split(inner, ",") {
+	for _, token := range splitInlineListItems(inner) {
 		setFileListValue(cfg, key, unquoteYAMLScalar(strings.TrimSpace(token)))
 	}
 	return nil
+}
+
+// splitInlineListItems splits the inside of a bracketed inline list at each
+// comma that is outside a quoted scalar. A comma inside a quoted item (for
+// example the `{20,}` of a regular expression) belongs to that item. A quote
+// opens a quoted scalar only at the start of an item, as in YAML flow style.
+func splitInlineListItems(inner string) []string {
+	var items []string
+	start := 0
+	atItemStart := true
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		switch {
+		case c == ',':
+			items = append(items, inner[start:i])
+			start = i + 1
+			atItemStart = true
+		case atItemStart && (c == '\'' || c == '"'):
+			i = quotedScalarEnd(inner, i)
+			atItemStart = false
+		case c != ' ' && c != '\t':
+			atItemStart = false
+		}
+	}
+	return append(items, inner[start:])
 }
 
 // nearestSectionPrefix returns the section name registered at the
@@ -4036,6 +4085,7 @@ var configKeyAliases = map[string]string{
 	"security.path_excludes":                   "path_excludes",
 	"ingest.exclude_dirs":                      "ingest_exclude_dirs",
 	"security.secret_patterns":                 "secret_patterns",
+	"security.secret_allow_patterns":           "secret_allow_patterns",
 	"docling.command":                          "docling_command",
 	"ingest.docling.command":                   "docling_command",
 	"docling.serve_url":                        "docling_serve_url",
@@ -4905,6 +4955,8 @@ func setFileListValue(cfg *fileConfig, key, value string) {
 		appendConfigListValue(&cfg.IngestExcludeDirs, value)
 	case "secret_patterns":
 		appendConfigListValue(&cfg.SecretPatterns, value)
+	case "secret_allow_patterns":
+		appendConfigListValue(&cfg.SecretAllowPatterns, value)
 	case "allowed_origins":
 		appendConfigListValue(&cfg.AllowedOrigins, value)
 	case "media.translate.target_langs":
@@ -4962,7 +5014,7 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "media.subtitles.emit.smil_params", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "secret_allow_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "media.subtitles.emit.smil_params", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -5009,7 +5061,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 		b.WriteByte('\n')
 		for _, value := range values {
 			b.WriteString("  - ")
-			b.WriteString(value)
+			b.WriteString(quoteYAMLListItem(value))
 			b.WriteByte('\n')
 		}
 	}
@@ -5027,6 +5079,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("trusted_proxies", cfg.TrustedProxies)
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
+	writeList("secret_allow_patterns", cfg.SecretAllowPatterns)
 	writeScalar("docling_command", cfg.DoclingCommand)
 	writeScalar("docling_serve_url", cfg.DoclingServeURL)
 	writeInt("ingest_docling_timeout_sec", cfg.IngestDoclingTimeoutSec)
@@ -5312,6 +5365,46 @@ func scalarStartsAt(line string, i int) bool {
 		return spaced && (n == 1 || prev[n-2] == ' ' || prev[n-2] == '\t')
 	}
 	return false
+}
+
+// quoteYAMLListItem writes one list item so that unquoteYAMLScalar and the
+// list parser read back the same value byte for byte. A value of plain name
+// characters only (letters, digits, `_`, `.`, `/`, `-`, not at the start
+// for `-`) is written as it is, so a generated config stays easy to
+// read. Every other value is written as a single-quoted YAML scalar, with a
+// doubled single quote for an embedded one: a value that begins and ends with a
+// quote character keeps those quotes, and a `#`, a comma, a brace, a colon or
+// a space is not read as YAML syntax. A plain item with outer quotes lost them
+// on reload; for a secret or allow pattern that changes what the pattern
+// matches.
+func quoteYAMLListItem(value string) string {
+	if plainYAMLListItem(value) {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// plainYAMLListItem reports whether value can be written with no quotes.
+func plainYAMLListItem(value string) bool {
+	if value == "" || value[0] == '-' {
+		return false
+	}
+	// A word that a standard YAML parser reads as null or as a boolean is
+	// quoted, so every parser reads a string.
+	switch strings.ToLower(value) {
+	case "null", "true", "false", "yes", "no", "on", "off":
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_', c == '.', c == '/', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func unquoteYAMLScalar(value string) string {
@@ -5787,6 +5880,38 @@ func (c Config) EffectiveKDefault() int {
 	return RAGKFallback
 }
 
+// DefaultSecretAllowPatterns returns the SPEC §7.2 default of
+// security.secret_allow_patterns: URL query parameters that carry no
+// credential (a video-host redirect link, a pagination cursor). The default
+// generic token rule matches them, and this pattern cancels those matches.
+func DefaultSecretAllowPatterns() []string {
+	return []string{`(?i)(?:^|[\s"'<>(\[])https?://(?:www\.|m\.)?youtube\.com/redirect\?(?:[^\s&#<>"']*&)*?(redir_token=[^\s&#;?=:<>"']*)`}
+}
+
+// validateSecretPatterns rejects a security.secret_patterns or
+// security.secret_allow_patterns entry that is not a valid regular expression
+// (SPEC §7.2). Blank entries are skipped, as the matcher skips them.
+func (c *Config) validateSecretPatterns() error {
+	for _, list := range []struct {
+		key      string
+		patterns []string
+	}{
+		{"security.secret_patterns", c.SecretPatterns},
+		{"security.secret_allow_patterns", c.SecretAllowPatterns},
+	} {
+		for _, pattern := range list.patterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if _, err := regexp.Compile(pattern); err != nil {
+				return fmt.Errorf("%s: invalid regular expression %q: %v", list.key, pattern, err)
+			}
+		}
+	}
+	return nil
+}
+
 // Validate checks configuration consistency and applies normalization
 // or defaults.  It currently enforces rules around session durations:
 //
@@ -5804,6 +5929,7 @@ func (c *Config) Validate() error {
 	// (a loop rather than a straight-line if-chain so this stays under the
 	// cyclomatic-complexity budget as gates are added).
 	for _, validate := range []func() error{
+		c.validateSecretPatterns,
 		c.validateIngestOnUnsupported,
 		c.validateIngestMediaIdentity,
 		c.validateIngestExtractor,

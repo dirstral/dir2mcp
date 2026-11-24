@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dirstral/dir2mcp/internal/ingest"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // Test hash computation functions
@@ -271,10 +272,10 @@ func TestHasSecretMatch(t *testing.T) {
 // so any string matching a configured pattern is replaced with
 // "[REDACTED]" before write.
 func TestRedactSecretsInMessage(t *testing.T) {
-	patterns, err := ingest.CompileSecretPatterns([]string{
+	patterns, err := secretmatch.Compile([]string{
 		`AKIA[0-9A-Z]{16}`,
 		`sk_[a-z0-9]{32}`,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("compile patterns: %v", err)
 	}

@@ -1,0 +1,255 @@
+package tests
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
+)
+
+// TestSecretScreen_RefillsAfterTheScreen pins that the secret screen runs
+// before the final cut to k (SPEC §7.2, spec 0.99.0). With k=1, the best
+// candidate holds a credential and the second one is clean: the caller gets
+// the clean one, not an empty result.
+func TestSecretScreen_RefillsAfterTheScreen(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	st := &fullTextStore{text: map[uint64]string{
+		1: "deployment notes GITHUB_" + "TOKEN=Xy7Zq9WvXy7Zq9WvXy7Zq9WvXy7Zq9Wv",
+		2: "deployment notes without any credential",
+	}}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "deployment notes"})
+	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "deployment notes"})
+
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "deployment notes", K: 1, Index: "text"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(hits)); got != "[2]" {
+		t.Fatalf("hits with k=1 = %s, want [2] (the clean second candidate)", got)
+	}
+}
+
+// TestSecretScreen_RerankChecksTheStoredTextAsIs pins that the rerank stage
+// checks the stored chunk text before any normalization. Trimming the chunk
+// " token=AAAA... " makes the anchored allow pattern ^token=A+$ cover it, so
+// a check of the trimmed text alone would send it to the reranker.
+func TestSecretScreen_RerankChecksTheStoredTextAsIs(t *testing.T) {
+	tok := "to" + "ken"
+	chunk := " " + tok + "=" + strings.Repeat("A", 24) + " "
+	allow := []string{`^` + tok + `=A+$`}
+	m, err := secretmatch.Compile([]string{secretmatch.GenericTokenPattern}, allow)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if !m.MatchString(chunk) || m.MatchString(strings.TrimSpace(chunk)) {
+		t.Fatal("the fixture must match as stored and not match once trimmed")
+	}
+
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	addVec(t, idx, 3, []float32{0.8, 0.2})
+	st := &fullTextStore{text: map[uint64]string{
+		1: chunk,
+		2: "clean notes about the bridge",
+		3: "clean notes about the budget",
+	}}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+		t.Fatalf("SetSecretPolicy: %v", err)
+	}
+	for id, rel := range map[uint64]string{1: "a.md", 2: "b.md", 3: "c.md"} {
+		svc.SetChunkMetadata(id, model.SearchHit{ChunkID: id, RelPath: rel, DocType: "md", Snippet: "notes"})
+	}
+	rr := &recordingReranker{}
+	svc.SetReranker(rr, "m", 50)
+	svc.SetRerankEnabled(true)
+
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "notes", K: 3, Index: "text"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	if rr.calls == 0 {
+		t.Fatal("the reranker was not called; the test proves nothing")
+	}
+	for _, doc := range rr.docs {
+		if strings.Contains(doc, tok+"=AAAA") {
+			t.Fatalf("the reranker received a chunk that matches as stored: %q", doc)
+		}
+	}
+}
+
+// TestSecretScreen_AskChecksTheTrimmedPromptText pins the ask prompt boundary:
+// the prompt takes the trimmed chunk text, so the trimmed text is checked too.
+// With the allow pattern ^ token=A+ $, the stored text " token=AAAA... " is
+// covered, but the trimmed text is not. The snippet is clean, so only the
+// prompt-boundary check can keep the chunk out.
+func TestSecretScreen_AskChecksTheTrimmedPromptText(t *testing.T) {
+	tok := "to" + "ken"
+	chunk := " " + tok + "=" + strings.Repeat("A", 24) + " "
+	allow := []string{`^ ` + tok + `=A+ $`}
+	m, err := secretmatch.Compile([]string{secretmatch.GenericTokenPattern}, allow)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if m.MatchString(chunk) || !m.MatchString(strings.TrimSpace(chunk)) {
+		t.Fatal("the fixture must pass as stored and match once trimmed")
+	}
+
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	st := &fullTextStore{text: map[uint64]string{
+		1: chunk,
+		2: "clean notes about the bridge",
+	}}
+	gen := &fakeGenerator{out: "notes [b.md]"}
+	svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+		t.Fatalf("SetSecretPolicy: %v", err)
+	}
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "notes"})
+	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "notes"})
+
+	if _, err := svc.Ask(context.Background(), "what do the notes say", model.SearchQuery{K: 2, Index: "text"}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if gen.lastPrompt == "" {
+		t.Fatal("the generator was not called; the test proves nothing")
+	}
+	if strings.Contains(gen.lastPrompt, tok+"=AAAA") {
+		t.Fatalf("the prompt holds the chunk that matches once trimmed:\n%s", gen.lastPrompt)
+	}
+}
+
+// TestSecretScreen_FallbackAnswerChecksTheTrimmedSnippet pins the ask path
+// with no generator (and so the path after a generator failure): the fallback
+// answer trims and cuts each snippet, so a snippet that passes as stored but
+// matches once trimmed must not appear in it.
+func TestSecretScreen_FallbackAnswerChecksTheTrimmedSnippet(t *testing.T) {
+	tok := "to" + "ken"
+	chunk := " " + tok + "=" + strings.Repeat("A", 24) + " "
+	allow := []string{`^ ` + tok + `=A+ $`}
+	for _, withGenerator := range []bool{false, true} {
+		idx := index.NewHNSWIndex("")
+		addVec(t, idx, 1, []float32{1, 0})
+		addVec(t, idx, 2, []float32{0.9, 0.1})
+		st := &fullTextStore{text: map[uint64]string{1: chunk, 2: "clean notes about the bridge"}}
+		var gen model.Generator
+		if withGenerator {
+			gen = &fakeGenerator{err: errors.New("generator down")}
+		}
+		svc := retrieval.NewService(st, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+			"mistral-embed": {1, 0},
+		}}, gen)
+		if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+			t.Fatalf("SetSecretPolicy: %v", err)
+		}
+		svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: chunk})
+		svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "clean notes"})
+
+		res, err := svc.Ask(context.Background(), "what do the notes say", model.SearchQuery{K: 2, Index: "text"})
+		if err != nil {
+			t.Fatalf("Ask (generator=%v): %v", withGenerator, err)
+		}
+		if strings.Contains(res.Answer, tok+"=AAAA") {
+			t.Fatalf("the fallback answer (generator=%v) holds the snippet that matches once trimmed:\n%s", withGenerator, res.Answer)
+		}
+		if !strings.Contains(res.Answer, "clean notes") {
+			t.Fatalf("the fallback answer (generator=%v) lost the clean snippet:\n%s", withGenerator, res.Answer)
+		}
+		for _, hit := range res.Hits {
+			if strings.Contains(strings.TrimSpace(hit.Snippet), tok+"=AAAA") {
+				t.Fatalf("ask returned the hit whose snippet matches once trimmed (generator=%v)", withGenerator)
+			}
+		}
+	}
+}
+
+// TestSecretScreen_FallbackAnswerChecksTheAssembledAnswer pins the last check
+// of the fallback answer (SPEC §7.2, spec 0.99.0). The answer adds a path
+// prefix, a question line and line breaks. These can stop an anchored allow
+// pattern from covering a snippet, or join a path and a snippet into a match.
+// Such a line is withheld, and an answer that still matches is replaced.
+func TestSecretScreen_FallbackAnswerChecksTheAssembledAnswer(t *testing.T) {
+	tok := "to" + "ken"
+	value := strings.Repeat("A", 24)
+	allow := []string{`^` + tok + `=A+$`}
+	ask := func(t *testing.T, question string, hits map[uint64]model.SearchHit) string {
+		t.Helper()
+		idx := index.NewHNSWIndex("")
+		text := map[uint64]string{}
+		for id, h := range hits {
+			addVec(t, idx, id, []float32{1, float32(id) / 10})
+			text[id] = h.Snippet
+		}
+		svc := retrieval.NewService(&fullTextStore{text: text}, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+			"mistral-embed": {1, 0},
+		}}, nil)
+		if err := svc.SetSecretPolicy([]string{secretmatch.GenericTokenPattern}, allow); err != nil {
+			t.Fatalf("SetSecretPolicy: %v", err)
+		}
+		for id, h := range hits {
+			svc.SetChunkMetadata(id, h)
+		}
+		res, err := svc.Ask(context.Background(), question, model.SearchQuery{K: len(hits), Index: "text"})
+		if err != nil {
+			t.Fatalf("Ask: %v", err)
+		}
+		if len(res.Hits) == 0 {
+			t.Fatal("ask returned no hits; the test proves nothing")
+		}
+		return res.Answer
+	}
+
+	t.Run("anchored allow pattern loses its anchor", func(t *testing.T) {
+		answer := ask(t, "what do the notes say", map[uint64]model.SearchHit{
+			1: {ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: tok + "=" + value},
+			2: {ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "clean notes"},
+		})
+		if strings.Contains(answer, tok+"=AAAA") {
+			t.Fatalf("the fallback answer holds a snippet that matches in the answer:\n%s", answer)
+		}
+		if !strings.Contains(answer, "clean notes") {
+			t.Fatalf("the fallback answer lost the clean snippet:\n%s", answer)
+		}
+	})
+
+	t.Run("path and snippet join into a match", func(t *testing.T) {
+		answer := ask(t, "what do the notes say", map[uint64]model.SearchHit{
+			1: {ChunkID: 1, RelPath: "notes_" + tok, DocType: "md", Snippet: value},
+			2: {ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "clean notes"},
+		})
+		if strings.Contains(answer, value) {
+			t.Fatalf("the fallback answer joins a path and a snippet into a match:\n%s", answer)
+		}
+		if !strings.Contains(answer, "clean notes") {
+			t.Fatalf("the fallback answer lost the clean snippet:\n%s", answer)
+		}
+	})
+
+	t.Run("assembled answer still matches", func(t *testing.T) {
+		answer := ask(t, tok+"="+strings.Repeat("B", 24), map[uint64]model.SearchHit{
+			1: {ChunkID: 1, RelPath: "b.md", DocType: "md", Snippet: "clean notes"},
+		})
+		if strings.Contains(answer, tok+"=BBBB") {
+			t.Fatalf("the fallback answer matches the secret policy:\n%s", answer)
+		}
+	})
+}

@@ -8,13 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/subexport"
 )
 
@@ -135,7 +135,7 @@ func sampledContentHash(identity, sidecarFingerprint string) string {
 // buildSampledMediaDocument is buildDocumentWithContent for an audio/video file
 // under the sampled identity. It returns nil content for a large file: the bytes
 // are loaded later by ensureMediaContent, only if a representation needs them.
-func (s *Service) buildSampledMediaDocument(ctx context.Context, f DiscoveredFile, doc model.Document, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
+func (s *Service) buildSampledMediaDocument(ctx context.Context, f DiscoveredFile, doc model.Document, secretPatterns *secretmatch.Matcher) (model.Document, []byte, error) {
 	read, err := s.readMediaIdentity(ctx, f.RelPath)
 	if err != nil {
 		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)

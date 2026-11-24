@@ -13,6 +13,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/tests/testutil"
 )
@@ -221,7 +222,7 @@ func TestLibreOfficeEngine_SecretInOutputPurgesCache(t *testing.T) {
 	secretPandoc := loStubPath + "case \"$1\" in --version) exit 0;; esac\nprintf 'deploy key AKIAABCDEFGHIJKLMNOP\\n'\nexit 0"
 	t.Setenv("PATH", loStubDir(t, map[string]string{"pandoc": secretPandoc, "soffice": loFakeSoffice}))
 	st := newRealStore(t)
-	patterns := []*regexp.Regexp{regexp.MustCompile(`AKIA[0-9A-Z]{16}`)}
+	patterns := secretmatch.New([]*regexp.Regexp{regexp.MustCompile(`AKIA[0-9A-Z]{16}`)}, nil)
 	f := ingest.DiscoveredFile{RelPath: rel, SizeBytes: 17, MTimeUnix: time.Now().Unix()}
 	if err := wiredService(t, cfg, st).ProcessDocument(context.Background(), f, patterns, false); err != nil {
 		t.Fatalf("ProcessDocument: %v", err)

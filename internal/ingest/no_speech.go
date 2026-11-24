@@ -3,12 +3,12 @@ package ingest
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 )
 
 // Silence is an outcome, not a failure (SPEC §8.6.6, spec 0.98.0, #1182).
@@ -148,7 +148,7 @@ func fallbackDueAt(at string) time.Time {
 // whether the document was settled here (so the caller must not also credit it
 // as indexed, #426). A no_speech row the store refused is returned as an error,
 // so the document is not finalized as done without its durable record.
-func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, verdict mediaVerdict) (bool, error) {
+func (s *Service) settleUnrepresentedMedia(ctx context.Context, doc model.Document, secretPatterns *secretmatch.Matcher, verdict mediaVerdict) (bool, error) {
 	switch verdict {
 	case mediaVerdictNoRepresentation:
 		// No sidecar, no derived transcript, no multimodal keyframe chunks AND no

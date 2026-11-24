@@ -1,0 +1,272 @@
+package tests
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/dirstral/dir2mcp/internal/index"
+	"github.com/dirstral/dir2mcp/internal/model"
+	"github.com/dirstral/dir2mcp/internal/retrieval"
+	"github.com/dirstral/dir2mcp/tests/testutil"
+)
+
+// Serve-time secret screen (spec 0.99.0, SPEC §7.2). When the effective secret
+// pattern set changes, a background pass retires the indexed chunks that the
+// new set matches. Until the pass reaches a document, its chunks stay in the
+// index, so every tool that returns indexed text screens that text against the
+// new set: search and related leave a matching hit out, ask does not place it
+// in the prompt, and open_file returns FORBIDDEN.
+
+const (
+	screenCredential = "internal-credential-QXZ"
+	screenPattern    = `internal-credential-[A-Z]{3}`
+)
+
+// newScreenService indexes two chunks. Chunk 1 holds the credential in its full
+// text only: the snippet on the hit is clean, as a truncated snippet is. Chunk 2
+// is clean. No operator pattern is set yet: the pattern arrives "after indexing".
+func newScreenService(t *testing.T, gen model.Generator) *retrieval.Service {
+	t.Helper()
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, []float32{1, 0})
+	addVec(t, idx, 2, []float32{0.9, 0.1})
+	store := &fullTextStore{text: map[uint64]string{
+		1: "alpha deployment notes. The key is " + screenCredential + " for the staging host.",
+		2: "beta deployment notes without any credential.",
+	}}
+	svc := retrieval.NewService(store, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, gen)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "alpha deployment notes"})
+	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "beta deployment notes"})
+	return svc
+}
+
+func TestSecretScreen_SearchLeavesOutAMatchingHit(t *testing.T) {
+	svc := newScreenService(t, nil)
+	query := model.SearchQuery{Query: "deployment notes", K: 5, Index: "text"}
+
+	before, err := svc.Search(context.Background(), query)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(before)); got != "[1 2]" {
+		t.Fatalf("hits before the pattern = %s, want [1 2]", got)
+	}
+
+	if err := svc.SetSecretPatterns([]string{screenPattern}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	after, err := svc.Search(context.Background(), query)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	// Chunk 1 matches in its full text, not in its snippet, and is left out.
+	// The clean chunk 2 is unaffected.
+	if got := fmt.Sprint(hitIDs(after)); got != "[2]" {
+		t.Fatalf("hits after the pattern = %s, want [2]", got)
+	}
+}
+
+// The pattern matches only the snippet of chunk 2 ("beta deployment notes"):
+// its stored text is longer, so the anchored pattern does not match it. Only
+// the snippet check can leave the hit out.
+func TestSecretScreen_SearchLeavesOutAMatchingSnippet(t *testing.T) {
+	svc := newScreenService(t, nil)
+	if err := svc.SetSecretPatterns([]string{`^beta deployment notes$`}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "deployment notes", K: 5, Index: "text"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(hits)); got != "[1]" {
+		t.Fatalf("hits = %s, want [1]", got)
+	}
+}
+
+func TestSecretScreen_AskDoesNotPassAMatchingChunkToTheGenerator(t *testing.T) {
+	gen := &fakeGenerator{out: "The notes describe a deployment. [b.md]"}
+	svc := newScreenService(t, gen)
+	if err := svc.SetSecretPatterns([]string{screenPattern}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	res, err := svc.Ask(context.Background(), "what do the deployment notes say", model.SearchQuery{K: 5, Index: "text"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if gen.lastPrompt == "" {
+		t.Fatal("the generator was not called")
+	}
+	if strings.Contains(gen.lastPrompt, screenCredential) {
+		t.Fatalf("the prompt holds the credential:\n%s", gen.lastPrompt)
+	}
+	if !strings.Contains(gen.lastPrompt, "beta deployment notes without any credential.") {
+		t.Fatalf("the clean chunk did not reach the prompt:\n%s", gen.lastPrompt)
+	}
+	for _, c := range res.Citations {
+		if c.ChunkID == 1 {
+			t.Fatalf("the answer cites the screened chunk: %+v", res.Citations)
+		}
+	}
+	for _, h := range res.Hits {
+		if h.ChunkID == 1 {
+			t.Fatalf("the ask result returns the screened hit: %+v", res.Hits)
+		}
+	}
+}
+
+func TestSecretScreen_RelatedLeavesOutAMatchingHit(t *testing.T) {
+	svc := newRelatedService(t)
+	if err := svc.SetSecretPatterns([]string{`^beta$`}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	res, err := svc.Related(context.Background(), model.RelatedQuery{SourceChunkID: 1, K: 10, ExcludeSameDocument: true})
+	if err != nil {
+		t.Fatalf("Related: %v", err)
+	}
+	// Without the screen the hits are [3 4] (see TestRelated_ChunkID_ExcludesSameDocument).
+	if got := fmt.Sprint(hitIDs(res.Hits)); got != "[4]" {
+		t.Fatalf("related hits = %s, want [4]", got)
+	}
+}
+
+// TestSecretScreen_RelatedRefillsAfterTheScreen pins that related screens
+// before its cut to k: with k=1 and a matching first neighbour, the caller
+// gets the next one.
+func TestSecretScreen_RelatedRefillsAfterTheScreen(t *testing.T) {
+	svc := newRelatedService(t)
+	if err := svc.SetSecretPatterns([]string{`^beta$`}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	res, err := svc.Related(context.Background(), model.RelatedQuery{SourceChunkID: 1, K: 1, ExcludeSameDocument: true})
+	if err != nil {
+		t.Fatalf("Related: %v", err)
+	}
+	// Without the screen the first neighbour is 3, which the screen leaves out.
+	if got := fmt.Sprint(hitIDs(res.Hits)); got != "[4]" {
+		t.Fatalf("related hits with k=1 = %s, want [4]", got)
+	}
+}
+
+func TestSecretScreen_OpenFileRefusesTheSameText(t *testing.T) {
+	root := testutil.TempDir(t)
+	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("The key is "+screenCredential+"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.md"), []byte("beta deployment notes\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	if err := svc.SetSecretPatterns([]string{screenPattern}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	if _, err := svc.OpenFile(context.Background(), "a.md", model.Span{}, 200); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("open_file on the matching file: err = %v, want ErrForbidden", err)
+	}
+	got, err := svc.OpenFile(context.Background(), "b.md", model.Span{}, 200)
+	if err != nil || !strings.Contains(got, "beta deployment notes") {
+		t.Fatalf("open_file on the clean file = (%q, %v), want its text", got, err)
+	}
+	if !svc.MatchesSecret("x " + screenCredential) {
+		t.Fatal("MatchesSecret misses the operator pattern")
+	}
+	if svc.MatchesSecret("beta deployment notes") {
+		t.Fatal("MatchesSecret matches clean text")
+	}
+}
+
+// TestSecretScreen_DefaultAllowStopsAtASingleQuote pins the single quote in
+// both character classes of the default allow pattern (SPEC §7.2, spec
+// 0.99.0), on the screen every tool uses. Without it, the parameters of a
+// single-quoted link ran through the closing quote, and an assignment after
+// the quoted link was cancelled.
+func TestSecretScreen_DefaultAllowStopsAtASingleQuote(t *testing.T) {
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	tok := "to" + "ken"
+	value := strings.Repeat("A", 24)
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"assignment after a quoted link is withheld", "'https://youtube.com/redirect?x=1'&redir_" + tok + "=" + value, true},
+		{"single-quoted link is released", "'https://www.youtube.com/redirect?event=x&redir_" + tok + "=" + value + "'", false},
+		{"the value stops at a single quote", "https://www.youtube.com/redirect?event=x&redir_" + tok + "=abc'GITHUB_" + strings.ToUpper(tok) + "=" + value, true},
+		{"the value stops at a single quote, then a clean tail", "https://www.youtube.com/redirect?event=x&redir_" + tok + "=" + value + "' and more text", false},
+	}
+	for _, tc := range cases {
+		if got := svc.MatchesSecret(tc.text); got != tc.want {
+			t.Errorf("%s: MatchesSecret(%q) = %v, want %v", tc.name, tc.text, got, tc.want)
+		}
+	}
+}
+
+// TestSecretScreen_RelatedScreensThePoolBeforeTheCut pins that related
+// screens its whole ranked pool before the cut to k. With k=1 related asks
+// for ten neighbours; here the first ten all match the pattern and the
+// eleventh is clean. The clean one must reach the caller.
+func TestSecretScreen_RelatedScreensThePoolBeforeTheCut(t *testing.T) {
+	chunks := map[uint64]model.ChunkTask{1: relatedChunk(1, "docs/a.txt", "alpha")}
+	vecByText := map[string][]float32{"alpha": {1, 0}, "gamma": {0.1, 0.99}}
+	for i := uint64(2); i <= 11; i++ {
+		text := fmt.Sprintf("beta-%02d", i)
+		chunks[i] = relatedChunk(i, fmt.Sprintf("docs/b%02d.txt", i), text)
+		vecByText[text] = []float32{0.8, 0.6}
+	}
+	chunks[12] = relatedChunk(12, "other/c.txt", "gamma")
+	idx := index.NewHNSWIndex("")
+	for id, task := range chunks {
+		addVecP(t, idx, id, vecByText[task.Text], task.Metadata.RelPath, task.Metadata.DocType)
+	}
+	svc := retrieval.NewService(&relatedFakeStore{chunks: chunks}, idx, &textVecEmbedder{vecByText: vecByText}, nil)
+	for id, task := range chunks {
+		svc.SetChunkMetadata(id, task.Metadata.ToSearchHit())
+	}
+	if err := svc.SetSecretPatterns([]string{`^beta-`}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	res, err := svc.Related(context.Background(), model.RelatedQuery{SourceChunkID: 1, K: 1, ExcludeSameDocument: true})
+	if err != nil {
+		t.Fatalf("Related: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(res.Hits)); got != "[12]" {
+		t.Fatalf("related hits with k=1 = %s, want [12]", got)
+	}
+}
+
+// TestSecretScreen_FloorIsSetByTheHitsThatRemain pins that the relevance
+// floor is computed after the secret screen. The floor is relative to the
+// best score of the set. A withheld hit at 0.90 must not set it: with a floor
+// of 0.5, the clean hit at 0.40 is the best that remains and is returned.
+func TestSecretScreen_FloorIsSetByTheHitsThatRemain(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	addVec(t, idx, 1, vecForCosine(0.90))
+	addVec(t, idx, 2, vecForCosine(0.40))
+	store := &fullTextStore{text: map[uint64]string{
+		1: "alpha notes. The key is " + screenCredential + ".",
+		2: "beta notes without any credential.",
+	}}
+	svc := retrieval.NewService(store, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{ChunkID: 1, RelPath: "a.md", DocType: "md", Snippet: "alpha notes"})
+	svc.SetChunkMetadata(2, model.SearchHit{ChunkID: 2, RelPath: "b.md", DocType: "md", Snippet: "beta notes"})
+	svc.SetMinScore(0.5)
+	if err := svc.SetSecretPatterns([]string{screenPattern}); err != nil {
+		t.Fatalf("SetSecretPatterns: %v", err)
+	}
+	hits, err := svc.Search(context.Background(), model.SearchQuery{Query: "notes", K: 1, Index: "text"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := fmt.Sprint(hitIDs(hits)); got != "[2]" {
+		t.Fatalf("hits = %s, want [2]", got)
+	}
+}
