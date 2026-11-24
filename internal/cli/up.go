@@ -1346,6 +1346,13 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 	return total, nil
 }
 
+// PreloadEmbeddedChunkMetadataForTest exposes preloadEmbeddedChunkMetadata for
+// tests in the tests/ tree, so they warm-load a retrieval service exactly the
+// way `up` does. It is a thin wrapper with no behavior of its own.
+func PreloadEmbeddedChunkMetadataForTest(ctx context.Context, source embeddedChunkLister, ret *retrieval.Service) (int, error) {
+	return preloadEmbeddedChunkMetadata(ctx, source, ret)
+}
+
 // preloadEmbeddedChunkMetadataForKind pages through one index kind's embedded
 // chunks and registers each one's retrieval metadata. A store that does not
 // implement the listing is treated as "nothing to preload" for that kind.

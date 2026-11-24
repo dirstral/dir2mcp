@@ -3478,6 +3478,12 @@ func (s *SQLiteStore) ListActiveRelPaths(ctx context.Context) ([]string, error) 
 // outside any write transaction, and the reconciler's interleaved re-pends only
 // touch chunk_ids at or below the cursor it has already passed, so reading a
 // slightly different snapshot than the writer holds cannot change the walk.
+//
+// The returned spans are lean: a "time" span carries no Words and no Cues
+// (#1180). Neither caller reads them (the warm-load keeps only what retrieval
+// serves, the reconciler only the label), and on a large transcript corpus the
+// per-word timings were the bulk of the warm-loaded metadata that stays live
+// for the daemon's lifetime. Every other span field is decoded as before.
 func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit int, afterChunkID int64) ([]model.ChunkTask, error) {
 	db, err := s.ensureReadDB(ctx)
 	if err != nil {
@@ -3525,7 +3531,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
-		span := spanFromRow(spanK, spanS, spanE, spanExtra)
+		span := leanSpanFromRow(spanK, spanS, spanE, spanExtra)
 		out = append(out, model.ChunkTask{
 			Label:     uid,
 			Text:      text,
@@ -3551,6 +3557,21 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 }
 
 func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
+	return spanFromRowWith(kind, start, end, extraJSON, true)
+}
+
+// leanSpanFromRow is spanFromRow without the per-word timings (Words) and the
+// merged-segment boundaries (Cues) of a "time" span: it neither decodes nor
+// returns them. They exist for subtitle export and translation retiming, which
+// read chunks through their own store queries; retrieval never reads them. A
+// path whose spans stay in memory for the daemon's lifetime uses this (#1180).
+func leanSpanFromRow(kind string, start, end int, extraJSON string) model.Span {
+	return spanFromRowWith(kind, start, end, extraJSON, false)
+}
+
+// spanFromRowWith is the shared body of spanFromRow and leanSpanFromRow.
+// withTimings decides whether a "time" span decodes Words and Cues.
+func spanFromRowWith(kind string, start, end int, extraJSON string, withTimings bool) model.Span {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "page":
 		if start <= 0 || end <= 0 || end != start {
@@ -3561,20 +3582,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		if start < 0 || end < 0 || end < start {
 			return model.Span{Kind: "lines"}
 		}
-		speaker, speakerLabel := speakerFromExtraJSON(extraJSON)
-		entities, event, sources, attributes := annotationFromExtraJSON(extraJSON)
-		return model.Span{
-			Kind: "time", StartMS: start, EndMS: end,
-			Words:        wordsFromExtraJSON(extraJSON),
-			Cues:         cuesFromExtraJSON(extraJSON),
-			Speaker:      speaker,
-			SpeakerLabel: speakerLabel,
-			Entities:     entities,
-			Event:        event,
-			Sources:      sources,
-			Attributes:   attributes,
-			Language:     languageFromExtraJSON(extraJSON),
-		}
+		return timeSpanFromRow(start, end, extraJSON, withTimings)
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
 	case "lines":
@@ -3583,6 +3591,28 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		}
 	}
 	return model.Span{Kind: "lines"}
+}
+
+// timeSpanFromRow decodes a valid "time" span's extra_json. Words and Cues are
+// decoded only when withTimings is set; every other field always is.
+func timeSpanFromRow(start, end int, extraJSON string, withTimings bool) model.Span {
+	speaker, speakerLabel := speakerFromExtraJSON(extraJSON)
+	entities, event, sources, attributes := annotationFromExtraJSON(extraJSON)
+	span := model.Span{
+		Kind: "time", StartMS: start, EndMS: end,
+		Speaker:      speaker,
+		SpeakerLabel: speakerLabel,
+		Entities:     entities,
+		Event:        event,
+		Sources:      sources,
+		Attributes:   attributes,
+		Language:     languageFromExtraJSON(extraJSON),
+	}
+	if withTimings {
+		span.Words = wordsFromExtraJSON(extraJSON)
+		span.Cues = cuesFromExtraJSON(extraJSON)
+	}
+	return span
 }
 
 // annotationFromExtraJSON reconstructs a recognition annotation's structured
