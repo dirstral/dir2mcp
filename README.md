@@ -252,6 +252,13 @@ make demo         # record assets/demo.gif again
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before you open a pull request.
 Contributor and agent guides: [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md).
 
+## Built by Danbi
+
+dir2mcp is built and maintained by [Danbi](https://danbi.ai), which makes
+video, audio and document archives searchable by people and AI agents. See
+the engine at work on public-domain footage at
+[demo.danbi.ai](https://demo.danbi.ai/).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
