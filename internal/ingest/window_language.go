@@ -171,6 +171,14 @@ type windowDecode struct {
 	// report is the decoder's language report for the window under item
 	// scope (§8.6.13 low-confidence rule). Zero under window scope.
 	report windowReport
+	// noSpeech is the window's core when its decode was a no-speech result
+	// (spec 0.99.0), nil otherwise.
+	noSpeech *CoverageRange
+	// piecesFailed is true for a decoded or refused window that the payload
+	// cap split and that has no result for at least one piece. A decoded
+	// window keeps the pieces that decoded. The decode counts one failed
+	// window for it in both cases.
+	piecesFailed bool
 }
 
 // decodeWindowScoped decodes one scheduled window under the §8.2.2 rules.
@@ -204,6 +212,11 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 	if len(results) == 0 {
 		return out
 	}
+	if decodedWithoutSpeech(pieces, results, err) {
+		// Spec 0.99.0: nothing said in this window, so there is no language to
+		// identify, no route to move to and no text to screen.
+		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
+	}
 	idTag, idConf, idOK := s.identifyWindow(ctx, relPath, pieces, core, st)
 	lang, source, conf := st.resolveWith(results, idTag, idConf, idOK)
 	if fallbackFrom == "" {
@@ -220,6 +233,12 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			v = s.judgeWindow(results, cur, lang, core)
 		}
 	}
+	if decodedWithoutSpeech(pieces, results, ferr) {
+		// Spec 0.99.0: a later candidate or the default profile found no speech
+		// in the window. It is a decoded window with no language, never a
+		// refusal for the language the first decode resolved.
+		return s.recordNoSpeechWindow(relPath, plan, core, results, cur, fallbackFrom, st)
+	}
 	if ferr != nil {
 		// A candidate that fails to decode is a failed window (§8.6.13), not a
 		// refusal: the window is retried on the next run. The state advances on
@@ -235,6 +254,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 		s.getLogger().Printf("windowed %s: refusing window [%d,%d]ms of %s: language %q is outside %s's declared coverage %v (media.stt.on_uncovered_language=skip, SPEC §8.2.2)",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 		out.refused, out.languages = st.refuse(core, model.RefusedLanguageUncovered)
+		out.piecesFailed = len(results) < len(pieces)
 		st.advance(lang, source, conf, cur)
 		return out
 	case model.RefusedQualityGate:
@@ -245,6 +265,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			plan.label, core.StartMS, core.EndMS, relPath, v.finding.Reason, v.finding.Detail)
 		out.refused, out.languages = st.refuse(core, model.RefusedQualityGate)
 		out.qualityReason = string(v.finding.Reason)
+		out.piecesFailed = len(results) < len(pieces)
 		st.advance(lang, source, conf, cur)
 		return out
 	}
@@ -253,6 +274,7 @@ func (s *Service) decodeWindowScoped(ctx context.Context, relPath string, pieces
 			plan.label, core.StartMS, core.EndMS, relPath, lang, cur.route, cur.coverage)
 	}
 	out.decoded, out.covered, out.languages = recordWindow(results, core, lang, source, conf, cur, v.covered, fallbackFrom)
+	out.piecesFailed = len(results) < len(pieces)
 	st.recordDecoded(out.covered, out.languages)
 	st.advance(lang, source, conf, cur)
 	return out
@@ -342,8 +364,9 @@ func windowGateConfigFrom(base quality.Config) quality.Config {
 // windowDocGateConfigFrom is the document-level gate for a transcript whose
 // windows were already gated (SPEC §8.2.2): only the empty and density
 // detectors. Repetition, gibberish and script mismatch ran on every window, and
-// a window that passed them must not fail the document through the merged text,
-// which the spec fails only when every window fails.
+// a window that passed them must not fail the document through the merged text.
+// A no-speech window is not gated: the spec fails the document when every
+// gated window fails, also when the other windows are no-speech results.
 func windowDocGateConfigFrom(base quality.Config) quality.Config {
 	cfg := base
 	cfg.Repetition.Enabled = false
@@ -421,7 +444,14 @@ func (s *Service) rerouteWindow(ctx context.Context, relPath string, pieces []wi
 		return results, cur
 	}
 	rerouted, derr := s.decodePieces(ctx, relPath, want.stt, pieces, plan)
-	if len(rerouted) == 0 {
+	// Spec 0.99.0: a route that hears no speech where the first decode heard
+	// some has produced nothing either, so the first decode stands. When the
+	// first decode heard no speech either, a complete silent reroute replaces
+	// it: the first decode can have lost a piece of a split window, and the
+	// reroute then gives the window a whole no-speech result.
+	silentReroute := !resultsHaveContent(rerouted)
+	keepFirst := resultsHaveContent(results) || len(rerouted) < len(pieces)
+	if len(rerouted) == 0 || (silentReroute && keepFirst) {
 		s.getLogger().Printf("windowed %s: window [%d,%d]ms of %s resolved to %q but route %q returned nothing (%v); keeping the %q decode",
 			plan.label, core.StartMS, core.EndMS, relPath, lang, want.route, derr, cur.route)
 		return results, cur
@@ -805,8 +835,16 @@ func stampSegmentLanguages(segs []chunkSegment, entries []model.CoverageLanguage
 // refused: language_uncovered when any refusal was for language (an operator
 // decision that recurs every run), else quality_gate. Empty when nothing was
 // refused, so an ordinary empty or failed decode is judged as before.
+//
+// The caller passes the coverage of a decode whose merged text is empty, so a
+// window that counts as decoded here is a no-speech window (§8.2): it produced
+// no text. Such windows do not change the verdict (§8.6.13, spec 0.99.0). A
+// quality-gate refusal next to no-speech windows counts as a failed window,
+// and the outcome is TRANSCRIBE_FAILED; a language refusal next to them is
+// still the language skip. The outcome no_speech needs every window to be a
+// no-speech result.
 func allWindowsRefusedReason(coverage *TranscriptCoverage) string {
-	if coverage == nil || coverage.WindowsDecoded > 0 || len(coverage.Refused) == 0 {
+	if coverage == nil || len(coverage.Refused) == 0 {
 		return ""
 	}
 	reason := model.RefusedQualityGate

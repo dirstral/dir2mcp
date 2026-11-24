@@ -202,8 +202,15 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 	// An answer with no text is the provider saying it heard no speech: silence
 	// is an outcome, not a failure (SPEC §8.6.6, spec 0.98.0). It is returned as
 	// an empty transcript with no error; a failed request, a non-2xx status and
-	// an undecodable body stay errors above.
-	return parseTranscribeResult(parsed), nil
+	// an undecodable body stay errors above. The empty answer must be a
+	// well-formed response (SPEC §8.2, spec 0.99.0): a body that names none of
+	// the text-bearing fields, has one of the wrong type, or holds timed words
+	// with no text is malformed and stays an error.
+	text := parseTranscribeResult(parsed)
+	if text == "" && !providerhttp.WellFormedEmptySTT(bodyBytes, []string{"text", "transcript"}, "segments") {
+		return "", &model.ProviderError{Code: "ELEVENLABS_FAILED", Message: "malformed stt response: no text, transcript or segments field, a field of the wrong type, or timed words with no text", Retryable: false}
+	}
+	return text, nil
 }
 
 func (c *Client) SynthesizeWithVoice(ctx context.Context, text, voiceID string) ([]byte, error) {

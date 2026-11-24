@@ -2433,8 +2433,29 @@ func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) e
 	); err != nil {
 		return err
 	}
+	// A tombstoned document owns no no-speech record either (SPEC §8.6.13). A
+	// rename or move reaches here for the old path, so the record never
+	// outlives the path it was written for.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, NoSpeechIdentitySettingKey(normalizedPath)); err != nil {
+		return err
+	}
 
 	return tx.Commit()
+}
+
+// DeleteSetting removes one settings row. A key with no row is not an error.
+func (s *SQLiteStore) DeleteSetting(ctx context.Context, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("setting key is required")
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+	_, err = db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+	return err
 }
 
 func (s *SQLiteStore) SetSetting(ctx context.Context, key, value string) error {
