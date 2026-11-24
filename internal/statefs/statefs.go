@@ -73,6 +73,37 @@ func WriteFile(path string, data []byte) error {
 	return chmodIfWider(path, FileMode)
 }
 
+// WriteFileAtomic writes data to path owner-only and publishes it only after
+// the complete write succeeds. It writes a private temporary file in the same
+// directory and renames it over path. A reader never sees a partial file, and
+// a failed write (for example a full disk) leaves no truncated file at path
+// for a later read to accept as complete. The temporary file is removed on
+// any failure.
+func WriteFileAtomic(path string, data []byte) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	// os.CreateTemp creates the file 0600, which is FileMode.
+	if _, err = tmp.Write(data); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 // Create opens path for writing, owner-only, truncating an existing file.
 func Create(path string) (*os.File, error) {
 	return OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)

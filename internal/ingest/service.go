@@ -65,7 +65,12 @@ type Service struct {
 	// the `pandoc` pin it is also the primary. It is nil under any non-pandoc pin
 	// (docling/docling-serve/mistral/off) or when no functional pandoc resolves.
 	pandocExtractor *pandocExtractor
-	transcriber     model.Transcriber
+	// libreofficeExtractor is the capability-activated libreoffice engine (T2,
+	// spec 0.99.0) for legacy .doc. Under `auto` it runs beside the primary;
+	// under the `libreoffice` pin it is also the primary. It is nil under any
+	// other pin or when soffice or pandoc is missing.
+	libreofficeExtractor *libreofficeExtractor
+	transcriber          model.Transcriber
 	// recognizer is the optional recognition binding (design 0004): a backend
 	// that turns video into time-ranged annotation statements. Nil when
 	// recognize.provider is off (the default).
@@ -507,6 +512,18 @@ type Service struct {
 	// re-scoped per archive member in generateRepresentations.
 	recognizeIncompleteThisDoc bool
 
+	// trackRetryPendingThisDoc records that a selected audio track of the
+	// document currently being processed failed with a transport or provider
+	// error while the document stays ok through another track (SPEC §8.6.13,
+	// spec 0.99.0; §7.6). It withholds the #402 done marker, so the next scan
+	// processes the document again, also with an unchanged content_hash. The
+	// tracks that succeeded are read from the transcript cache on that scan, so
+	// only the failed track is decoded again. A quality-gate refusal, a
+	// language refusal and a no-speech result do not set it: their outcome is
+	// stored, and a new run reads the same result. Same per-document lifecycle
+	// as recognizeIncompleteThisDoc.
+	trackRetryPendingThisDoc bool
+
 	// docSecretPatterns holds the compiled security.secret_patterns set for the
 	// document currently being processed. It is the SAME slice the caller passes
 	// down the raw-byte path, captured at the document entry points
@@ -728,6 +745,9 @@ func (s *Service) activeExtractionAvailability() extractionAvailability {
 	case *pandocExtractor:
 		// Primary is pandoc (the `pandoc` pin or the auto-only-pandoc case);
 		// avail.pandoc is set below from s.pandocExtractor.
+	case *libreofficeExtractor:
+		// Primary is libreoffice (the `libreoffice` pin); avail.libreoffice is
+		// set below from s.libreofficeExtractor.
 	default:
 		if _, structured := s.extractor.(structuredExtractor); structured {
 			avail.structured = true
@@ -738,7 +758,40 @@ func (s *Service) activeExtractionAvailability() extractionAvailability {
 	if s.pandocExtractor != nil {
 		avail.pandoc = true
 	}
+	if s.libreofficeExtractor != nil {
+		avail.libreoffice = true
+	}
 	return avail
+}
+
+// ActivateLibreOfficeEngine wires the capability-activated libreoffice engine
+// (T2, spec 0.99.0) when cfg permits it (ingest.extractor auto or the
+// libreoffice pin) AND both soffice and pandoc are functional. Under the
+// `libreoffice` pin the primary IS this engine, so the same instance is reused.
+// Like ActivatePandocEngine it is called by the CLI and MCP wiring after the
+// primary extractor is set, so NewService stays free of PATH probes.
+func (s *Service) ActivateLibreOfficeEngine(cfg config.Config) {
+	if !libreofficeEngineActive(cfg) {
+		s.libreofficeExtractor = nil
+		return
+	}
+	if le, ok := s.extractor.(*libreofficeExtractor); ok {
+		s.libreofficeExtractor = le
+		return
+	}
+	s.libreofficeExtractor = NewLibreOfficeExtractor(libreofficeCorpusRoot(cfg), cfg.IngestLibreOfficeCommand, cfg.IngestPandocCommand, libreofficeTimeout(cfg))
+}
+
+// libreofficeTimeout converts ingest.libreoffice.timeout_sec to a duration.
+func libreofficeTimeout(cfg config.Config) time.Duration {
+	return time.Duration(cfg.IngestLibreOfficeTimeoutSec) * time.Second
+}
+
+// anyExtractionEngine reports whether at least one extraction engine is wired:
+// the primary, or a capability-activated T2 engine (pandoc, libreoffice) that
+// can be the only active one.
+func (s *Service) anyExtractionEngine() bool {
+	return s.extractor != nil || s.pandocExtractor != nil || s.libreofficeExtractor != nil
 }
 
 // ActivatePandocEngine wires the capability-activated pandoc engine (T2, #393) as
@@ -783,12 +836,12 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 	// set), so gate on whether ANY engine is active rather than on the primary
 	// alone — otherwise a pandoc-routed born-digital format would be wrongly
 	// treated as unreadable at index time.
-	if s.extractor == nil && s.pandocExtractor == nil {
+	if !s.anyExtractionEngine() {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
 	switch s.routeExtractionExt(ext) {
-	case routeStructured, routePandoc, routeFlatOCR:
+	case routeStructured, routePandoc, routeLibreOffice, routeFlatOCR:
 		return true
 	default:
 		return false
@@ -799,11 +852,14 @@ func (s *Service) extractorCanReadExt(relPath string) bool {
 // #394 unsupported-format diagnostic. It reflects the same structured/flat split
 // extractorCanReadExt uses, not the concrete provider profile name.
 func (s *Service) extractorLabel() string {
-	if s.extractor == nil && s.pandocExtractor == nil {
+	if !s.anyExtractionEngine() {
 		return "none available"
 	}
 	if _, ok := s.extractor.(*pandocExtractor); ok {
 		return "pandoc"
+	}
+	if _, ok := s.extractor.(*libreofficeExtractor); ok {
+		return "libreoffice"
 	}
 	if _, structured := s.extractor.(structuredExtractor); structured {
 		return "docling"
@@ -1435,6 +1491,8 @@ func DocumentExtractorFromConfigContext(ctx context.Context, cfg config.Config) 
 		return NewDoclingServeExtractor(cfg.IngestDoclingServeURL)
 	case "pandoc":
 		return NewPandocExtractor(strings.TrimSpace(cfg.IngestPandocCommand))
+	case "libreoffice":
+		return NewLibreOfficeExtractor(libreofficeCorpusRoot(cfg), cfg.IngestLibreOfficeCommand, strings.TrimSpace(cfg.IngestPandocCommand), libreofficeTimeout(cfg))
 	case "mistral-ocr":
 		return mistralExtractor(cfg)
 	default:
@@ -2454,6 +2512,16 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 	if strings.TrimSpace(existing.ContentHash) == "" {
 		return false, nil
 	}
+	// An engine became active for a format stored as an unsupported_format
+	// skip (SPEC §7.4 "An engine that becomes available", §7.6): the document
+	// MUST be extracted on this scan also when its bytes are unchanged, so the
+	// cheap signal must not hide it. resolveNeedsProcessing has the same
+	// trigger for the read/hash path.
+	if existing.Status == string(model.DocumentStatusSkipped) &&
+		existing.SkipReason == model.SkipReasonUnsupportedFormat &&
+		s.extractorCanReadExt(f.RelPath) {
+		return false, nil
+	}
 	// A media object's own ETag does not reflect changes to an adjacent subtitle
 	// sidecar (.srt/.vtt/.ttml): buildDocumentWithContent folds the sidecar
 	// fingerprint into ContentHash, but the ETag fast-path runs before that
@@ -2493,7 +2561,7 @@ func (s *Service) trySkipUnchangedDocument(ctx context.Context, f DiscoveredFile
 // identity (§8.6.6, #1182), must take the full read path to be re-derived.
 func (s *Service) fastPathIdentityStale(ctx context.Context, f DiscoveredFile, existing model.Document) bool {
 	if existing.Status == string(model.DocumentStatusOK) {
-		return s.derivationIdentityStale(ctx, f.RelPath, existing.DocType)
+		return s.derivationIdentityStale(ctx, f.RelPath, existing.DocType) || s.noSpeechTrackStale(ctx, existing)
 	}
 	if existing.DocType == "archive" {
 		return s.archiveHasStaleNoSpeechMember(ctx, f.RelPath)
@@ -2637,6 +2705,17 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 	if existingDoc.DocType != "" && existingDoc.DocType != doc.DocType {
 		return true
 	}
+	// An engine became active for a format that an earlier run stored as an
+	// unsupported_format skip (for example a legacy .doc once soffice and pandoc
+	// are installed, spec 0.99.0). The lenient skip row normally carries no
+	// content_hash, so the gate above already reprocesses it; this trigger also
+	// covers a skip row that does carry one, so the upgrade never depends on
+	// how an older binary wrote the row.
+	if existingDoc.Status == string(model.DocumentStatusSkipped) &&
+		existingDoc.SkipReason == model.SkipReasonUnsupportedFormat &&
+		s.extractorCanReadExt(doc.RelPath) {
+		return true
+	}
 	// SPEC §8.6.6 (#1182): an unchanged no_speech document whose STT identity
 	// still stands was carried as skipped (carryNoSpeechSkip). One still ok here
 	// was judged with another STT identity, or this is a forced reindex.
@@ -2644,6 +2723,9 @@ func (s *Service) resolveNeedsProcessing(ctx context.Context, existingDoc, doc m
 		return true
 	}
 	if doc.Status == string(model.DocumentStatusOK) && s.derivationIdentityStale(ctx, doc.RelPath, doc.DocType) {
+		return true
+	}
+	if s.noSpeechTrackStale(ctx, existingDoc) {
 		return true
 	}
 	// An unchanged archive container retains its members unprocessed, so a
@@ -2757,6 +2839,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// Same authoritative per-document reset for the #894 incomplete-recognition
 	// flag, which withholds the done marker for one document only.
 	s.recognizeIncompleteThisDoc = false
+	s.trackRetryPendingThisDoc = false
 	// Open the per-document secret scope (#681) at the same authoritative point,
 	// and before any branch below can produce a derived text. It captures the
 	// pattern set this call was given, so the derived-text scan always uses the
@@ -2997,6 +3080,16 @@ func (s *Service) finalizeIfGenerated(ctx context.Context, doc *model.Document, 
 		// them all), so the ONLY thing left to make the next scan retry is to leave
 		// the #402 done marker unstamped — the same mechanism the #413 guard uses for
 		// an out-of-band soft error, applied without the error status.
+		return nil
+	}
+	if s.trackRetryPendingThisDoc {
+		// SPEC §8.6.13 (spec 0.99.0): a selected track failed with a provider
+		// error and another track kept the document ok. The document stays ok
+		// and searchable. Leave the done marker unstamped so the next scan
+		// decodes the failed track again. The good tracks are read from the
+		// cache.
+		s.getLogger().Printf("media.stt.tracks: %s stays ok with a failed audio track; "+
+			"the failed track is decoded again on the next scan (§8.6.13)", doc.RelPath)
 		return nil
 	}
 	return s.finalizeContentHash(ctx, doc, contentHash)
@@ -4404,7 +4497,7 @@ func (s *Service) generateExtractedAndMediaRepresentations(ctx context.Context, 
 	skipOCR := s.embedMultimodal == "replace" && mediaProduced
 
 	if ShouldGenerateExtractedMarkdown(doc.DocType) && !skipOCR {
-		haveExtractor := s.extractor != nil || s.pandocExtractor != nil
+		haveExtractor := s.anyExtractionEngine()
 		if haveExtractor && s.extractorCanReadExt(doc.RelPath) {
 			if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
 				return false, false, err
@@ -4747,6 +4840,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	// members processed after it.
 	s.quarantinedThisDoc = false
 	s.recognizeIncompleteThisDoc = false
+	s.trackRetryPendingThisDoc = false
 	s.noSpeechFallbackThisDoc = noSpeechFallback{}
 	if s.repGen == nil {
 		return false, nil
@@ -4900,6 +4994,14 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	// or status="skipped" and already counted; signal the caller not to also
 	// credit it as indexed (issue #426).
 	if recognized {
+		return transcriptSoftFailed, nil
+	}
+	// SPEC §8.6.13 (spec 0.99.0): no_speech applies only when the document has
+	// no other searchable representation. A recognition representation from an
+	// earlier run that is still active keeps the document ok (the transcripts
+	// of this derivation were retired before this point).
+	if verdict == mediaVerdictNoSpeech && s.hasIndexedRepresentations(ctx, doc.RelPath) {
+		s.getLogger().Printf("stt: %s holds no speech but keeps another searchable representation; it stays indexed (SPEC §8.6.13)", doc.RelPath)
 		return transcriptSoftFailed, nil
 	}
 	settled, err := s.settleUnrepresentedMedia(ctx, doc, secretPatterns, verdict)
@@ -5106,6 +5208,9 @@ func (s *Service) resolveSidecarTranscript(ctx context.Context, doc model.Docume
 // PROVISIONAL verdicts the caller finalizes only after recognition has had its
 // chance, since recognition is an independent representation source (#622).
 func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns *secretmatch.Matcher, forceReindex, mediaProduced bool) (bool, mediaVerdict, error) {
+	// SPEC §8.6.13: the no-speech record describes one derivation. This one
+	// starts from none; a decode that finds no speech writes it again.
+	s.clearNoSpeechIdentity(ctx, doc.RelPath)
 	done, err := s.resolveSidecarTranscript(ctx, doc, forceReindex)
 	if err != nil || done {
 		return false, mediaVerdictNone, err
@@ -5413,8 +5518,8 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	// checked before the s.extractor nil-guard so pandoc works when it is the only
 	// active engine (auto with no docling/OCR, or the pandoc pin).
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
-	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		return s.logExtractFailure(ctx, doc, "pandoc", s.generatePandocMarkdownRepresentation(ctx, doc, content))
+	if eng, ok := s.flatEngineForExt(ext); ok {
+		return s.logExtractFailure(ctx, doc, eng.name, s.generateFlatEngineMarkdownRepresentation(ctx, doc, content, eng))
 	}
 
 	if s.extractor == nil {
@@ -5590,9 +5695,10 @@ func (s *Service) extractionMetaJSON(text string) string {
 	switch ex := s.extractor.(type) {
 	case *doclingExtractor:
 		meta["command"] = strings.TrimSpace(ex.commandTemplate)
-	case *pandocExtractor:
-		// provider "pandoc" already set from extractorProviderModel; no user command
-		// is embedded (kept secret-free, unlike docling's command field).
+	case *pandocExtractor, *libreofficeExtractor:
+		// provider "pandoc"/"libreoffice" already set from extractorProviderModel;
+		// no user command is embedded (kept secret-free, unlike docling's command
+		// field).
 	case *doclingServeExtractor:
 		// Sanitized (scheme/host/path only): this is persisted per-document, so
 		// any userinfo/query in the URL must not become durable metadata.
@@ -5639,6 +5745,8 @@ func (s *Service) extractorProviderModel() (providerName string, modelName strin
 		return "docling-serve", ""
 	case *pandocExtractor:
 		return "pandoc", ""
+	case *libreofficeExtractor:
+		return "libreoffice", ""
 	case *mistral.Client:
 		return "mistral", strings.TrimSpace(ex.DefaultOCRModel)
 	default:
@@ -5651,20 +5759,47 @@ func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
 }
 
-// generatePandocMarkdownRepresentation produces the extracted_markdown
-// representation for a born-digital document via the pandoc engine (T2, #393). It
-// mirrors the flat branch of generateOCRMarkdownRepresentation but records
-// provider "pandoc" and, because pandoc emits no pages, chunks the Markdown by
-// lines WITHOUT fabricating page/bbox provenance.
+// flatEngine is a capability-activated T2 engine that turns a born-digital
+// document into flat Markdown: pandoc (#393) or libreoffice (spec 0.99.0). name
+// is the provider recorded in meta_json and the cache directory under
+// <state>/cache.
+type flatEngine struct {
+	name string
+	ex   model.DocumentExtractor
+}
+
+// flatEngineForExt returns the T2 engine the per-format route selects for ext,
+// when that engine is wired. It is the one routing lookup the index path, the
+// annotation path and the cache purge share.
+func (s *Service) flatEngineForExt(ext string) (flatEngine, bool) {
+	switch s.routeExtractionExt(ext) {
+	case routePandoc:
+		if s.pandocExtractor != nil {
+			return flatEngine{name: "pandoc", ex: s.pandocExtractor}, true
+		}
+	case routeLibreOffice:
+		if s.libreofficeExtractor != nil {
+			return flatEngine{name: "libreoffice", ex: s.libreofficeExtractor}, true
+		}
+	}
+	return flatEngine{}, false
+}
+
+// generateFlatEngineMarkdownRepresentation produces the extracted_markdown
+// representation for a born-digital document via a T2 engine (pandoc, #393, or
+// libreoffice, spec 0.99.0). It mirrors the flat branch of
+// generateOCRMarkdownRepresentation but records the engine as provider and,
+// because these engines emit no pages, chunks the Markdown by lines WITHOUT
+// fabricating page/bbox provenance.
 //
 // #393 follow-up: section-breadcrumb spans (a SHOULD progressive enhancement per
 // §7.4.B.1) are deferred — deriving them would require new Markdown-heading parsing
 // machinery, so this ships the flat extracted_markdown without breadcrumb spans.
-func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
-	if s.repGen == nil || s.pandocExtractor == nil {
+func (s *Service) generateFlatEngineMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte, eng flatEngine) error {
+	if s.repGen == nil || eng.ex == nil {
 		return nil
 	}
-	md, err := s.readOrComputePandoc(ctx, doc, content)
+	md, err := s.readOrComputeFlatEngine(ctx, doc, content, eng)
 	if err != nil {
 		return err
 	}
@@ -5673,10 +5808,14 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 		return nil
 	}
 
-	// #681: pandoc converts a container format (docx, epub, odt) into the text this
-	// document will be searched by, so it is screened before the title and before
-	// any persistence.
+	// #681: the engine converts a container format (doc, docx, epub, odt) into
+	// the text this document will be searched by, so it is screened before the
+	// title and before any persistence.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindExtraction, md) {
+		// readOrComputeFlatEngine already cached the text. A withheld text
+		// must not stay on disk under <state>/cache/<engine>, the same rule the
+		// annotation path follows (PurgeExtractionCache, #407).
+		s.purgeFlatEngineCache(eng.name, content)
 		return nil
 	}
 
@@ -5690,13 +5829,13 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 		DocID:       doc.DocID,
 		RepType:     RepTypeExtractedMarkdown,
 		RepHash:     computeRepHash([]byte(md)),
-		MetaJSON:    s.pandocExtractionMetaJSON(md),
+		MetaJSON:    s.flatEngineExtractionMetaJSON(eng.name, md),
 		CreatedUnix: time.Now().Unix(),
 		Deleted:     false,
 	}
 	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
 	if err != nil {
-		return fmt.Errorf("upsert pandoc representation: %w", err)
+		return fmt.Errorf("upsert %s representation: %w", eng.name, err)
 	}
 
 	segments := chunkRawTextByDocType(doc.DocType, md)
@@ -5704,44 +5843,49 @@ func (s *Service) generatePandocMarkdownRepresentation(ctx context.Context, doc 
 		return nil
 	}
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
-		return fmt.Errorf("persist pandoc chunks: %w", err)
+		return fmt.Errorf("persist %s chunks: %w", eng.name, err)
 	}
 	return nil
 }
 
-// readOrComputePandoc returns the pandoc-converted Markdown for content, caching
-// it under <state>/cache/pandoc keyed by content hash so re-indexing does not
-// re-run pandoc. pandoc is a single deterministic engine with no model concept, so
-// the bytes-only key is sufficient (its own cache dir isolates it from the OCR
-// cache). A pandoc failure is wrapped as ErrOCRProviderFailure so it classifies as
-// a retryable per-document OCR_FAILED in the run manifest (§14.4), mirroring
+// readOrComputeFlatEngine returns the engine's Markdown for content, caching it
+// under <state>/cache/<engine> keyed by content hash so re-indexing does not
+// re-run the engine. Each engine is deterministic with no model concept, so the
+// bytes-only key is sufficient (its own cache dir isolates it from the OCR
+// cache). A failure is wrapped as ErrOCRProviderFailure so it classifies as a
+// retryable per-document OCR_FAILED in the run manifest (§14.4), mirroring
 // readOrComputeOCR.
-func (s *Service) readOrComputePandoc(ctx context.Context, doc model.Document, content []byte) (string, error) {
-	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "pandoc")
-	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", fmt.Errorf("create pandoc cache dir: %w", err)
+func (s *Service) readOrComputeFlatEngine(ctx context.Context, doc model.Document, content []byte, eng flatEngine) (string, error) {
+	// The cache holds document text, so the directory is owner-only (0700)
+	// and each file is 0600 (statefs.WriteFileAtomic). Spec 0.99.0 §7.4.B requires
+	// this for a cached copy of the libreoffice conversion. The hardened call
+	// also tightens a directory that already exists with a wider mode.
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", eng.name)
+	if err := statefs.MkdirAllHardened(cacheDir); err != nil {
+		return "", fmt.Errorf("create %s cache dir: %w", eng.name, err)
 	}
-	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
+	cachePath := s.flatEngineCachePath(eng.name, content)
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
-	md, err := s.pandocExtractor.Extract(ctx, doc.RelPath, content)
+	md, err := eng.ex.Extract(ctx, doc.RelPath, content)
 	if err != nil {
-		return "", fmt.Errorf("%w: pandoc extract %s: %w", ErrOCRProviderFailure, doc.RelPath, err)
+		return "", fmt.Errorf("%w: %s extract %s: %w", ErrOCRProviderFailure, eng.name, doc.RelPath, err)
 	}
 	mdBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(md, "\r\n", "\n"), "\r", "\n"))
-	if err := statefs.WriteFile(cachePath, mdBytes); err != nil {
-		return "", fmt.Errorf("write pandoc cache: %w", err)
+	// The atomic write publishes the entry only when it is complete, so a
+	// failed write (a full disk) leaves no truncated entry that a later run
+	// reads as a cache hit.
+	if err := statefs.WriteFileAtomic(cachePath, mdBytes); err != nil {
+		return "", fmt.Errorf("write %s cache: %w", eng.name, err)
 	}
 	return string(mdBytes), nil
 }
 
-// pandocCachePath returns the cache file readOrComputePandoc writes for content.
-// The pandoc cache is keyed by content hash alone (pandoc is a single
-// deterministic engine with no model concept), so no active-extractor key is
-// mixed in as PurgeOCRCache does.
-func (s *Service) pandocCachePath(content []byte) string {
-	return filepath.Join(s.cfg.StateDir, "cache", "pandoc", computeContentHash(content)+".md")
+// flatEngineCachePath returns the cache file readOrComputeFlatEngine writes for
+// content under the named engine's cache directory.
+func (s *Service) flatEngineCachePath(engine string, content []byte) string {
+	return filepath.Join(s.cfg.StateDir, "cache", engine, computeContentHash(content)+".md")
 }
 
 // PurgePandocCache removes the pandoc cache entry for content, mirroring
@@ -5749,19 +5893,26 @@ func (s *Service) pandocCachePath(content []byte) string {
 // Markdown (e.g. the MCP secret-pattern gate, #407) use it so a refused result is
 // never left persisted in {StateDir}/cache/pandoc. Missing files are ignored.
 func (s *Service) PurgePandocCache(content []byte) {
-	if err := os.Remove(s.pandocCachePath(content)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		s.getLogger().Printf("purge pandoc cache: %v", err)
+	s.purgeFlatEngineCache("pandoc", content)
+}
+
+// purgeFlatEngineCache removes the named T2 engine's cache entry for content.
+// Missing files are ignored.
+func (s *Service) purgeFlatEngineCache(engine string, content []byte) {
+	if err := os.Remove(s.flatEngineCachePath(engine, content)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.getLogger().Printf("purge %s cache: %v", engine, err)
 	}
 }
 
-// pandocExtractionMetaJSON builds the per-document extracted_markdown meta_json for
-// a pandoc extraction: provider "pandoc" (no model concept) plus a best-effort
-// detected language (§8.8). It is separate from extractionMetaJSON because that
-// switches on the PRIMARY s.extractor, which under `auto` is docling — so a pandoc
-// extraction must not be mislabeled with the primary's provider. No user-supplied
+// flatEngineExtractionMetaJSON builds the per-document extracted_markdown
+// meta_json for a T2 extraction: provider "pandoc" or "libreoffice" (no model
+// concept) plus a best-effort detected language (§8.8). It is separate from
+// extractionMetaJSON because that switches on the PRIMARY s.extractor, which
+// under `auto` is docling, so a T2 extraction must not be mislabeled with the
+// primary's provider. No user-supplied
 // command is embedded, keeping diagnostics secret-free.
-func (s *Service) pandocExtractionMetaJSON(text string) string {
-	meta := map[string]string{"provider": "pandoc"}
+func (s *Service) flatEngineExtractionMetaJSON(engine, text string) string {
+	meta := map[string]string{"provider": engine}
 	if tag, _, ok := s.detectLanguage(text); ok {
 		meta["language"] = tag
 		meta["language_source"] = langSourceDetected
@@ -6055,6 +6206,10 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 				return producedAny, "", terr
 			}
 			// A provider/transient transcription failure is scoped to this track.
+			// It is not stored, so the document is processed again on the next
+			// scan until the track produces a transcript or a no-speech result
+			// (§8.6.13). A refusal below is stored and does not set this flag.
+			s.trackRetryPendingThisDoc = true
 			failed++
 			if firstFailErr == nil {
 				firstFailErr = terr
@@ -6213,7 +6368,8 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	decision := s.screenOutputQualityWith(s.transcriptDocGate(coverage), ctx, doc, qualityKindTranscript, transcriptText, quality.Context{
 		Modality:         quality.ModalityTranscript,
 		ExpectedLanguage: s.transcriptExpectedLanguage(),
-		Duration:         duration,
+		// §8.6.6: the low-density check does not count no-speech windows.
+		Duration: speechDuration(duration, coverage),
 	})
 	// §8.6.12: under the deferred (multi-track) gate, a rejected track's transcript
 	// is DROPPED entirely (recorded as honest coverage) rather than persisted with
@@ -6528,6 +6684,10 @@ func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document
 	if len(ids) == 0 {
 		return nil
 	}
+	// §8.6.13: the summaries derived from a retired transcript go with it
+	// (§8.6.7). A summary that stayed live would keep answering from text the
+	// document no longer has.
+	ids = append(ids, summariesOfRepresentations(reps, ids)...)
 	retired, err := retirer.SoftDeleteRepresentations(ctx, doc.RelPath, ids)
 	if err != nil {
 		return fmt.Errorf("retire %d stale transcript representation(s) of %s: %w",
@@ -6536,6 +6696,31 @@ func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document
 	s.getLogger().Printf("partial transcript: retired %d stale transcript representation(s) of %s%s, so the refused transcript stops answering queries (SPEC §8.6.13)",
 		retired, doc.RelPath, trackSuffixForLog(tc))
 	return nil
+}
+
+// summariesOfRepresentations returns the ids of the active summary
+// representations whose coverage names one of sourceIDs as its source
+// representation (SPEC §5.2 coverage.source_rep_id). A summary with meta that
+// does not parse is left alone.
+func summariesOfRepresentations(reps []store.RepresentationRow, sourceIDs []int64) []int64 {
+	sources := make(map[int64]struct{}, len(sourceIDs))
+	for _, id := range sourceIDs {
+		sources[id] = struct{}{}
+	}
+	var out []int64
+	for _, rep := range reps {
+		if !model.IsSummaryRepType(rep.RepType) {
+			continue
+		}
+		var meta model.SummaryMeta
+		if err := json.Unmarshal([]byte(rep.MetaJSON), &meta); err != nil {
+			continue
+		}
+		if _, ok := sources[meta.Coverage.SourceRepID]; ok {
+			out = append(out, rep.RepID)
+		}
+	}
+	return out
 }
 
 // warnPartialTranscript emits the §8.6.13 `warn` signal for a transcript that is
@@ -7290,6 +7475,8 @@ func (s *Service) CanExtractSourceText(doc model.Document) bool {
 	switch s.routeExtractionExt(ext) {
 	case routePandoc:
 		return s.pandocExtractor != nil
+	case routeLibreOffice:
+		return s.libreofficeExtractor != nil
 	case routeStructured, routeFlatOCR:
 		return s.extractor != nil
 	default:
@@ -7308,8 +7495,8 @@ func (s *Service) CanExtractSourceText(doc model.Document) bool {
 // to the corresponding cache (OCR or pandoc); PurgeExtractionCache removes it.
 func (s *Service) ExtractSourceText(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
-	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		return s.readOrComputePandoc(ctx, doc, content)
+	if eng, ok := s.flatEngineForExt(ext); ok {
+		return s.readOrComputeFlatEngine(ctx, doc, content, eng)
 	}
 	return s.readOrComputeOCR(ctx, doc, content)
 }
@@ -7321,8 +7508,8 @@ func (s *Service) ExtractSourceText(ctx context.Context, doc model.Document, con
 // it.
 func (s *Service) PurgeExtractionCache(doc model.Document, content []byte) {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(doc.RelPath)))
-	if s.pandocExtractor != nil && s.routeExtractionExt(ext) == routePandoc {
-		s.PurgePandocCache(content)
+	if eng, ok := s.flatEngineForExt(ext); ok {
+		s.purgeFlatEngineCache(eng.name, content)
 		return
 	}
 	s.PurgeOCRCache(content)
@@ -7703,11 +7890,29 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 	}
 	// SPEC §8.2.4: under item scope with an identifier bound, the item's
 	// language is resolved before transcription and selects the route.
+	var (
+		text     string
+		words    []model.TimedWord
+		coverage *TranscriptCoverage
+		route    *itemRoute
+	)
 	if s.itemIdentifierActive() {
-		return s.transcribeItemRouted(ctx, relPath, content)
+		text, words, coverage, route, err = s.transcribeItemRouted(ctx, relPath, content)
+	} else {
+		text, words, coverage, err = s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber, true)
 	}
-	text, words, coverage, err := s.transcribeStructuredWindowed(ctx, relPath, content, s.transcriber, true)
-	return text, words, coverage, nil, err
+	if err != nil {
+		return text, words, coverage, route, err
+	}
+	// SPEC §8.6.13 (spec 0.99.0): a failed window next to windows with no
+	// speech is a failure, not a no-speech recording, because the failed
+	// window can hold speech. It takes precedence over the §8.2.2 refusal
+	// rules when no window produced text. The error is not cached, so the
+	// next run sends the audio again.
+	if ferr := failedBesideNoSpeech(relPath, text, coverage); ferr != nil {
+		return "", nil, nil, nil, ferr
+	}
+	return text, words, coverage, route, nil
 }
 
 // transcriptInput returns the audio STT decodes for a document and the
@@ -7803,6 +8008,7 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	coverage.RouteFallbackDropped, coverage.RouteFallbackSkipReason = entry.RouteFallbackDropped, entry.RouteFallbackSkipReason
 	coverage.WindowMS = entry.WindowMS
 	coverage.RedecodedWindows, coverage.RedecodeRule = entry.RedecodedWindows, entry.RedecodeRule
+	coverage.NoSpeechMS = entry.NoSpeechMS
 	return coverage
 }
 
@@ -7824,6 +8030,10 @@ type coverageCacheEntry struct {
 	// re-decode record (spec 0.88.0), restored with the text on a cache hit.
 	RedecodedWindows []model.RedecodedWindow `json:"redecoded_windows,omitempty"`
 	RedecodeRule     string                  `json:"redecode_rule,omitempty"`
+	// NoSpeechMS is how much of the recording the no-speech windows span (SPEC
+	// 0.99.0), restored with the text so the §8.6.6 low-density check on a
+	// cache hit leaves it out of the duration, as the fresh decode did.
+	NoSpeechMS int `json:"no_speech_ms,omitempty"`
 }
 
 // restoreCachedCoverage reads a cache entry's coverage sidecar and restores the
@@ -7894,6 +8104,7 @@ func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverag
 		WindowMS:                coverage.WindowMS,
 		RedecodedWindows:        coverage.RedecodedWindows,
 		RedecodeRule:            coverage.RedecodeRule,
+		NoSpeechMS:              coverage.NoSpeechMS,
 	}
 	// Windows whose fallback text the cache keeps are not dropped there.
 	entry.RouteFallbackDropped = missingDropped(coverage)

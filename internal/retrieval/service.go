@@ -2720,21 +2720,8 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	if err != nil {
 		return "", false, err
 	}
-	// A document that waits for re-evaluation against a broader secret policy
-	// is withheld whole until the scan reads it again (SPEC §7.2, spec 0.99.0).
-	if pending, err := s.secretReevalPending(ctx, normalizedRel); err != nil {
+	if err := s.openFileRefusal(ctx, normalizedRel); err != nil {
 		return "", false, err
-	} else if pending {
-		return "", false, model.ErrForbidden
-	}
-
-	// A replace-mode media-only document (SPEC 8.1.7) has direct media chunks
-	// but no text representation — a permanent condition. open_file returns the
-	// non-retryable MEDIA_NO_TEXT (§15.4), never raw bytes and never the
-	// retryable OCR_NOT_READY. Gated to media extensions so text files skip the
-	// store lookup entirely.
-	if isMediaDocExt(normalizedRel) && s.isMediaOnlyDoc(ctx, normalizedRel) {
-		return "", false, model.ErrMediaNoText
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
@@ -2749,6 +2736,16 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		if content, truncated, handled, err := s.openFileFromMetadata(ctx, normalizedRel, span, maxChars, secretPatterns, kind); handled {
 			return content, truncated, err
 		}
+	}
+
+	// SPEC §8.6.13, §15.4: a document that stays ok through another
+	// representation after every selected track was a no-speech result has no
+	// transcript, and none is pending. A call that another representation
+	// answers was answered above (recognition text for a time span). A call
+	// that would return the transcript gets the non-retryable MEDIA_NO_TEXT,
+	// never OCR_NOT_READY and never the empty cached transcript.
+	if s.wantsAbsentNoSpeechTranscript(ctx, normalizedRel, kind) {
+		return "", false, model.ErrMediaNoSpeech
 	}
 
 	// Symlink resolution and in-root containment are local-filesystem concerns.
@@ -2776,6 +2773,38 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	}
 
 	return s.openTextNativeFile(ctx, corpusFS, resolvedAbs, normalizedRel, secretPatterns, kind, span, maxChars)
+}
+
+// openFileRefusal returns the error that refuses an open_file call before
+// any read, or nil when the call goes on. The checks run in this order.
+func (s *Service) openFileRefusal(ctx context.Context, normalizedRel string) error {
+	// A document that waits for re-evaluation against a broader secret policy
+	// is withheld whole until the scan reads it again (SPEC §7.2, spec 0.99.0).
+	if pending, err := s.secretReevalPending(ctx, normalizedRel); err != nil {
+		return err
+	} else if pending {
+		return model.ErrForbidden
+	}
+
+	// SPEC §8.6.13, §15.4: a document that the scan skipped as no_speech has no
+	// transcript and no other text. The answer is the non-retryable
+	// MEDIA_NO_TEXT for every span kind. The document row decides, not the
+	// file extension, so it holds for audio and for every video container. It
+	// runs before every read: the transcript cache holds an empty entry for
+	// such a recording, and that entry must not be served as empty content.
+	if s.isNoSpeechSkippedDoc(ctx, normalizedRel) {
+		return model.ErrMediaNoSpeech
+	}
+
+	// A replace-mode media-only document (SPEC 8.1.7) has direct media chunks
+	// but no text representation — a permanent condition. open_file returns the
+	// non-retryable MEDIA_NO_TEXT (§15.4), never raw bytes and never the
+	// retryable OCR_NOT_READY. Gated to media extensions so text files skip the
+	// store lookup entirely.
+	if isMediaDocExt(normalizedRel) && s.isMediaOnlyDoc(ctx, normalizedRel) {
+		return model.ErrMediaNoText
+	}
+	return nil
 }
 
 // openTextNativeFile answers open_file from a source that is read as text. It
@@ -2865,6 +2894,72 @@ func (s *Service) isSkippedDoc(ctx context.Context, relPath string) bool {
 		return false
 	}
 	return !doc.Deleted && strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped))
+}
+
+// isNoSpeechSkippedDoc reports whether the store recorded relPath as
+// status="skipped" with skip_reason="no_speech" (SPEC §8.6.13). A no-speech
+// track in a document that stays ok is not this case. It is conservative: a
+// nil store, a missing row or a lookup error returns false, so open_file keeps
+// its other behavior.
+func (s *Service) isNoSpeechSkippedDoc(ctx context.Context, relPath string) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	if store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			s.logf("open_file: no-speech lookup for %q failed: %v", relPath, err)
+		}
+		return false
+	}
+	return !doc.Deleted &&
+		strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusSkipped)) &&
+		strings.TrimSpace(doc.SkipReason) == model.SkipReasonNoSpeech
+}
+
+// noSpeechTranscriptChecker is the optional store capability that reports
+// whether every selected audio track of a document was a no-speech result, so
+// its transcript is absent and not pending (SPEC §8.6.13). A store without it
+// leaves open_file as it was.
+type noSpeechTranscriptChecker interface {
+	NoSpeechTranscriptAbsent(ctx context.Context, relPath string) (bool, error)
+}
+
+// wantsAbsentNoSpeechTranscript reports whether this open_file call asks for
+// the transcript of a document that is status="ok" and whose every selected
+// track was a no-speech result. The calls that would return a transcript are
+// the default call and a line span on an audio or video document (open_file
+// serves a video from its transcript, #1166), and a time span on either that
+// no other representation answered. A page span never returns a transcript,
+// so it keeps its other answers. It is conservative: a missing row, a status other
+// than ok, a store without the capability or a lookup error returns false.
+func (s *Service) wantsAbsentNoSpeechTranscript(ctx context.Context, relPath, kind string) bool {
+	s.metaMu.RLock()
+	store := s.store
+	s.metaMu.RUnlock()
+	checker, ok := store.(noSpeechTranscriptChecker)
+	if !ok || store == nil {
+		return false
+	}
+	doc, err := store.GetDocumentByPath(ctx, relPath)
+	if err != nil || doc.Deleted || !strings.EqualFold(strings.TrimSpace(doc.Status), string(model.DocumentStatusOK)) {
+		return false
+	}
+	docType := strings.ToLower(strings.TrimSpace(doc.DocType))
+	switch {
+	case (kind == "time" || kind == "" || kind == "lines") && (docType == "audio" || docType == "video"):
+	default:
+		return false
+	}
+	absent, err := checker.NoSpeechTranscriptAbsent(ctx, relPath)
+	if err != nil {
+		s.logf("open_file: no-speech transcript lookup for %q failed: %v", relPath, err)
+		return false
+	}
+	return absent
 }
 
 // chunkModalityChecker is the optional store capability used to classify a

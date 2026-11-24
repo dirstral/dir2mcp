@@ -365,7 +365,7 @@ func WithX402Client(client x402.FacilitatorClient) ServerOption {
 // poll. Sourcing it from the pipeline (not a config re-derivation) also makes it
 // impossible for the reported engine to drift from the engine ingest built.
 type ExtractionProvenance struct {
-	// Engine is the wired engine: "docling", "docling-serve", "pandoc",
+	// Engine is the wired engine: "docling", "docling-serve", "pandoc", "libreoffice",
 	// "mistral" (a bespoke-OCR provider profile), or "custom" for an injected
 	// extractor. EMPTY means the daemon wired NO extraction engine, and stats
 	// says exactly that rather than naming one.

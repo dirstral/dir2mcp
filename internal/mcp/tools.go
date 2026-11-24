@@ -665,7 +665,7 @@ const bespokeOCREngine = "mistral"
 // cascade costs an exec.LookPath, a docling functional check and an HTTP
 // reachability probe, and stats is polled.
 //
-//   - a local engine (docling, docling-serve, pandoc) reports its own name. The
+//   - a local engine (docling, docling-serve, pandoc, libreoffice) reports its own name. The
 //     spec types models.ocr as a plain string with no enum (§15.6), so an engine
 //     name is a legal value; these tools have no model id to report instead.
 //   - a bespoke-OCR engine reports the model id on the wire, which is what the
@@ -2922,6 +2922,10 @@ func mapOpenFileError(err error) *toolExecutionError {
 		return &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 	case errors.Is(err, model.ErrDocTypeUnsupported):
 		return &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+	case errors.Is(err, model.ErrMediaNoSpeech):
+		// Checked before ErrMediaNoText, which it wraps: the same code, with a
+		// message that names the real cause.
+		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "the recording holds no speech in its selected audio tracks, so it has no transcript; no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrMediaNoText):
 		return &toolExecutionError{Code: "MEDIA_NO_TEXT", Message: "media embedded directly with no text representation (multimodal replace mode); no text is available to open", Retryable: false}
 	case errors.Is(err, model.ErrOCRNotReady):
@@ -3257,24 +3261,6 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	if err != nil {
 		return "", false, false, mapReadDocumentError(err)
 	}
-	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+ingest.TranscriptLangSuffix(language)+".txt")
-	// Determine whether we already have a usable cache file. We initially
-	// consider the cache "valid" if it exists on disk. When a retranscribe is
-	// requested we treat the cached file as stale regardless of whether it
-	// existed, so we force cacheValid=false and remove the file.
-	cacheValid := true
-	if _, statErr := os.Stat(cachePath); statErr != nil {
-		cacheValid = false
-	}
-	if retranscribe {
-		cacheValid = false
-		// remove any existing cache so that future callers don't accidentally
-		// read stale data; ignore not-exist errors since that's fine.
-		if rmErr := os.Remove(cachePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return "", false, false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
-		}
-	}
-
 	// STT resolves through the provider model (SPEC 8.1.3); the legacy
 	// stt.provider selector still maps onto a profile during the
 	// transition. The per-request language override is threaded onto the
@@ -3292,11 +3278,38 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	}
 	ing.SetTranscriber(transcriber)
 
+	// The transcript cache is keyed on the bytes and the active STT derivation
+	// identity, so the ingest service names the entry, not this handler. A
+	// retranscribe is an explicit request and is exempt from the no-speech
+	// guard (SPEC §8.6.13): the entry is removed with its sidecars, so the
+	// read below sends a new decode request. Without
+	// a retranscribe, a stored result (a transcript, or a no-speech result) is
+	// read from the cache and no request is sent.
+	if retranscribe {
+		ing.PurgeTranscriptCache(content, language)
+	}
+	// transcribed_now is true only when the read below sends a provider
+	// request: no entry exists for it to read.
+	transcribedNow := !ing.TranscriptCached(content, language)
+
 	// generate transcript text first so we can accurately determine whether
 	// there is anything worth indexing.
-	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content, language)
+	transcript, noSpeech, readErr := ing.ReadOrComputeTranscriptOutcome(ctx, doc, content, language)
 	if readErr != nil {
 		return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
+	}
+	if noSpeech {
+		// A no-speech result is a success with indexed false and no segments.
+		// With the default language it is also the stored outcome of the
+		// document, so the tool leaves the state that a scan writes: an earlier
+		// transcript is retired and the no-speech record is stored. A decode
+		// with a language override is a one-off and changes nothing stored.
+		if strings.TrimSpace(language) == "" {
+			if settleErr := ing.SettleNoSpeechOutsideScan(ctx, doc); settleErr != nil {
+				return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", settleErr)
+			}
+		}
+		return "", transcribedNow, false, nil
 	}
 
 	// Gate the transcript against secret_patterns before indexing or returning
@@ -3317,9 +3330,16 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
 			return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
 		}
+		if strings.TrimSpace(language) == "" {
+			// The recording holds speech now, so a no-speech outcome of an
+			// earlier decode no longer describes it.
+			if settleErr := ing.SettleSpeechOutsideScan(ctx, doc); settleErr != nil {
+				return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", settleErr)
+			}
+		}
 		indexed = true
 	}
-	return transcript, !cacheValid, indexed, nil
+	return transcript, transcribedNow, indexed, nil
 }
 
 // annotationReadError maps a readDocumentContent failure to the tool error
@@ -3369,10 +3389,12 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 			ing.SetDocumentExtractor(extractor)
 		}
 		ing.ActivatePandocEngine(s.cfg)
+		// The libreoffice engine (T2, spec 0.99.0) reads legacy .doc the same way.
+		ing.ActivateLibreOfficeEngine(s.cfg)
 		if !ing.CanExtractSourceText(doc) {
 			return "", "", &toolExecutionError{
 				Code:      "CONFIG_INVALID",
-				Message:   "document extraction is not configured (install docling or pandoc, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)",
+				Message:   extractionNotConfiguredMessage(doc.RelPath),
 				Retryable: false,
 			}
 		}
@@ -5077,7 +5099,7 @@ func statsOutputSchema() map[string]interface{} {
 					// to read it.
 					"ocr": map[string]interface{}{
 						"type":        "string",
-						"description": "Extraction engine in effect. A bespoke-OCR backend reports its model id; the local engines report their own name (docling, docling-serve, pandoc); a deployment with no extraction engine reports \"(no extraction engine)\".",
+						"description": "Extraction engine in effect. A bespoke-OCR backend reports its model id; the local engines report their own name (docling, docling-serve, pandoc, libreoffice); a deployment with no extraction engine reports \"(no extraction engine)\".",
 					},
 					// stt_provider is NOT a closed enum (bs-007 and stats.json:
 					// "any STT-capable provider ... is valid"). The old
@@ -5150,4 +5172,16 @@ func statsOutputSchema() map[string]interface{} {
 	schema["properties"].(map[string]interface{})["evidence"] = statsEvidenceSchema()
 	return schema
 
+}
+
+// extractionNotConfiguredMessage is the CONFIG_INVALID message when no active
+// engine reads relPath. A legacy .doc is read only by the libreoffice engine
+// (spec 0.99.0), so its message names LibreOffice (soffice), pandoc and the
+// ingest.extractor policy that permits the engine, not docling or Mistral OCR.
+func extractionNotConfiguredMessage(relPath string) string {
+	if strings.EqualFold(filepath.Ext(relPath), ".doc") {
+		return "legacy .doc extraction is not configured (install LibreOffice (soffice) and pandoc, " +
+			"and set ingest.extractor to auto or libreoffice)"
+	}
+	return "document extraction is not configured (install docling or pandoc, set DIR2MCP_DOCLING_COMMAND, or set MISTRAL_API_KEY)"
 }

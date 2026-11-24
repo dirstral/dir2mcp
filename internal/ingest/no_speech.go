@@ -60,7 +60,7 @@ func noSpeechVerdict(mediaProduced bool) mediaVerdict {
 // window. A decode that missed or refused windows is governed by §8.6.13 and
 // §8.2.2 instead: its empty text says nothing about the audio it did not hear.
 func heardNoSpeech(coverage *TranscriptCoverage) bool {
-	return coverage.Complete() && (coverage == nil || len(coverage.Refused) == 0)
+	return coverage.Complete() && (coverage == nil || (len(coverage.Refused) == 0 && coverage.WindowsFailed == 0))
 }
 
 // emptyFailedDecode reports whether a windowed decode left windows undecoded
@@ -84,6 +84,13 @@ func (s *Service) settleNoSpeechTrack(ctx context.Context, doc model.Document, t
 		doc.RelPath, trackSuffixForLog(tc))
 	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
 		return false, false, "", fmt.Errorf("no-speech outcome for %s: %w", doc.RelPath, err)
+	}
+	// The record is what makes a later STT identity change decode the track
+	// again in a document that stays ok (SPEC §8.6.13, spec 0.99.0). A write
+	// that fails is an error: the document is retried, and the retry reads the
+	// cached decode.
+	if err := s.recordNoSpeechIdentity(ctx, doc.RelPath); err != nil {
+		return false, false, "", err
 	}
 	if at, by, ok := decoded.fallbackStamp(); ok {
 		s.noSpeechFallbackThisDoc = dueFirstFallback(s.noSpeechFallbackThisDoc,

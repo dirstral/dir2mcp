@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"context"
-	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/provider"
@@ -167,11 +166,11 @@ func (s *Service) redecodeWindow(ctx context.Context, relPath, tmpPath string, h
 	return decoded, true
 }
 
-// resultsHaveContent reports whether any decoded piece holds transcript text
-// once the segment markers are removed.
+// resultsHaveContent reports whether any decoded piece holds transcript text.
+// A line that is only a timestamp marker is not text (hasTranscriptText).
 func resultsHaveContent(results []pieceResult) bool {
 	for _, r := range results {
-		if strings.TrimSpace(stripSegmentMarkers(r.res.Text)) != "" {
+		if hasTranscriptText(r.res.Text) {
 			return true
 		}
 	}

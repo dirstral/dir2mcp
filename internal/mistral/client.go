@@ -867,8 +867,19 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	// An answer with no text is the provider saying it heard no speech: silence
 	// is an outcome, not a failure (SPEC §8.6.6, spec 0.98.0). It is returned as
 	// an empty transcript with no error; a failed request, a non-200 status and
-	// an undecodable body stay errors above.
-	return strings.TrimSpace(parsed.Text), nil
+	// an undecodable body stay errors above. Voxtral answers audio with nothing
+	// said with a well-formed `{"text":"","segments":[]}`. A body that names
+	// neither field, or has one of the wrong type, is malformed and stays an
+	// error (SPEC §8.2, spec 0.99.0).
+	text := strings.TrimSpace(parsed.Text)
+	if text == "" && !providerhttp.WellFormedEmptySTT(raw, []string{"text"}, "segments") {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "malformed transcription response: no text or segments field, a field of the wrong type, or timed words with no text",
+			Retryable: false,
+		}
+	}
+	return text, nil
 }
 
 // chatModel resolves the chat model for this client: the caller's override on

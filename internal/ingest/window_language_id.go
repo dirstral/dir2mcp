@@ -159,6 +159,12 @@ func (s *Service) identifyWindow(ctx context.Context, relPath string, pieces []w
 	}
 	tag := provider.PrimarySubtag(res.Language)
 	if tag == "" {
+		if strings.TrimSpace(res.Text) == "" {
+			// Spec 0.99.0: no speech in the probe is no identification, not a
+			// failure; the decoder's report (or inheritance) resolves the window.
+			s.getLogger().Printf("windowed transcription: language identifier %q found no speech in the probe of window [%d,%d]ms of %s; falling back to the decoder's report (SPEC §8.2.3, 0.99.0)",
+				s.identifier.route, core.StartMS, core.EndMS, relPath)
+		}
 		return "", 0, false
 	}
 	if res.LanguageConfidence > 0 && res.LanguageConfidence < windowLanguageMinConfidence {
@@ -238,6 +244,14 @@ func (s *Service) fallThroughCandidates(ctx context.Context, relPath string, pie
 			return nil, cand, windowVerdict{}, derr
 		}
 		results, cur = r, cand
+		if decodedWithoutSpeech(pieces, r, derr) {
+			// SPEC §8.2: a complete decode that found no speech reports no
+			// language, so it is not judged against the candidate's declared
+			// coverage and the walk stops here. Otherwise the outcome would
+			// depend on the candidate order: a later candidate that fails would
+			// turn this no-speech window into a failed window.
+			return results, cur, windowVerdict{covered: true}, nil
+		}
 		v = s.judgeWindow(results, cur, lang, core)
 	}
 	return results, cur, v, nil
