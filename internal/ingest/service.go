@@ -6880,8 +6880,9 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		translatedWords []model.TimedWord
 		err             error
 	)
+	complete := true
 	if s.translateEngine == "whisper" {
-		translated, translatedWords, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
+		translated, translatedWords, complete, err = s.readOrComputeWhisperTranslation(ctx, doc, content)
 	} else {
 		translated, err = s.readOrComputeTranslation(ctx, content, sourceText, sourceLang, targetLang)
 	}
@@ -6966,7 +6967,10 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 		TranslateProvider: s.translateProvider,
 		TranslateModel:    s.translateModel,
 		SpanRule:          spanRule,
-		Timestamps:        true,
+		// SPEC §8.6.2 (0.100.0): a whisper translation that lost a window is
+		// re-derived on the next run, so it must not read as done.
+		TranslationIncomplete: !complete,
+		Timestamps:            true,
 		// §8.6.9: a whisper-translate pass carries per-word timings onto the
 		// translated segments; the chat engine leaves them empty (segment-only).
 		Words: segmentsHaveWordTiming(segments),
@@ -7597,14 +7601,17 @@ func (s *Service) publishTranscriptCache(paths transcriptCachePaths, entry cache
 // its own [mm:ss] English lines with their own timings. The result is cached
 // under {StateDir}/cache/transcribe with a "-translate" discriminator so it
 // never collides with the source-language transcribe cache for the same bytes.
-func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+//
+// complete is false when a windowed decode lost a window: the partial track is
+// returned for this run and is not cached (SPEC §8.6.2, 0.100.0).
+func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model.Document, content []byte) (text string, words []model.TimedWord, complete bool, err error) {
 	if s.translateSTT == nil {
-		return "", nil, errors.New("whisper translate transcriber not configured")
+		return "", nil, false, errors.New("whisper translate transcriber not configured")
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
+		return "", nil, false, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
 	// Whisper translate always targets English; key on the media bytes + STT
@@ -7623,7 +7630,7 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {
-		return string(cached), readCachedWords(wordsPath), nil
+		return string(cached), readCachedWords(wordsPath), true, nil
 	}
 
 	// Decode the same input the source transcription decodes: a video's demuxed
@@ -7633,24 +7640,43 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 	// bytes, so this extraction runs only on a cache miss.
 	relPath, audio, ok, err := s.transcriptInput(ctx, doc, content)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
+		return "", nil, false, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
 	}
 	if !ok {
-		return "", nil, nil // no audio track: nothing to translate
+		return "", nil, true, nil // no audio track: nothing to translate
 	}
 	audioDoc := doc
 	audioDoc.RelPath = relPath
-	translated, words, err := s.translateStructuredWindowed(ctx, audioDoc, audio)
+	translated, words, failedWindows, attemptedWindows, err := s.translateStructuredWindowed(ctx, audioDoc, audio)
 	if err != nil {
 		// A whisper-translate decode is a TRANSLATION failure (§14.4 TRANSLATE_FAILED),
 		// not a transcript one — tag it with the translate sentinel directly so the
 		// error chain is unambiguous (previously it carried ErrTranscriptProviderFailure
 		// and relied on manifestErrorCode's ordering to still classify it correctly).
-		return "", nil, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
+		return "", nil, false, fmt.Errorf("%w: whisper-translate %s: %w", ErrTranslateProviderFailure, doc.RelPath, err)
 	}
 	translatedBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(translated, "\r\n", "\n"), "\r", "\n"))
+	if failedWindows > 0 {
+		// SPEC §8.6.2 (0.100.0): a translation with a failed window is indexed for
+		// this run (a partial English track beats none) but NOT cached, so the next
+		// run translates the recording again until every window decodes. The
+		// representation records translation_incomplete, which keeps the two-phase
+		// derivation pass from counting it as done (derivationNeedsContent).
+		s.getLogger().Printf("whisper-translate %s: %d of %d windows failed; the partial English track is indexed but not cached, so the next run translates it again",
+			doc.RelPath, failedWindows, attemptedWindows)
+		return string(translatedBytes), words, false, nil
+	}
+	if err := s.writeWhisperTranslationCache(cacheDir, cachePath, wordsPath, translatedBytes, words); err != nil {
+		return "", nil, false, err
+	}
+	return string(translatedBytes), words, true, nil
+}
+
+// writeWhisperTranslationCache publishes a COMPLETE whisper translation to the
+// translate cache, with its words sidecar, under the transcript cache policy.
+func (s *Service) writeWhisperTranslationCache(cacheDir, cachePath, wordsPath string, translatedBytes []byte, words []model.TimedWord) error {
 	if err := statefs.WriteFile(cachePath, translatedBytes); err != nil {
-		return "", nil, fmt.Errorf("write whisper-translate cache: %w", err)
+		return fmt.Errorf("write whisper-translate cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
@@ -7672,7 +7698,7 @@ func (s *Service) readOrComputeWhisperTranslation(ctx context.Context, doc model
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
-	return string(translatedBytes), words, nil
+	return nil
 }
 
 // transcribeWith runs the given transcriber, preferring the structured
