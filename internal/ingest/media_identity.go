@@ -230,12 +230,16 @@ func (s *Service) derivationNeedsContent(ctx context.Context, doc model.Document
 }
 
 // translationByActiveTranslator reports whether a translated transcript's
-// meta_json records the active translate provider and model (§8.6.7). An
-// unparseable meta, or a different provider or model, answers false, so the
-// derivation pass reads the bytes and re-derives the translation.
+// meta_json records a COMPLETE translation by the active translate provider and
+// model (§8.6.7). An unparseable meta, a different provider or model, or a
+// translation that lost a window (translation_incomplete, §8.6.2 0.100.0)
+// answers false, so the derivation pass reads the bytes and translates again.
 func (s *Service) translationByActiveTranslator(metaJSON string) bool {
 	var meta transcriptMeta
 	if err := json.Unmarshal([]byte(strings.TrimSpace(metaJSON)), &meta); err != nil {
+		return false
+	}
+	if meta.TranslationIncomplete {
 		return false
 	}
 	return strings.TrimSpace(meta.TranslateProvider) == strings.TrimSpace(s.translateProvider) &&
