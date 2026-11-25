@@ -26,6 +26,7 @@
 | `doctor [<client>]` | With a client name, run client-integration diagnostics. With no argument, run a server-side preflight (config, provider resolution, an **egress** check reporting whether any resolved provider is a public/third-party host, extractor availability, indexing failures, and the `evidence_threshold` check: the cosine evidence threshold in effect and the null baseline behind it, see [Relevance floor and insufficient-evidence abstention](configuration.md#relevance-floor-and-insufficient-evidence-abstention)); add `--deep` to actively probe the embedding credential |
 | `print-config <client>` | Print what a client needs for a manual setup: the `claude mcp add-json` command for `claude-code`, the `mcp.json` snippet for `cursor` and `claude`. For `claude-code` and `cursor` the output never contains the token |
 | `service install\|uninstall\|status` | Auto-start the daemon at login so the corpus survives a reboot (macOS launchd) |
+| `annotate import <file.jsonl> --source <name> [--key stem\|rel_path\|content_hash]` | Validate a file of external editorial annotations and stage it in the state directory. It writes no index: the process that writes the index applies it. See [Import editorial annotations](#import-editorial-annotations) |
 | `version` | Print version |
 
 Running `dir2mcp` with no arguments, or any command with `--help` (or `-h`), prints usage to stdout and exits 0.
@@ -59,6 +60,76 @@ exists, that it uses the current daemon URL, and that the daemon answers. For
 Cursor it also checks that the entry holds the current token. `dir2mcp uninstall
 <client>` removes only the dir2mcp entry. When the daemon URL or token changes,
 run `install` again.
+
+### Import editorial annotations
+
+`dir2mcp annotate import` adds annotations that people wrote outside dir2mcp to
+the audio and video documents of a corpus: the people in each document with
+their roles, timecoded segments, and a written description (SPEC §7.11). A
+typical source is the catalogue of a media asset management system.
+
+```bash
+dir2mcp annotate import catalogue.jsonl --source example-catalogue
+dir2mcp annotate import catalogue.jsonl --source example-catalogue --key rel_path
+```
+
+The file has one JSON object per line. A record names its document with the
+field that `--key` selects:
+
+- `stem` (default): a name prefix. The key `abc` matches `abc.mp4`,
+  `abc_1080p.mp4` and `abc-en.mp3`, and does not match `abcd.mp4`.
+- `rel_path`: the document's path in the corpus, exactly.
+- `content_hash`: the document's stored content hash, exactly.
+
+```json
+{"stem": "abc", "content_id": "C-1001", "match": {"score": 1.25, "external_id": "X-2002"}, "header": "Пример передачи", "people": [{"name": "Пётр Ёлкин", "role": "инженер"}], "topics": ["погода"], "segments": [{"t": "00:00:04", "text": "Прогноз погоды на неделю"}], "description": "The editor's full text."}
+```
+
+The other fields are optional: `source`, `match` (`score`, `external_id`,
+`external_name`, `external_date`), `language`, `header`, `people`, `topics`,
+`segments` and `description`. A segment start `t` is `HH:MM:SS`, `MM:SS` or
+`SS` with an optional fraction, or a number of seconds.
+
+How the command works:
+
+- It validates the whole file first. When a record is invalid, it stages
+  nothing, prints each invalid line number with the reason, and exits `1`.
+- A valid file is staged under `<state-dir>/imports/` and the command exits `0`.
+  The command never writes `meta.sqlite` or a vector index. With `--json` it
+  prints one `editorial_import_staged` event.
+- The process that writes the index applies the staged import: a running
+  `dir2mcp up` within a few seconds (or at the end of its next scan), or the
+  next `up` or `reindex`. The apply step writes a report to
+  `<state-dir>/imports/reports/` and emits an `editorial_import_applied` event.
+  The report counts the keys that matched no document (`unmatched`), only
+  documents that are not indexed audio or video (`non_media_only`), more than
+  one document (`multi_matched`), or the same document as another record
+  (`conflicting`), and the records that the secret check withheld.
+- A field that the record shape does not define is never fatal. A string,
+  number or boolean at the top level is kept as an attribute under its own name
+  (`content_id` above). An extra member of `match` is kept as
+  `match_<member>`. Other extra fields are ignored and listed in
+  `ignored_fields`. A top-level field named `role`, `display_name`,
+  `external_id`, `external_name`, `external_date`, or one that starts with
+  `match_` or `dir2mcp:`, makes the record invalid.
+- Importing a file again replaces that source's annotations on each document
+  it names, and nothing else. A record with no content removes the source from
+  its document.
+- The applied records stay in `<state-dir>/imports/records/`, so a `reindex`
+  restores the annotations with no new import. A document's tombstone removes
+  its records.
+
+Each document gets one `editorial` representation per source: one hit per
+person (`event: appears`, the person id in `entities`), one hit per segment
+(`event: segment`, a `time` span) and the description (`event: description`, a
+`document` span). Every hit carries `sources: [<source>]` and the match
+provenance attributes. Editorial text never enters a transcript. To fold
+characters in person ids (for example `ё` to `е`), set
+[`annotations.name_folds`](configuration.md#editorial-person-ids-annotationsname_folds).
+
+Imported names can include private persons. Confirm that you may process the
+names in a source before you import it, and restrict access to a corpus that
+holds them.
 
 ### Recovering from a failed embed run
 

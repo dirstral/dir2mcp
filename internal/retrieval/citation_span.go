@@ -90,7 +90,7 @@ func clampCitationTagSpans(answer string, citations []model.Citation) (string, i
 		// inlineCitationRe absorbs one leading whitespace character; keep it,
 		// so a rewrite never glues the tag to the word before it.
 		lead := match[:strings.IndexByte(match, '[')]
-		return lead + FormatCitation(block.citation.RelPath, clampedSpan(tag, block))
+		return lead + FormatHitCitation(block.citation.RelPath, block.citation.RepType, clampedSpan(tag, block))
 	})
 	return out, clamped
 }

@@ -1132,6 +1132,35 @@ change its identity and its media is not transcribed again. Plan the STT (GPU)
 time for a full pass before you pin a large indexed archive, or try the pin on a
 small copy first.
 
+### Editorial person ids (`annotations.name_folds`)
+
+An editorial import (`dir2mcp annotate import`, SPEC §7.11) stores each person
+under a person id: the name in Unicode NFC, lower case, with each run of white
+space made one space. The `entities` filter of `dir2mcp_search` and
+`dir2mcp_ask` normalizes a requested value the same way before it compares it
+with an editorial hit, so `Пётр  Ёлкин` matches the id `пётр ёлкин`.
+
+By default no character is folded, so `Пётр Ёлкин` and `Петр Елкин` are two
+ids. A fold is a choice for one language and one corpus, so you set it:
+
+```yaml
+annotations:
+  name_folds: ["ё=е"]   # default: [] (no fold)
+```
+
+Each entry is `"<from>=<to>"`, each side one code point, written in lower case.
+These lists are `CONFIG_INVALID` at load:
+
+- an entry that is not two single code points joined by `=`;
+- a `<from>` that is in the list twice;
+- a side that lower case or NFC changes (`"ё=Е"`);
+- a side that is white space or a combining mark (`"x= "`);
+- a `<to>` that is the `<from>` of another entry (`["a=b", "b=c"]`).
+
+A change of the list builds the stored person ids again from the retained
+records, with no new import. Recognition hits are not affected: their entity
+ids are still compared literally.
+
 ### Recognition: how long one media file may take
 
 The `recognize` capability (design 0004) hands each media file to a recognition

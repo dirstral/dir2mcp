@@ -22,6 +22,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/buildinfo"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/identity"
 	"github.com/dirstral/dir2mcp/internal/index"
 	"github.com/dirstral/dir2mcp/internal/ingest"
@@ -152,6 +153,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		onDocError:    newFileErrorEmitter(emitter),
 		onDocSkip:     newFileSkipEmitter(emitter),
 		onDocHash:     crossFileDedupHashHook(cfg, ret),
+		onEditorial:   newEditorialImportEmitter(emitter),
 	})
 	wireDerivationCacheIdentities(ret, ing)
 
@@ -264,6 +266,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}()
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh, &bgWG)
 	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, cfg.Source.Kind, ing, logSink, &bgWG)
+	startEditorialImportPoller(runCtx, opts.readOnly, ing, indexingState, logSink, &bgWG)
 	startEvidenceBaselineWarmer(runCtx, ret, indexingState, logSink, &bgWG)
 
 	// The server is now serving. A signal-triggered shutdown from here on is
@@ -1618,6 +1621,11 @@ func (a *App) newServingRetriever(cfg config.Config, st model.Store, textIx, cod
 	if err := configureSecretPolicy(ret, cfg); err != nil {
 		return nil, err
 	}
+	// SPEC 7.11.4 / 9.9: the entities filter normalizes a requested value with
+	// the same name folds the editorial person ids were built with.
+	if err := ret.SetEditorialNameFolds(cfg.AnnotationsNameFolds); err != nil {
+		return nil, err
+	}
 	ret.SetQueryEmbeddingModel(etm)
 	ret.SetCodeEmbeddingModel(ecm)
 	ret.SetCodeIndex(codeIx)
@@ -1776,6 +1784,7 @@ type ingestorHooks struct {
 	onDocError    func(relPath, docType, message string)
 	onDocSkip     func(relPath, docType, reason string)
 	onDocHash     func(relPath, contentHash string)
+	onEditorial   func(level string, report editorial.Report)
 }
 
 // wireIngestorHooks connects the optional indexing-state, document-delete,
@@ -1796,6 +1805,9 @@ func wireIngestorHooks(ing model.Ingestor, hooks ingestorHooks) {
 	}
 	if notifier, ok := ing.(documentContentHashNotifier); ok && hooks.onDocHash != nil {
 		notifier.SetOnDocumentContentHash(hooks.onDocHash)
+	}
+	if notifier, ok := ing.(editorialImportNotifier); ok && hooks.onEditorial != nil {
+		notifier.SetOnEditorialImport(hooks.onEditorial)
 	}
 }
 

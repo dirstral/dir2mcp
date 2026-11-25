@@ -40,7 +40,9 @@ type SummarySourceRep struct {
 // SummarySourceReps returns the active representations of the document at
 // relPath that carry at least one active chunk, ordered by rep_id for
 // determinism. `summary` representations are excluded: a summary is never itself
-// summarized (SPEC §16.2). An empty slice with a nil error means the document
+// summarized (SPEC §16.2). `editorial` representations are excluded too: they
+// are authored data from an import source (SPEC §7.11), and a model summary of
+// them would present editor text as model output. An empty slice with a nil error means the document
 // has no summarizable representation yet.
 func (s *SQLiteStore) SummarySourceReps(ctx context.Context, relPath string) ([]SummarySourceRep, error) {
 	normalizedPath, err := normalizeRelPath(relPath)
@@ -62,6 +64,7 @@ func (s *SQLiteStore) SummarySourceReps(ctx context.Context, relPath string) ([]
 		   JOIN chunks c ON c.rep_id = r.rep_id AND c.deleted = 0
 		  WHERE d.rel_path = ? AND d.deleted = 0 AND r.deleted = 0
 		    AND r.rep_type <> ? AND r.rep_type NOT LIKE ?
+		    AND r.rep_type NOT LIKE 'editorial@%'
 		  GROUP BY r.rep_id, r.doc_id, r.rep_type
 		  ORDER BY r.rep_id ASC`,
 		normalizedPath,

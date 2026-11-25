@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/dirstral/dir2mcp/internal/editorial"
 )
 
 type Document struct {
@@ -622,6 +624,17 @@ type Filter struct {
 	// map disables the filter entirely: only a stated value ever narrows a
 	// result. Values match literally, case-sensitively, as strings.
 	Attributes map[string][]string
+	// Sources restricts hits to annotations whose span `sources` contains ANY
+	// requested value (SPEC §9.11): literal, case-sensitive, OR within the
+	// field, AND against every other filter. Empty disables the predicate. A
+	// hit that is not annotation-derived never matches a non-empty filter.
+	Sources []string
+	// EditorialEntities is Entities after the editorial person id
+	// normalization with the configured name folds (SPEC §7.11.4, §9.9). It is
+	// compared with the entity ids of an `editorial` hit only; a recognition
+	// hit keeps the literal Entities comparison. Nil means "Entities
+	// normalized with no fold".
+	EditorialEntities []string
 }
 
 // IsZero reports whether the filter has no active predicate.
@@ -634,6 +647,7 @@ func (f Filter) IsZero() bool {
 		len(f.Languages) == 0 &&
 		len(f.Entities) == 0 &&
 		len(f.Events) == 0 &&
+		len(f.Sources) == 0 &&
 		!f.hasAttributeConstraint()
 }
 
@@ -697,7 +711,36 @@ func (f Filter) matchesMetadata(p IndexPayload) bool {
 			return false
 		}
 	}
-	return f.MatchesAnnotation(p.Span)
+	return f.MatchesAnnotationFor(p.RepType, p.Span)
+}
+
+// MatchesAnnotationFor is MatchesAnnotation for a hit of the given rep_type.
+// On an `editorial` hit the requested entity ids are compared after the person
+// id normalization (SPEC §9.9); on any other hit they stay literal.
+func (f Filter) MatchesAnnotationFor(repType string, span Span) bool {
+	if len(f.Entities) > 0 && editorial.IsRepType(strings.TrimSpace(repType)) {
+		g := f
+		g.Entities = f.EditorialEntities
+		if g.Entities == nil {
+			g.Entities = EditorialEntityIDs(f.Entities, editorial.Folds{})
+		}
+		return g.MatchesAnnotation(span)
+	}
+	return f.MatchesAnnotation(span)
+}
+
+// EditorialEntityIDs applies the editorial person id normalization (SPEC
+// §7.11.4) to requested entity values. The result is never nil for a
+// non-empty input, so a caller can tell "normalized" from "not set".
+func EditorialEntityIDs(values []string, folds editorial.Folds) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		out = append(out, editorial.PersonID(v, folds))
+	}
+	return out
 }
 
 // MatchesAnnotation evaluates the recognition entity/event predicate against a
@@ -710,6 +753,11 @@ func (f Filter) MatchesAnnotation(span Span) bool {
 		return false
 	}
 	if len(f.Events) > 0 && !MatchesAnyLiteral(f.Events, []string{span.Event}) {
+		return false
+	}
+	// SPEC §9.11: literal, OR within the field. A span with no sources (every
+	// non-annotation chunk) never matches a non-empty filter.
+	if len(f.Sources) > 0 && !MatchesAnyLiteral(f.Sources, span.Sources) {
 		return false
 	}
 	for key, values := range f.Attributes {
@@ -928,6 +976,15 @@ type SearchQuery struct {
 	// that constraint. Only annotation-derived hits can match a non-empty
 	// filter. Callers validate shape upstream; values pass through verbatim.
 	Attributes map[string][]string
+	// Sources optionally restricts hits to annotations whose span `sources`
+	// contains ANY requested value (SPEC §9.11): literal, case-sensitive, OR
+	// within the field, AND against every other filter. Only annotation-derived
+	// hits (recognition or editorial) carry sources. Absent/empty disables it.
+	Sources []string
+	// EditorialEntities is set by the retrieval service, never by a caller: it
+	// is Entities after the editorial person id normalization with the
+	// configured name folds (SPEC §7.11.4, §9.9).
+	EditorialEntities []string
 	// DateFrom / DateTo optionally restrict hits to a document-date window (SPEC
 	// §9.6), compared against each candidate's source-document calendar anchor
 	// (mtime_unix). Both are Unix seconds and both bounds are inclusive; 0 means
@@ -1215,6 +1272,10 @@ type Citation struct {
 	RelPath string
 	Title   string
 	Span    Span
+	// RepType is the cited hit's rep_type. It is not served on the wire; it
+	// lets the citation renderer tell an editorial annotation (SPEC §9.3) from
+	// transcript text.
+	RepType string
 }
 
 type AskResult struct {

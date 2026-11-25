@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/netutil"
 	"github.com/dirstral/dir2mcp/internal/provider"
 	"github.com/dirstral/dir2mcp/internal/secrets"
@@ -997,6 +998,13 @@ type Config struct {
 	// carries no language- or domain-specific phrases.
 	MediaFilterWords []string
 
+	// AnnotationsNameFolds is the optional list of single code point character
+	// folds for editorial person ids (config `annotations.name_folds`, SPEC
+	// §7.11.4), each "<from>=<to>" (for example "ё=е"). Empty by default: a fold
+	// is a choice for one language and one corpus, so no character is folded
+	// unless the operator lists it. Validated as CONFIG_INVALID per §7.11.4.
+	AnnotationsNameFolds []string
+
 	// MediaSubtitlesTTMLEnabled opts IN to the OPTIONAL bilingual broadcast
 	// subtitle-packaging surface (SPEC §8.6.10, config
 	// `media.subtitles.ttml.enabled`). OFF by default: VTT/SRT export (§8.6.3) is
@@ -1698,6 +1706,7 @@ type fileConfig struct {
 	MediaTranslateWindowLines           *int
 	MediaTranslateContextLines          *int
 	MediaFilterWords                    []string
+	AnnotationsNameFolds                []string
 	MediaSubtitlesTTMLEnabled           *bool
 	MediaSubtitlesTTMLAlignToleranceMS  *int
 	MediaSubtitlesSourcePauseMS         *int
@@ -1899,6 +1908,7 @@ type persistedConfig struct {
 	MediaTranslateWindowLines           int           `yaml:"media_translate_window_lines"`
 	MediaTranslateContextLines          int           `yaml:"media_translate_context_lines"`
 	MediaFilterWords                    []string      `yaml:"media_filter_words"`
+	AnnotationsNameFolds                []string      `yaml:"annotations_name_folds"`
 	MediaSubtitlesTTMLEnabled           bool          `yaml:"media_subtitles_ttml_enabled"`
 	MediaSubtitlesTTMLAlignToleranceMS  int           `yaml:"media_subtitles_ttml_align_tolerance_ms"`
 	MediaSubtitlesSourcePauseMS         int           `yaml:"media_subtitles_source_pause_ms"`
@@ -2429,6 +2439,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaTranslateWindowLines:           cfg.MediaTranslateWindowLines,
 		MediaTranslateContextLines:          cfg.MediaTranslateContextLines,
 		MediaFilterWords:                    append([]string(nil), cfg.MediaFilterWords...),
+		AnnotationsNameFolds:                append([]string(nil), cfg.AnnotationsNameFolds...),
 		MediaSubtitlesTTMLEnabled:           cfg.MediaSubtitlesTTMLEnabled,
 		MediaSubtitlesTTMLAlignToleranceMS:  cfg.MediaSubtitlesTTMLAlignToleranceMS,
 		MediaSubtitlesSourcePauseMS:         cfg.MediaSubtitlesSourcePauseMS,
@@ -3432,6 +3443,11 @@ func applyMediaFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaFilterWords != nil {
 		cfg.MediaFilterWords = normalizeStringSlice(fc.MediaFilterWords)
 	}
+	if fc.AnnotationsNameFolds != nil {
+		// Kept as written: validateAnnotationsNameFolds checks each entry, and
+		// trimming would hide a white-space side that §7.11.4 rejects.
+		cfg.AnnotationsNameFolds = append([]string{}, fc.AnnotationsNameFolds...)
+	}
 	applyMediaSubtitlesFileParsed(cfg, fc)
 	applyMediaSubtitlesEmitFileParsed(cfg, fc)
 	if fc.IngestMediaIdentity != nil {
@@ -4208,6 +4224,8 @@ var configKeyAliases = map[string]string{
 	"media_translate_context_lines":            "media.translate.context_lines",
 	"media_filter_words":                       "media.filter_words",
 	"filter_words":                             "media.filter_words",
+	"annotations_name_folds":                   "annotations.name_folds",
+	"name_folds":                               "annotations.name_folds",
 	"media_subtitles_ttml_enabled":             "media.subtitles.ttml.enabled",
 	"media_subtitles_ttml_align_tolerance_ms":  "media.subtitles.ttml.align_tolerance_ms",
 	"media_subtitles_smil_enabled":             "media.subtitles.smil.enabled",
@@ -4345,7 +4363,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	}
 	switch key {
-	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "ingest.libreoffice", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "libreoffice", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup":
+	case "rag", "ingest", "ingest.docling", "ingest.pandoc", "ingest.libreoffice", "stt", "stt.mistral", "stt.elevenlabs", "server", "server.tls", "secret_sources", "mistral", "docling", "pandoc", "libreoffice", "security", "security.auth", "x402", "x402.route_policy", "x402.route_policy.tools_call", "chunking", "retrieval", "retrieval.hybrid", "retrieval.context_compression", "retrieval.adaptive", "retrieval.mmr", "retrieval.hyde", "retrieval.contextual", "retrieval.cross_lingual", "retrieval.hierarchical", "rerank", "rerank.cohere", "index", "dedup", "annotations":
 		return true
 	case "ingest.pdf", "ingest.images", "ingest.audio", "ingest.archives", "secrets", "index.qdrant":
 		return true
@@ -4943,7 +4961,7 @@ func appendConfigListValue(target *[]string, item string) {
 
 func setFileListValue(cfg *fileConfig, key, value string) {
 	key = canonicalizeConfigKey(key)
-	if setRetrievalFileListValue(cfg, key, value) || setMediaSubtitlesEmitFileListValue(cfg, key, value) {
+	if setSectionFileListValue(cfg, key, value) {
 		return
 	}
 	switch key {
@@ -5009,12 +5027,31 @@ func setRetrievalFileListValue(cfg *fileConfig, key, value string) bool {
 	return true
 }
 
+// setSectionFileListValue routes a list item to the section helpers that own
+// it (retrieval, media.subtitles.emit, annotations) and reports whether one did.
+// Kept apart from setFileListValue so that function stays within the
+// cyclomatic budget.
+func setSectionFileListValue(cfg *fileConfig, key, value string) bool {
+	return setRetrievalFileListValue(cfg, key, value) || setMediaSubtitlesEmitFileListValue(cfg, key, value) ||
+		setAnnotationsFileListValue(cfg, key, value)
+}
+
+// setAnnotationsFileListValue appends one list item of the annotations section
+// (SPEC §7.11.4) and reports whether key belonged to it.
+func setAnnotationsFileListValue(cfg *fileConfig, key, value string) bool {
+	if key != "annotations.name_folds" {
+		return false
+	}
+	appendConfigListValue(&cfg.AnnotationsNameFolds, value)
+	return true
+}
+
 // isListConfigKey reports whether key (after canonicalization) maps to
 // a list-valued config field.
 func isListConfigKey(key string) bool {
 	key = canonicalizeConfigKey(key)
 	switch key {
-	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "secret_allow_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "media.subtitles.emit.smil_params", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
+	case "trusted_proxies", "path_excludes", "ingest_exclude_dirs", "secret_patterns", "secret_allow_patterns", "allowed_origins", "media.translate.target_langs", "media.stt.tracks", "media.filter_words", "annotations.name_folds", "media.subtitles.glossary", "media.subtitles.drop_phrases", "media.subtitles.scrub_phrases", "media.subtitles.emit.formats", "media.subtitles.emit.languages", "media.subtitles.emit.smil_params", "retrieval.cross_lingual.target_langs", "retrieval.hierarchical.source_reps", "retrieval.hierarchical.levels":
 		return true
 	default:
 		return false
@@ -5186,6 +5223,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_translate_engine", cfg.MediaTranslateEngine)
 	writeBool("media_translate_name_hints", cfg.MediaTranslateNameHints)
 	writeList("media_filter_words", cfg.MediaFilterWords)
+	writeList("annotations_name_folds", cfg.AnnotationsNameFolds)
 	writeBool("media_subtitles_ttml_enabled", cfg.MediaSubtitlesTTMLEnabled)
 	writeInt("media_subtitles_ttml_align_tolerance_ms", cfg.MediaSubtitlesTTMLAlignToleranceMS)
 	writeBool("media_subtitles_smil_enabled", cfg.MediaSubtitlesSMILEnabled)
@@ -5961,6 +5999,7 @@ func (c *Config) Validate() error {
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
+		c.validateAnnotationsNameFolds,
 		c.validateMediaSubtitles,
 		c.validateMediaSubtitlesEmit,
 		c.validateMediaSubtitlesSMIL,
@@ -6175,6 +6214,18 @@ func (c *Config) validateRecognizeTimeouts() error {
 	if c.RecognizeTimeoutPerMediaSecond < 0 {
 		return fmt.Errorf("CONFIG_INVALID: recognize.timeout_per_media_second must be non-negative, got %v",
 			c.RecognizeTimeoutPerMediaSecond)
+	}
+	return nil
+}
+
+// validateAnnotationsNameFolds rejects an `annotations.name_folds` list that
+// SPEC §7.11.4 makes CONFIG_INVALID: an entry that is not two single code
+// points joined by "=", a repeated <from>, a side that lower case or NFC
+// changes, a white space or combining mark side, or a chain. Each such entry
+// would let a second normalization change a stored person id.
+func (c *Config) validateAnnotationsNameFolds() error {
+	if _, err := editorial.ParseFolds(c.AnnotationsNameFolds); err != nil {
+		return fmt.Errorf("CONFIG_INVALID: %w", err)
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/protocol"
@@ -336,6 +337,12 @@ func lookupChunkDocContext(ctx context.Context, exec dbExecutor, repID int64) (r
 	).Scan(&relPath, &docType, &repType, &metaJSON)
 	if err != nil {
 		return relPath, docType, repType, "", err
+	}
+	// An editorial representation is stored once per source under a qualified
+	// rep_type (editorial.RepTypeForSource), and every chunk and hit carries the
+	// bare `editorial` (SPEC §7.11.4, §9.2).
+	if editorial.IsRepType(repType) {
+		repType = editorial.RepType
 	}
 	// Denormalize the representation's recorded effective language (SPEC §5.2/§8.8)
 	// onto the chunk so the per-language retrieval filter (§9.5) can predicate at
@@ -3606,6 +3613,9 @@ func spanFromRowWith(kind string, start, end int, extraJSON string, withTimings 
 		return timeSpanFromRow(start, end, extraJSON, withTimings)
 	case "region":
 		return regionSpanFromRow(start, end, extraJSON)
+	case "document":
+		entities, event, sources, attributes := annotationFromExtraJSON(extraJSON)
+		return model.Span{Kind: "document", Entities: entities, Event: event, Sources: sources, Attributes: attributes}
 	case "lines":
 		if start > 0 && end >= start {
 			return model.Span{Kind: "lines", StartLine: start, EndLine: end}
@@ -4631,6 +4641,14 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 		return "time", span.StartMS, span.EndMS, extra, nil
 	case "region":
 		return regionSpanToRow(span.Region)
+	case "document":
+		// Whole-document scope (SPEC §5.4): start and end are 0. The row exists so
+		// its extra_json can carry an editorial annotation's fields (§7.11.4).
+		extra, eErr := documentSpanExtraJSON(span)
+		if eErr != nil {
+			return "", 0, 0, "", eErr
+		}
+		return "document", 0, 0, extra, nil
 	default:
 		return "", 0, 0, "", fmt.Errorf("unsupported span kind: %q", span.Kind)
 	}
@@ -4684,6 +4702,31 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal time span extra_json: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// documentSpanExtraJSON marshals the annotation fields of a "document" span
+// (an editorial annotation with whole-document scope, SPEC §7.11.4): entities,
+// event, sources and attributes, each only when present. A span with none
+// stores SQL NULL.
+func documentSpanExtraJSON(span model.Span) (string, error) {
+	entities := model.NormalizeEntityIDs(span.Entities)
+	event := strings.TrimSpace(span.Event)
+	sources := model.NormalizeSources(span.Sources)
+	attributes := model.NormalizeAttributes(span.Attributes)
+	if len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 {
+		return "", nil
+	}
+	payload := struct {
+		Entities   []string          `json:"entities,omitempty"`
+		Event      string            `json:"event,omitempty"`
+		Sources    []string          `json:"sources,omitempty"`
+		Attributes map[string]string `json:"attributes,omitempty"`
+	}{Entities: entities, Event: event, Sources: sources, Attributes: attributes}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal document span extra_json: %w", err)
 	}
 	return string(encoded), nil
 }

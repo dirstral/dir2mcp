@@ -25,6 +25,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/promptfence"
 	"github.com/dirstral/dir2mcp/internal/promptrules"
@@ -264,6 +265,10 @@ const (
 // See NewService for default initialization details.
 
 type Service struct {
+	// editorialFolds is the validated annotations.name_folds list (SPEC
+	// §7.11.4) applied to a requested entity value before it is compared with
+	// an editorial hit's person ids. Guarded by metaMu.
+	editorialFolds      editorial.Folds
 	store               model.Store
 	textIndex           model.Index
 	codeIndex           model.Index
@@ -1763,6 +1768,7 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 }
 
 func (s *Service) search(ctx context.Context, query model.SearchQuery) ([]model.SearchHit, error) {
+	query = s.withEditorialEntities(query)
 	k := s.effectiveK(query.K)
 
 	// When recency decay is active it re-scores each hit by its source-document
@@ -2347,6 +2353,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		query.Query = question
 	}
 	query.K = s.effectiveK(query.K)
+	query = s.withEditorialEntities(query)
 
 	// Install a per-query usage sink so embed/rerank/generate token usage and
 	// latency for this ask are accumulated and emitted as a single
@@ -2625,6 +2632,7 @@ func citationsForHits(hits []model.SearchHit) []model.Citation {
 			RelPath: hit.RelPath,
 			Title:   hit.Title,
 			Span:    hit.Span,
+			RepType: hit.RepType,
 		})
 	}
 	return citations
@@ -4671,6 +4679,9 @@ func filterFromQuery(q model.SearchQuery) model.Filter {
 		// §9.10: pushed down like entities/events when the index can filter;
 		// the authoritative re-check runs in matchFilters, which sees the span.
 		Attributes: q.Attributes,
+		// §9.11 and the §9.9 editorial person ids: same push-down rule.
+		Sources:           q.Sources,
+		EditorialEntities: q.EditorialEntities,
 	}
 }
 
@@ -5545,7 +5556,9 @@ func ragDocHeader(h model.SearchHit) string {
 	// two fields. Wrapping the finished tag covers both and every field a
 	// future span form adds; wrapping the path alone was reviewed as a
 	// header-injection hole (CWE-74) precisely because of the speaker field.
-	header := ragDocOpenMarker + " " + neutralizeHeaderField(FormatCitation(h.RelPath, h.Span))
+	// An editorial hit renders as an editor annotation from its source (SPEC
+	// §9.3), never as a bare transcript citation.
+	header := ragDocOpenMarker + " " + neutralizeHeaderField(FormatHitCitation(h.RelPath, h.RepType, h.Span))
 	if title := strings.TrimSpace(h.Title); title != "" {
 		header += " (" + neutralizeHeaderField(title) + ")"
 	}
@@ -5627,6 +5640,7 @@ func citationsForIndices(hits []model.SearchHit, idx []int) []model.Citation {
 			RelPath: h.RelPath,
 			Title:   h.Title,
 			Span:    h.Span,
+			RepType: h.RepType,
 		})
 	}
 	return out
@@ -6057,7 +6071,14 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	// vocabulary is imposed here. A hit whose span carries no attribution —
 	// every non-annotation chunk — never matches a non-empty filter, mirroring
 	// the speaker filter above. Empty filters are a no-op.
-	if !(model.Filter{Entities: query.Entities, Events: query.Events, Attributes: query.Attributes}).MatchesAnnotation(hit.Span) {
+	//
+	// On an `editorial` hit the requested entity ids are compared after the
+	// person id normalization (SPEC §9.9, §7.11.4); the source filter (§9.11)
+	// rides on the same annotation check.
+	if !(model.Filter{
+		Entities: query.Entities, Events: query.Events, Attributes: query.Attributes,
+		Sources: query.Sources, EditorialEntities: query.EditorialEntities,
+	}).MatchesAnnotationFor(hit.RepType, hit.Span) {
 		return false
 	}
 

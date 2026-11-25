@@ -22,6 +22,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/mistral"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -1195,7 +1196,7 @@ func normalizedListRelPath(relPath string) (string, bool) {
 func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"query": {}, "k": {}, "index": {}, "path_prefix": {}, "file_glob": {}, "doc_types": {}, "speaker": {}, "languages": {}, "language_match": {}, "date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
-		"entities": {}, "events": {}, "attributes": {},
+		"entities": {}, "events": {}, "attributes": {}, "sources": {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -1230,17 +1231,18 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
-	tw, entities, events, attributes, toolErr := parseSearchScopeFilters(args)
+	scope, toolErr := parseSearchScopeFilters(args)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
+	tw := scope.temporal
 	if s.retriever == nil {
 		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	sq := model.SearchQuery{
 		Query: query, K: k, Index: indexName, PathPrefix: pathPrefix, FileGlob: fileGlob, DocTypes: docTypes, Speaker: speaker, Languages: languages, LanguageMatch: languageMatch, DateFrom: tw.dateFrom, DateTo: tw.dateTo,
 		HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS, HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
-		Entities: entities, Events: events, Attributes: attributes,
+		Entities: scope.entities, Events: scope.events, Attributes: scope.attributes, Sources: scope.sources,
 	}
 	// index_used MUST be the index the query was actually routed to (SPEC §15.2),
 	// not the requested name. Prefer AxisSearcher so the reported axis is read back
@@ -1457,7 +1459,7 @@ func askFamilyArguments(extra ...string) map[string]struct{} {
 		"path_prefix": {}, "file_glob": {}, "doc_types": {},
 		"languages": {}, "language_match": {},
 		"date_from": {}, "date_to": {}, "time_from_ms": {}, "time_to_ms": {},
-		"entities": {}, "events": {}, "attributes": {},
+		"entities": {}, "events": {}, "attributes": {}, "sources": {},
 	}
 	for _, name := range extra {
 		allowed[name] = struct{}{}
@@ -1518,10 +1520,11 @@ func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}, defa
 	if toolErr != nil {
 		return askRequest{}, toolErr
 	}
-	tw, entities, events, attributes, toolErr := parseSearchScopeFilters(args)
+	scope, toolErr := parseSearchScopeFilters(args)
 	if toolErr != nil {
 		return askRequest{}, toolErr
 	}
+	tw := scope.temporal
 	return askRequest{
 		question: question,
 		mode:     mode,
@@ -1532,7 +1535,8 @@ func parseAskArgs(args map[string]interface{}, allowed map[string]struct{}, defa
 			DateFrom: tw.dateFrom, DateTo: tw.dateTo,
 			HasTimeFrom: tw.hasTimeFrom, TimeFromMS: tw.timeFromMS,
 			HasTimeTo: tw.hasTimeTo, TimeToMS: tw.timeToMS,
-			Entities: entities, Events: events, Attributes: attributes,
+			Entities: scope.entities, Events: scope.events, Attributes: scope.attributes,
+			Sources: scope.sources,
 		},
 	}, nil
 }
@@ -2673,20 +2677,49 @@ func parseAnnotationFilters(args map[string]interface{}) (entities, events []str
 // entity/event attribution (design 0004 §7). Grouped into one call so the tool
 // handler stays within the repo's cyclomatic budget; each half is unchanged and
 // still validated independently.
-func parseSearchScopeFilters(args map[string]interface{}) (temporalFilters, []string, []string, map[string][]string, *toolExecutionError) {
+func parseSearchScopeFilters(args map[string]interface{}) (scopeFilters, *toolExecutionError) {
 	tw, toolErr := parseTemporalFilters(args)
 	if toolErr != nil {
-		return temporalFilters{}, nil, nil, nil, toolErr
+		return scopeFilters{}, toolErr
 	}
 	entities, events, toolErr := parseAnnotationFilters(args)
 	if toolErr != nil {
-		return temporalFilters{}, nil, nil, nil, toolErr
+		return scopeFilters{}, toolErr
 	}
 	attributes, toolErr := parseAttributesArg(args)
 	if toolErr != nil {
-		return temporalFilters{}, nil, nil, nil, toolErr
+		return scopeFilters{}, toolErr
 	}
-	return tw, entities, events, attributes, nil
+	sources, toolErr := parseSourcesArg(args)
+	if toolErr != nil {
+		return scopeFilters{}, toolErr
+	}
+	return scopeFilters{temporal: tw, entities: entities, events: events, attributes: attributes, sources: sources}, nil
+}
+
+// scopeFilters is the parsed set of scope filters of a search or ask request.
+type scopeFilters struct {
+	temporal   temporalFilters
+	entities   []string
+	events     []string
+	attributes map[string][]string
+	sources    []string
+}
+
+// parseSourcesArg parses the optional SPEC 9.11 `sources` filter: an array of
+// non-empty strings matched literally against a span's `sources`. A source name
+// is free text, so no vocabulary is checked; an unknown value matches nothing.
+func parseSourcesArg(args map[string]interface{}) ([]string, *toolExecutionError) {
+	sources, err := parseOptionalStringSlice(args, "sources")
+	if err != nil {
+		return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	for _, v := range sources {
+		if strings.TrimSpace(v) == "" {
+			return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: "sources contains an empty value", Retryable: false}
+		}
+	}
+	return sources, nil
 }
 
 // parseAttributesArg parses the optional §9.10 attributes filter: an object
@@ -3858,6 +3891,12 @@ func buildOpenFileSpan(span model.Span) map[string]interface{} {
 		return serializeTimeSpan(span)
 	case "region":
 		return buildRegionSpan(span)
+	case "document":
+		// Whole-document scope. An editorial annotation (SPEC 7.11.4) carries
+		// its annotation fields here; any other document span is kind only.
+		out := map[string]interface{}{"kind": "document"}
+		addAnnotationFields(out, span)
+		return out
 	default:
 		// An empty or unknown kind (e.g. a BM25 hit on a cache miss whose
 		// Span.Kind is "") matches none of the Span oneOf branches in the
@@ -3911,6 +3950,14 @@ func serializeTimeSpan(span model.Span) map[string]interface{} {
 			out["speaker_label"] = label
 		}
 	}
+	addAnnotationFields(out, span)
+	return out
+}
+
+// addAnnotationFields copies the annotation fields of a span (entities, event,
+// sources, attributes) onto its served form, each only when present. A time
+// span and a document span (SPEC 7.11.4) share them.
+func addAnnotationFields(out map[string]interface{}, span model.Span) {
 	// NormalizeEntityIDs trims, drops blanks and dedupes, which is exactly the
 	// set model.Filter matches against. So a served hit shows the matchable
 	// values, never a blank id the filter could not have selected on.
@@ -3933,7 +3980,6 @@ func serializeTimeSpan(span model.Span) map[string]interface{} {
 	if attributes := model.NormalizeAttributes(span.Attributes); len(attributes) > 0 {
 		out["attributes"] = attributes
 	}
-	return out
 }
 
 // buildRegionSpan renders a region span per spec §15.1.1: page range plus the
@@ -4187,6 +4233,11 @@ func renderSearchHitsText(hits []model.SearchHit, noun string) string {
 		if t := strings.TrimSpace(h.Title); t != "" {
 			loc = fmt.Sprintf("%s (%s)", t, h.RelPath)
 		}
+		// An editorial hit is an editor annotation from its source, never words
+		// spoken in the media (SPEC 9.3), so the text block says so.
+		if label := editorialHitLabel(h); label != "" {
+			loc += " › " + label
+		}
 		snippet := strings.Join(strings.Fields(h.Snippet), " ")
 		if len(snippet) > 600 {
 			snippet = snippet[:600] + "…"
@@ -4194,6 +4245,20 @@ func renderSearchHitsText(hits []model.SearchHit, noun string) string {
 		fmt.Fprintf(&b, "\n\n%d. %s — score %.3f\n%s", i+1, loc, h.Score, snippet)
 	}
 	return b.String()
+}
+
+// editorialHitLabel renders the SPEC 9.3 editor annotation label of an
+// editorial hit, "editor annotation (<source>, match <score>)", or "" for any
+// other hit. The match part is left out when the span has no match_score.
+func editorialHitLabel(h model.SearchHit) string {
+	if !editorial.IsRepType(strings.TrimSpace(h.RepType)) {
+		return ""
+	}
+	source := ""
+	if sources := model.NormalizeSources(h.Span.Sources); len(sources) > 0 {
+		source = sources[0]
+	}
+	return editorial.CitationLabel(source, h.Span.Attributes["match_score"])
 }
 
 func serializeSearchHits(hits []model.SearchHit) []map[string]interface{} {
@@ -4373,6 +4438,30 @@ func spanDefinitionSchema() map[string]interface{} {
 				"additionalProperties": false,
 				"properties": map[string]interface{}{
 					"kind": map[string]interface{}{"const": "document"},
+					// SPEC 7.11.4 (spec 0.101.0): an editorial annotation with
+					// whole-document scope carries the annotation fields on a
+					// document span. Declared because this branch is
+					// additionalProperties:false.
+					"entities": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional (SPEC 7.11): entity ids of a whole-document annotation, for example the normalized person id of an editorial annotation on a document with no known duration.",
+					},
+					"attributes": map[string]interface{}{
+						"type":                 "object",
+						"additionalProperties": map[string]interface{}{"type": "string"},
+						"propertyNames":        map[string]interface{}{"not": map[string]interface{}{"pattern": "^dir2mcp:"}},
+						"description":          "Optional (SPEC 7.11, 9.10): key/value attributes of a whole-document annotation, for example the match provenance of an editorial annotation.",
+					},
+					"event": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional (SPEC 7.11): the event token of a whole-document annotation, for example appears or description.",
+					},
+					"sources": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional (SPEC 7.11): the sources of a whole-document annotation, for example [<import source name>] on an editorial annotation.",
+					},
 				},
 				"required": []string{"kind"},
 			},
@@ -4450,7 +4539,7 @@ func searchInputSchema(defaultK int) map[string]interface{} {
 			"entities": map[string]interface{}{
 				"type":        "array",
 				"items":       map[string]interface{}{"type": "string"},
-				"description": "Optional (design 0004 §7): restrict hits to recognition annotations referencing ANY of these entity ids (logical OR), matched literally. Combine with `events` to select a role: an annotation names every participant, so the id alone cannot say which one acted. Only annotation-derived hits carry entities; an id absent from the corpus returns an empty result, not an error.",
+				"description": "Optional (design 0004 §7): restrict hits to recognition annotations referencing ANY of these entity ids (logical OR), matched literally; against an editorial hit (SPEC 7.11) a value is compared after the person id normalization. Combine with `events` to select a role: an annotation names every participant, so the id alone cannot say which one acted. Only annotation-derived hits carry entities; an id absent from the corpus returns an empty result, not an error.",
 			},
 			"events": map[string]interface{}{
 				"type":        "array",
@@ -4461,6 +4550,11 @@ func searchInputSchema(defaultK int) map[string]interface{} {
 				"type":                 "object",
 				"additionalProperties": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 				"description":          "Optional (SPEC 9.10): restrict hits to annotation-derived ones whose attributes match. Each key maps to an array of acceptable values: OR within a key, AND across keys and against every other filter, literal string equality, no vocabulary defined. Absent, {}, or a key with [] disables that constraint.",
+			},
+			"sources": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (SPEC 9.11): restrict hits to annotation-derived ones (recognition or editorial) whose span sources contain ANY of these values, matched literally and case-sensitively. OR within the field, AND against every other filter. Use it to select or isolate an imported editorial source. Absent or empty disables the filter.",
 			},
 			"date_from": map[string]interface{}{
 				"type":        "string",
@@ -4591,7 +4685,7 @@ func askInputSchema(defaultK int) map[string]interface{} {
 			"entities": map[string]interface{}{
 				"type":        "array",
 				"items":       map[string]interface{}{"type": "string"},
-				"description": "Optional (design 0004 §7): restrict retrieved contexts to recognition annotations referencing ANY of these entity ids (logical OR), matched literally. Combine with `events` to select a role: an annotation names every participant, so the id alone cannot say which one acted. Only annotation-derived hits carry entities; an id absent from the corpus returns an empty result, not an error.",
+				"description": "Optional (design 0004 §7): restrict retrieved contexts to recognition annotations referencing ANY of these entity ids (logical OR), matched literally; against an editorial hit (SPEC 7.11) a value is compared after the person id normalization. Combine with `events` to select a role: an annotation names every participant, so the id alone cannot say which one acted. Only annotation-derived hits carry entities; an id absent from the corpus returns an empty result, not an error.",
 			},
 			"events": map[string]interface{}{
 				"type":        "array",
@@ -4602,6 +4696,11 @@ func askInputSchema(defaultK int) map[string]interface{} {
 				"type":                 "object",
 				"additionalProperties": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 				"description":          "Optional (SPEC 9.10): restrict hits to annotation-derived ones whose attributes match. Each key maps to an array of acceptable values: OR within a key, AND across keys and against every other filter, literal string equality, no vocabulary defined. Absent, {}, or a key with [] disables that constraint.",
+			},
+			"sources": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "Optional (SPEC 9.11): restrict retrieved contexts to annotation-derived ones (recognition or editorial) whose span sources contain ANY of these values, matched literally and case-sensitively. OR within the field, AND against every other filter. Use it to select or isolate an imported editorial source. Absent or empty disables the filter.",
 			},
 			"date_from": map[string]interface{}{
 				"type":        "string",
