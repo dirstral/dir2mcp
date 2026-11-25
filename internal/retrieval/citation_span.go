@@ -102,7 +102,9 @@ func clampCitationTagSpans(answer string, citations []model.Citation) (string, i
 // other tag only to non-editorial blocks. When no block has that provenance the
 // list is returned unchanged, so a tag still resolves to its document.
 func narrowByProvenance(match string, shown []shownBlock) []shownBlock {
-	wantEditorial := strings.Contains(match, " › editor annotation (")
+	const marker = " › editor annotation ("
+	i := strings.Index(match, marker)
+	wantEditorial := i >= 0
 	var out []shownBlock
 	for _, b := range shown {
 		if editorial.IsRepType(strings.TrimSpace(b.citation.RepType)) == wantEditorial {
@@ -111,6 +113,44 @@ func narrowByProvenance(match string, shown []shownBlock) []shownBlock {
 	}
 	if len(out) == 0 {
 		return shown
+	}
+	if !wantEditorial {
+		return out
+	}
+	// One document can hold one editorial representation per source, so the
+	// tag's source name picks among them, and the rewrite keeps attributing
+	// the text to the source that wrote it.
+	return narrowBySource(tagSourceName(match[i+len(marker):]), out)
+}
+
+// tagSourceName reads the source name of an editor annotation label, the text
+// before ", match " or the closing parenthesis.
+func tagSourceName(label string) string {
+	end := strings.LastIndex(label, ")")
+	if end < 0 {
+		return ""
+	}
+	label = label[:end]
+	if j := strings.LastIndex(label, ", match "); j >= 0 {
+		label = label[:j]
+	}
+	return strings.TrimSpace(label)
+}
+
+// narrowBySource keeps the editorial blocks of the named source, or all of
+// them when none carries that name.
+func narrowBySource(source string, blocks []shownBlock) []shownBlock {
+	var out []shownBlock
+	for _, b := range blocks {
+		for _, s := range model.NormalizeSources(b.citation.Span.Sources) {
+			if s == source {
+				out = append(out, b)
+				break
+			}
+		}
+	}
+	if len(out) == 0 {
+		return blocks
 	}
 	return out
 }
