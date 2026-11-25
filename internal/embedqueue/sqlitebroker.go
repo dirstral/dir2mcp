@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -270,6 +271,83 @@ func (b *SQLiteBroker) reclaimExpired(ctx context.Context, q execer, nowNS int64
 	return nil
 }
 
+// brokerTx is a broker transaction on one connection that it holds from BEGIN
+// to release. It exists because database/sql does not know the SQLite state of
+// a connection (#1188). A COMMIT that fails, for example with SQLITE_BUSY in
+// rollback-journal mode, leaves the SQLite transaction open, but database/sql
+// still marks the Tx done and puts the connection back in the pool. Every later
+// BEGIN on that connection then fails with "cannot start a transaction within a
+// transaction", so the broker stops serving leases. brokerTx keeps the
+// connection, so end can roll back the open transaction on that same
+// connection before the pool gets it back.
+type brokerTx struct {
+	tx   *sql.Tx
+	conn *sql.Conn
+	// committed is set when COMMIT succeeded, so end does not roll back.
+	committed bool
+	// stranded is set when a COMMIT or ROLLBACK failed, so the SQLite
+	// transaction can still be open on conn.
+	stranded bool
+}
+
+// begin starts a transaction on a connection that the returned brokerTx holds.
+// The caller must defer end.
+func (b *SQLiteBroker) begin(ctx context.Context) (*brokerTx, error) {
+	conn, err := b.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		// A connection that came from the pool inside a transaction refuses
+		// BEGIN. This can occur on a *sql.DB that other code shares
+		// (NewSQLiteBrokerWithDB). Clear it, so that the next call can begin.
+		endStrandedTx(conn)
+		_ = conn.Close()
+		return nil, err
+	}
+	return &brokerTx{tx: tx, conn: conn}, nil
+}
+
+// commit commits the transaction. When COMMIT fails, end must clear the
+// transaction that it can leave open.
+func (t *brokerTx) commit() error {
+	if err := t.tx.Commit(); err != nil {
+		t.stranded = true
+		return err
+	}
+	t.committed = true
+	return nil
+}
+
+// end rolls back a transaction that did not commit, clears a transaction that
+// a failed COMMIT or ROLLBACK left open, and gives the connection back to the
+// pool.
+func (t *brokerTx) end() {
+	if !t.committed {
+		if err := t.tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			t.stranded = true
+		}
+	}
+	if t.stranded {
+		endStrandedTx(t.conn)
+	}
+	_ = t.conn.Close()
+}
+
+// endStrandedTx rolls back a SQLite transaction that is open on conn although
+// database/sql thinks that no transaction is in progress. When that ROLLBACK
+// also fails, the state of the connection is not known, so the pool discards
+// the connection and opens a new one. The ROLLBACK does not use the caller's
+// context: the cleanup must run also when that context is done.
+func endStrandedTx(conn *sql.Conn) {
+	_, err := conn.ExecContext(context.Background(), "ROLLBACK")
+	if err == nil || strings.Contains(err.Error(), "no transaction is active") {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+}
+
 // Lease reclaims expired leases, then atomically claims the oldest claimable
 // pending job, from any corpus.
 func (b *SQLiteBroker) Lease(ctx context.Context, visibility time.Duration) (Lease, error) {
@@ -286,11 +364,12 @@ func (b *SQLiteBroker) LeaseForCorpus(ctx context.Context, corpusID string, visi
 	}
 	nowNS := b.now().UnixNano()
 
-	tx, err := b.db.BeginTx(ctx, nil)
+	btx, err := b.begin(ctx)
 	if err != nil {
 		return Lease{}, fmt.Errorf("embedqueue: lease begin: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer btx.end()
+	tx := btx.tx
 
 	// Reclaim expired in-flight leases (SPEC §8.7.3 lease expiry). Reclaim stays
 	// queue-wide rather than corpus-scoped: it is maintenance on rows this
@@ -315,7 +394,7 @@ func (b *SQLiteBroker) LeaseForCorpus(ctx context.Context, corpusID string, visi
 		   WHERE id=?`, token, deadline.UnixNano(), id); err != nil {
 		return Lease{}, fmt.Errorf("embedqueue: lease claim: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := btx.commit(); err != nil {
 		return Lease{}, fmt.Errorf("embedqueue: lease commit: %w", err)
 	}
 	return Lease{
@@ -379,41 +458,30 @@ func (b *SQLiteBroker) Ack(ctx context.Context, token string) error {
 
 // Nack requeues the leased job, or dead-letters it once attempts reach
 // maxAttempts (SPEC §8.7.3). An unknown/expired token is a no-op.
+//
+// It is one UPDATE that picks the outcome from the row's own attempts column.
+// A transaction that reads the row first and then writes it starts as a
+// reader. SQLite cannot upgrade a reader to a writer while another connection
+// writes: it returns SQLITE_BUSY at once (in WAL mode SQLITE_BUSY_SNAPSHOT when
+// a write committed after the read), and the busy timeout does not apply. The
+// worker drops a Nack error, so the job then stayed in flight until its lease
+// expired (#1188). A statement that writes first waits for the lock instead.
 func (b *SQLiteBroker) Nack(ctx context.Context, token string, retryAfter time.Duration) error {
-	tx, err := b.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("embedqueue: nack begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var id, attempts int64
-	row := tx.QueryRowContext(ctx,
-		`SELECT id, attempts FROM embed_jobs WHERE token=? AND state='inflight'`, token)
-	if err := row.Scan(&id, &attempts); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		return fmt.Errorf("embedqueue: nack select: %w", err)
-	}
-
-	if int(attempts) >= b.maxAttempts {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE embed_jobs SET state='dead', token=NULL, deadline_ns=0 WHERE id=?`, id); err != nil {
-			return fmt.Errorf("embedqueue: nack dead-letter: %w", err)
-		}
-		return tx.Commit()
-	}
-
 	notBefore := int64(0)
 	if retryAfter > 0 {
 		notBefore = b.now().Add(retryAfter).UnixNano()
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE embed_jobs SET state='pending', token=NULL, deadline_ns=0, not_before_ns=? WHERE id=?`,
-		notBefore, id); err != nil {
-		return fmt.Errorf("embedqueue: nack requeue: %w", err)
+	if _, err := b.db.ExecContext(ctx, `
+UPDATE embed_jobs
+   SET state         = CASE WHEN attempts >= ? THEN 'dead' ELSE 'pending' END,
+       not_before_ns = CASE WHEN attempts >= ? THEN not_before_ns ELSE ? END,
+       token         = NULL,
+       deadline_ns   = 0
+ WHERE token=? AND state='inflight'`,
+		b.maxAttempts, b.maxAttempts, notBefore, token); err != nil {
+		return fmt.Errorf("embedqueue: nack: %w", err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Stats reports queue depth, reclaiming expired leases first so in-flight counts

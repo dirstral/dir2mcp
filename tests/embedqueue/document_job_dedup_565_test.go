@@ -69,7 +69,12 @@ func TestBroker_DocumentJobDedupsPerRepresentation(t *testing.T) {
 // is written through the broker's own database handle, as corruption would be.
 func TestWorker_CorruptDocumentJobRowIsNamedAsCorrupt(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite", filepath.Join(testutil.TempDir(t), "queue.sqlite"))
+	// The handle gets the busy timeout that NewSQLiteBroker puts in its DSN. The
+	// worker and this test's Stats poll write through separate pooled
+	// connections. Without a busy timeout, a worker Nack that meets the poll's
+	// write lock fails at once, the worker drops that error, and the job stays
+	// in flight until its 30 s lease expires (#1188).
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(testutil.TempDir(t), "queue.sqlite")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

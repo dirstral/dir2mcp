@@ -15,7 +15,7 @@ buildGoModule {
   # independent of the version/ldflags. GoReleaser's nix publisher computes this
   # automatically for the derivation it generates; this value only matters when
   # building this hand-written flake directly.
-  vendorHash = "sha256-Dl04jHfBLoG5yPykhUAX+jGS18PQoI+x2AwgIat11Oo=";
+  vendorHash = "sha256-TYQzcP5wZA3ZzgvPpwoHdGZf5NDQe2ppLYP2A651X1k=";
 
   subPackages = [ "cmd/dir2mcp" ];
 
