@@ -400,6 +400,29 @@ type Span struct {
 	// text or span bounds, and it is empty on every representation that is not
 	// a recognition annotation. Persisted in the "time" span's extra_json.
 	Sources []string
+	// Derivation is "generated" when a model DESCRIBED the media in its own
+	// words, and empty otherwise: empty means "observed" (df-005, SPEC §8.9.4).
+	// Only "generated" is stored, so every span written before the field
+	// existed keeps its meaning. A client MUST NOT present a generated span as
+	// a record of what happened. Persisted in the "time" span's extra_json.
+	Derivation string
+}
+
+// DerivationGenerated is the one stored value of Span.Derivation (df-005).
+const DerivationGenerated = "generated"
+
+// NormalizeDerivation maps a wire `derivation` to its stored form (SPEC
+// §8.9.4). An empty value and "observed" both store as "" (absent means
+// observed); "generated" stores as itself. Any other value is invalid, and ok
+// is false: the caller drops the annotation.
+func NormalizeDerivation(value string) (stored string, ok bool) {
+	switch strings.TrimSpace(value) {
+	case "", "observed":
+		return "", true
+	case DerivationGenerated:
+		return DerivationGenerated, true
+	}
+	return "", false
 }
 
 // WordSpan is one per-word timestamp on a "time" span (spec §8.6.1). The JSON

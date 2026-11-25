@@ -3631,6 +3631,7 @@ func timeSpanFromRow(start, end int, extraJSON string, withTimings bool) model.S
 	entities, event, sources, attributes := annotationFromExtraJSON(extraJSON)
 	span := model.Span{
 		Kind: "time", StartMS: start, EndMS: end,
+		Derivation:   derivationFromExtraJSON(extraJSON),
 		Speaker:      speaker,
 		SpeakerLabel: speakerLabel,
 		Entities:     entities,
@@ -3669,6 +3670,26 @@ func annotationFromExtraJSON(extraJSON string) (entities []string, event string,
 		strings.TrimSpace(payload.Event),
 		model.NormalizeSources(payload.Sources),
 		model.NormalizeAttributes(payload.Attributes)
+}
+
+// derivationFromExtraJSON reads a recognition annotation's `derivation` from a
+// "time" span's extra_json (SPEC §8.9.4, df-005). Only "generated" is ever
+// stored; anything else, a missing key or a malformed payload reads as ""
+// (observed), which is what every span stored before the field existed means.
+func derivationFromExtraJSON(extraJSON string) string {
+	if strings.TrimSpace(extraJSON) == "" {
+		return ""
+	}
+	var payload struct {
+		Derivation string `json:"derivation"`
+	}
+	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil {
+		return ""
+	}
+	if stored, ok := model.NormalizeDerivation(payload.Derivation); ok {
+		return stored
+	}
+	return ""
 }
 
 // languageFromExtraJSON reads the per-segment language a "time" span recorded
@@ -4679,7 +4700,10 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 	attributes := model.NormalizeAttributes(span.Attributes)
 	cues := span.Cues
 	language := strings.ToLower(strings.TrimSpace(span.Language))
-	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 && len(cues) == 0 && language == "" {
+	// Only "generated" is stored (df-005: absent means observed); an invalid
+	// value never reaches here because ingestion dropped its annotation.
+	derivation, _ := model.NormalizeDerivation(span.Derivation)
+	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 && len(cues) == 0 && language == "" && derivation == "" {
 		return "", nil
 	}
 	payload := struct {
@@ -4691,13 +4715,14 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 		Event        string            `json:"event,omitempty"`
 		Sources      []string          `json:"sources,omitempty"`
 		Attributes   map[string]string `json:"attributes,omitempty"`
+		Derivation   string            `json:"derivation,omitempty"`
 		// Language is the segment's own language when it differs from the
 		// representation's (SPEC §8.2.2); absent otherwise.
 		Language string `json:"language,omitempty"`
 	}{
 		Words: words, Cues: cues, Speaker: speaker, SpeakerLabel: speakerLabel,
 		Entities: entities, Event: event, Sources: sources, Attributes: attributes,
-		Language: language,
+		Derivation: derivation, Language: language,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

@@ -3992,6 +3992,11 @@ func addAnnotationFields(out map[string]interface{}, span model.Span) {
 	if attributes := model.NormalizeAttributes(span.Attributes); len(attributes) > 0 {
 		out["attributes"] = attributes
 	}
+	// df-005: absent means observed, so only "generated" is served. A client
+	// MUST NOT present such a span as a record of what happened.
+	if derivation, _ := model.NormalizeDerivation(span.Derivation); derivation != "" {
+		out["derivation"] = derivation
+	}
 }
 
 // buildRegionSpan renders a region span per spec §15.1.1: page range plus the
@@ -4397,11 +4402,9 @@ func spanDefinitionSchema() map[string]interface{} {
 						"propertyNames":        map[string]interface{}{"not": map[string]interface{}{"pattern": "^dir2mcp:"}},
 						"description":          "Optional (SPEC 9.10, design 0006): the producer-defined key/value scopes the recognizer attached to this annotation, for example {\"inning\": \"8\"}. Same values the attributes filter matches. Present whenever the stored annotation carries attributes (9.10 MUST); absent on a span that is not a recognition annotation or whose annotation has none.",
 					},
-					// Declared but never emitted by this server: no producer here
-					// sets it yet (#860). It stays in the advertised contract so a
-					// client validating against the canonical common.json and a
-					// client validating against this schema accept the same set of
-					// payloads.
+					// Emitted as "generated" when the recognition backend said a
+					// model described the media (SPEC 8.9.4); absent otherwise,
+					// because absent means observed.
 					"derivation": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"observed", "generated"},
