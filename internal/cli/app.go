@@ -87,6 +87,7 @@ var commands = map[string]struct{}{
 	"print-config":   {},
 	"support-bundle": {},
 	"service":        {},
+	"annotate":       {},
 	"version":        {},
 }
 
@@ -617,6 +618,8 @@ func (a *App) runSimpleCommand(ctx context.Context, globalOpts globalOptions, co
 		return a.runSupportBundle(ctx, globalOpts, args), true
 	case "service":
 		return a.runService(ctx, globalOpts, args), true
+	case "annotate":
+		return a.runAnnotate(globalOpts, args), true
 	default:
 		return 0, false
 	}
@@ -672,6 +675,7 @@ func (a *App) printUsage() {
 		{"print-config", "print the client config for manual setup (never prints the token for claude-code or cursor)"},
 		{"support-bundle", "collect logs + config + status into a shareable tar.gz"},
 		{"service", "auto-start the daemon at login (macOS launchd): install|uninstall|status"},
+		{"annotate", "stage external editorial annotations: annotate import <file.jsonl> --source <name> [--key stem|rel_path|content_hash]"},
 		{"version", "print build version"},
 	}
 	for _, c := range cmds {
@@ -960,6 +964,11 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	embedder, generator, etm, ecm := a.resolveModelClients(cfg)
 	ret := retrieval.NewService(st, textIx, embedder, generator)
 	if err := configureSecretPolicy(ret, cfg); err != nil {
+		_ = textIx.Close()
+		_ = codeIx.Close()
+		return nil, nil, err
+	}
+	if err := ret.SetEditorialNameFolds(cfg.AnnotationsNameFolds); err != nil {
 		_ = textIx.Close()
 		_ = codeIx.Close()
 		return nil, nil, err

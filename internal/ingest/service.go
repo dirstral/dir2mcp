@@ -399,6 +399,11 @@ type Service struct {
 	onDocumentSkip   func(relPath, docType, reason string)
 	onDocumentSkipMu sync.RWMutex
 
+	// editorial holds the state of the editorial import apply step (SPEC
+	// §7.11): the lock that keeps one apply at a time, the per-document
+	// duration memo and the report callback. See editorial.go.
+	editorial editorialState
+
 	// optional callback invoked with a document's rel_path and the content_hash
 	// its row now holds, every time that row is durably written. The CLI uses it
 	// to keep retrieval-time cross-file dedup (SPEC §9.2) on live state instead
@@ -2083,6 +2088,13 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) Reindex(ctx context.Context) error {
+	// A reindex moves the vector index aside, so the editorial apply step at the
+	// end of this scan writes every editorial representation again (SPEC
+	// §7.11.3). Marked here because the reindex command runs with no indexing
+	// state.
+	s.editorial.reindexing.Store(true)
+	defer s.editorial.reindexing.Store(false)
+	s.markEditorialRebuildPending()
 	if s.indexingState != nil {
 		s.indexingState.SetMode(appstate.ModeFull)
 		s.indexingState.SetRunning(true)
@@ -2095,6 +2107,12 @@ func (s *Service) runScan(ctx context.Context) error {
 	if s.store == nil {
 		return errors.New("ingest store is not configured")
 	}
+	// A scan writes documents. The staged-import poller takes this lock
+	// exclusively, so it never applies an import while a scan (initial,
+	// reindex, watch rescan) writes (SPEC §7.11.1, one writer).
+	s.editorial.writeMu.RLock()
+	defer s.editorial.writeMu.RUnlock()
+	defer s.editorial.scansDone.Add(1)
 	// SPEC §8.2.4: the route-fallback gate reads one index per scan.
 	s.loadRouteFallbackIndex(ctx)
 	defer s.clearRouteFallbackIndex()
@@ -2304,6 +2322,10 @@ func (s *Service) finishScan(ctx context.Context, existing, seen map[string]stru
 	if err := s.markMissingAsDeleted(ctx, existing, seen); err != nil {
 		return err
 	}
+	// The scan writes the index, so it applies staged editorial imports and
+	// rebuilds the retained ones (SPEC §7.11.1, §7.11.3). Never fatal: an
+	// editorial failure must not fail the scan that indexed the corpus.
+	s.runEditorialPassLogged(ctx, s.isFullReindex())
 	s.commitOutputReconciliation(ctx)
 	return nil
 }

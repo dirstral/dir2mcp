@@ -46,6 +46,7 @@ func TestRepoSplitBoundary_CLICommandSurface(t *testing.T) {
 		"print-config":   {},
 		"support-bundle": {},
 		"service":        {},
+		"annotate":       {},
 		"version":        {},
 	}
 
@@ -175,6 +176,7 @@ func TestRepoSplitBoundary_InternalCLIFileOwnership(t *testing.T) {
 	}
 
 	allowed := map[string]struct{}{
+		"annotate.go":                            {},
 		"app.go":                                 {},
 		"ask.go":                                 {},
 		"bridge.go":                              {},

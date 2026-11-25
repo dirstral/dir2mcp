@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -82,17 +83,76 @@ func clampCitationTagSpans(answer string, citations []model.Citation) (string, i
 		if !ok {
 			return match
 		}
+		shown, sameProvenance := narrowByProvenance(match, shown)
 		block, inside := resolveTagToBlock(tag, shown)
-		if inside {
+		// A tag inside a block of its own provenance stays as written. A tag
+		// whose provenance no shown block has is rewritten to the canonical
+		// form of the block it lands in (SPEC §9.3): an editorial hit is never
+		// cited as a transcript citation alone, and an editor annotation
+		// names the source that was shown.
+		if inside && sameProvenance {
 			return match
 		}
 		clamped++
 		// inlineCitationRe absorbs one leading whitespace character; keep it,
 		// so a rewrite never glues the tag to the word before it.
 		lead := match[:strings.IndexByte(match, '[')]
-		return lead + FormatCitation(block.citation.RelPath, clampedSpan(tag, block))
+		return lead + FormatHitCitation(block.citation.RelPath, block.citation.RepType, clampedSpan(tag, block))
 	})
 	return out, clamped
+}
+
+// narrowByProvenance keeps the shown blocks whose provenance the tag names. A
+// plain tag resolves to non-editorial blocks; an editor annotation tag (SPEC
+// §9.3) resolves to the editorial blocks of the source it names. exact is false
+// when no shown block has that provenance: the list then holds every block of
+// the document, and the caller rewrites the tag to the label of the block it
+// lands in.
+func narrowByProvenance(match string, shown []shownBlock) (blocks []shownBlock, exact bool) {
+	const marker = " › editor annotation ("
+	i := strings.Index(match, marker)
+	wantEditorial := i >= 0
+	var out []shownBlock
+	for _, b := range shown {
+		if editorial.IsRepType(strings.TrimSpace(b.citation.RepType)) == wantEditorial {
+			out = append(out, b)
+		}
+	}
+	if wantEditorial {
+		out = blocksOfSource(tagSourceName(match[i+len(marker):]), out)
+	}
+	if len(out) == 0 {
+		return shown, false
+	}
+	return out, true
+}
+
+// tagSourceName reads the source name of an editor annotation label, the text
+// before ", match " or the closing parenthesis.
+func tagSourceName(label string) string {
+	end := strings.LastIndex(label, ")")
+	if end < 0 {
+		return ""
+	}
+	label = label[:end]
+	if j := strings.LastIndex(label, ", match "); j >= 0 {
+		label = label[:j]
+	}
+	return strings.TrimSpace(label)
+}
+
+// blocksOfSource keeps the editorial blocks whose span names the source.
+func blocksOfSource(source string, blocks []shownBlock) []shownBlock {
+	var out []shownBlock
+	for _, b := range blocks {
+		for _, s := range model.NormalizeSources(b.citation.Span.Sources) {
+			if s == source {
+				out = append(out, b)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // shownBlocksFor returns the in-context citations a tag path names, by full

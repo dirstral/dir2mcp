@@ -77,6 +77,8 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 		return exitConfigInvalid
 	}
 
+	a.wireReindexEditorialEvents(global, ing)
+
 	if code := a.armTranscriptRepairs(ctx, global, opts, cfg, st, ing); code != exitSuccess {
 		staging.restoreContentHashes(ctx, a.stderr)
 		a.closeStoreWithLog(st)

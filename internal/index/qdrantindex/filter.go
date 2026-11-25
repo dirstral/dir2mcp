@@ -58,6 +58,10 @@ func canFilter(filter model.Filter) bool {
 	if len(filter.Entities) != 0 || len(filter.Events) != 0 {
 		return false
 	}
+	// Sources (SPEC §9.11) also lives only on the span: same reason.
+	if len(filter.Sources) != 0 {
+		return false
+	}
 	return true
 }
 

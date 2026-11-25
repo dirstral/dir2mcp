@@ -84,6 +84,42 @@ span RECORDS or DESCRIBES. `sources` says WHICH component produced it, which
 matters when two recognizers both observed and disagree. Both are optional and
 omitted when absent, never served as `null` or `[]`.
 
+### Editorial annotations in results
+
+An imported editorial annotation (`dir2mcp annotate import`, SPEC §7.11) is its
+own hit with `rep_type: editorial`. It is an editor's note from the named
+source, not words spoken in the media and not model output. Its span carries:
+
+| Field | Meaning |
+|---|---|
+| `event` | `appears` (a person), `segment` (a timecoded segment) or `description` (the document-level text) |
+| `entities` | on a person hit, the normalized person id |
+| `sources` | `[<import source name>]` |
+| `attributes` | `display_name` and `role` on a person hit; on every hit the match provenance (`match_score`, `external_id`, `external_name`, `external_date`, `match_<member>`) and each extra field of the record |
+
+A person or segment hit has a `time` span when the media duration is known. A
+description hit has a `document` span, which carries the same four fields. An
+editorial hit has no `derivation`.
+
+Filters on editorial hits:
+
+- `entities`: a requested value is normalized like a stored person id (see
+  [`annotations.name_folds`](configuration.md#editorial-person-ids-annotationsname_folds))
+  before the comparison. Against a recognition hit the comparison stays
+  literal.
+- `events`, `attributes`: as for recognition hits, for example
+  `attributes: {"content_id": ["C-1001"]}`.
+- `sources` (`dir2mcp_search`, `dir2mcp_ask`, SPEC §9.11): keeps only
+  annotation hits whose span `sources` contains a requested value. With the
+  import source name it selects that source's hits. A recognizer tag is in the
+  same namespace, so do not name an import source after a recognizer tag of the
+  same corpus, and check `rep_type: editorial` when you must isolate editorial
+  hits.
+
+A citation of an editorial hit names the source and the score, for example
+`[news.mp4@t=00:04-01:12 › editor annotation (example-catalogue, match 1.25)]`
+or `[news.mp4 › editor annotation (example-catalogue)]` without a score.
+
 ### Inline citation tags in an answer
 
 An `ask` answer cites inline with the bracketed tag of the context block the
