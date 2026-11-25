@@ -1,8 +1,6 @@
 package editorial
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -80,16 +79,101 @@ func Stage(stateDir string, staged Staged, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
+	return publishInOrder(dir, data, now.UTC().UnixNano())
+}
+
+// publishInOrder writes data under the next free order key: never below the
+// key of an import that is still staged, so a clock that goes back or two
+// imports in the same nanosecond keep their staging order. The final name is
+// claimed with a hard link, which fails when the name exists, so two
+// concurrent commands never take the same key.
+func publishInOrder(dir string, data []byte, key int64) (string, error) {
+	if last, err := lastStagedKey(dir); err == nil && last >= key {
+		key = last + 1
+	}
+	tmp, err := os.CreateTemp(dir, ".stage.tmp-*")
+	if err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%020d-%s.json", now.UTC().UnixNano(), hex.EncodeToString(suffix))
-	path := filepath.Join(dir, name)
-	if err := writeAtomic(path, data); err != nil {
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := writeAndClose(tmp, data); err != nil {
 		return "", err
 	}
-	return path, nil
+	for attempt := 0; attempt < 1000; attempt++ {
+		path := filepath.Join(dir, fmt.Sprintf("%020d.json", key))
+		err := os.Link(tmpPath, path)
+		if err == nil {
+			return path, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		key++
+	}
+	return "", errors.New("no free staging name")
+}
+
+// lastStagedKey returns the largest order key among the staged files.
+func lastStagedKey(dir string) (int64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	var last int64 = -1
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if n, perr := strconv.ParseInt(strings.TrimSuffix(name, ".json"), 10, 64); perr == nil && n > last {
+			last = n
+		}
+	}
+	return last, nil
+}
+
+func writeAndClose(f *os.File, data []byte) error {
+	if err := f.Chmod(fileMode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// rebuildMarkerName is the file that records a pending forced rebuild.
+const rebuildMarkerName = "rebuild-pending"
+
+// MarkRebuildPending records that every editorial representation must be
+// written again by the next apply pass.
+func MarkRebuildPending(stateDir string) error {
+	if err := os.MkdirAll(ImportsDir(stateDir), dirMode); err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(ImportsDir(stateDir), rebuildMarkerName), []byte("1\n"))
+}
+
+// RebuildPending reports whether a forced rebuild is pending.
+func RebuildPending(stateDir string) bool {
+	_, err := os.Stat(filepath.Join(ImportsDir(stateDir), rebuildMarkerName))
+	return err == nil
+}
+
+// ClearRebuildPending removes the marker after a forced rebuild succeeded.
+func ClearRebuildPending(stateDir string) error {
+	err := os.Remove(filepath.Join(ImportsDir(stateDir), rebuildMarkerName))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // ListStaged returns the staged import files in staging order. A temporary

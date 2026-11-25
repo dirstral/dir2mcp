@@ -297,28 +297,15 @@ func TestEditorialProvenanceAndSourceFilter(t *testing.T) {
 	}
 	sawDocumentSpan := false
 	for _, h := range hits {
-		span := h["span"].(map[string]interface{})
-		if h["rep_type"] != "editorial" || !reflect.DeepEqual(span["sources"], []interface{}{edSource}) {
-			t.Fatalf("the source filter returned a hit that is not from the source: %v", h)
-		}
-		if _, has := span["derivation"]; has {
-			t.Fatalf("an editorial span carries derivation: %v", span)
-		}
-		if h["rel_path"] == "first.mp4" {
-			attrs, _ := span["attributes"].(map[string]interface{})
-			if attrs["match_score"] != "1.25" || attrs["external_id"] != "X-2002" {
-				t.Fatalf("first.mp4 hit attributes = %v", attrs)
-			}
-		}
-		if span["kind"] == "document" {
+		if assertEditorialHitProvenance(t, h, validator) {
 			sawDocumentSpan = true
-		}
-		if err := validator.Validate(span); err != nil {
-			t.Fatalf("served editorial span is invalid against the canonical Span: %v\n%v", err, span)
 		}
 	}
 	if !sawDocumentSpan {
 		t.Fatal("no description hit with a document span was served")
+	}
+	if got := searchHits(t, srv, cfg, `{"query":"Пётр","sources":[" `+edSource+`"],"k":50}`); len(got) != 0 {
+		t.Fatalf("a source value with a leading space matched %d hits; the filter is literal", len(got))
 	}
 	if got := searchHits(t, srv, cfg, `{"query":"Пётр","sources":["face"],"k":50}`); len(got) != 1 || got[0]["rep_type"] != "recognition" {
 		t.Fatalf("sources:[face] returned %d hits, want the one recognition hit", len(got))
@@ -328,6 +315,29 @@ func TestEditorialProvenanceAndSourceFilter(t *testing.T) {
 	if !strings.Contains(text, "editor annotation ("+edSource+", match 1.25)") {
 		t.Fatalf("the search text does not render the editor annotation label:\n%s", text)
 	}
+}
+
+// assertEditorialHitProvenance checks one hit of the source filter and reports
+// whether its span is a document span.
+func assertEditorialHitProvenance(t *testing.T, h map[string]interface{}, validator interface{ Validate(any) error }) bool {
+	t.Helper()
+	span := h["span"].(map[string]interface{})
+	if h["rep_type"] != "editorial" || !reflect.DeepEqual(span["sources"], []interface{}{edSource}) {
+		t.Fatalf("the source filter returned a hit that is not from the source: %v", h)
+	}
+	if _, has := span["derivation"]; has {
+		t.Fatalf("an editorial span carries derivation: %v", span)
+	}
+	if h["rel_path"] == "first.mp4" {
+		attrs, _ := span["attributes"].(map[string]interface{})
+		if attrs["match_score"] != "1.25" || attrs["external_id"] != "X-2002" {
+			t.Fatalf("first.mp4 hit attributes = %v", attrs)
+		}
+	}
+	if err := validator.Validate(span); err != nil {
+		t.Fatalf("served editorial span is invalid against the canonical Span: %v\n%v", err, span)
+	}
+	return span["kind"] == "document"
 }
 
 // TestEditorialCitationForm pins the SPEC §9.3 citation forms.

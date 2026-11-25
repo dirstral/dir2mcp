@@ -338,6 +338,32 @@ func TestEditorialApply_RetainedRecordsSurviveRebuildAndGoWithTombstone(t *testi
 	}
 }
 
+// A reindex leaves a rebuild marker: the next pass writes every editorial
+// representation again, so its chunks are embedded into the new vector index,
+// and the marker is cleared only after that pass succeeds.
+func TestEditorialApply_PendingRebuildRewritesAndEmbedsAgain(t *testing.T) {
+	e := newEditorialEnv(t, nil)
+	e.addDoc("news.mp4", "video", "ok", time.Minute)
+	e.stage(edSource, editorial.KeyStem, `{"stem": "news", "header": "Шапка"}`)
+	e.apply()
+	e.markAllEmbedded()
+
+	e.apply()
+	if got := e.pendingChunks(); got != 0 {
+		t.Fatalf("an unchanged pass re-pended %d chunks", got)
+	}
+	if err := editorial.MarkRebuildPending(e.stateDir); err != nil {
+		t.Fatal(err)
+	}
+	e.apply()
+	if got := e.pendingChunks(); got == 0 {
+		t.Fatal("the pending rebuild did not write the editorial chunks again")
+	}
+	if editorial.RebuildPending(e.stateDir) {
+		t.Fatal("the marker survived a successful forced pass")
+	}
+}
+
 // The scan writes the index, so it applies a staged import at its end: this is
 // the path of the next `up` or `reindex` (SPEC §7.11.1).
 func TestEditorialApply_ScanAppliesStagedImport(t *testing.T) {

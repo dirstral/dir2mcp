@@ -2094,6 +2094,7 @@ func (s *Service) Reindex(ctx context.Context) error {
 	// state.
 	s.editorial.reindexing.Store(true)
 	defer s.editorial.reindexing.Store(false)
+	s.markEditorialRebuildPending()
 	if s.indexingState != nil {
 		s.indexingState.SetMode(appstate.ModeFull)
 		s.indexingState.SetRunning(true)

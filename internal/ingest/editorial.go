@@ -67,7 +67,13 @@ type editorialState struct {
 type editorialDurationMemo struct {
 	contentHash string
 	duration    editorial.Duration
+	probedAt    time.Time
 }
+
+// editorialUnknownDurationRetry is how long an unknown duration is reused
+// before the media is probed again. A known duration is reused for as long as
+// the content is unchanged.
+const editorialUnknownDurationRetry = 10 * time.Minute
 
 // editorialMeta is the meta_json of an editorial representation (SPEC §7.11.4).
 // It records no provider or model: the representation is authored data.
@@ -154,7 +160,27 @@ func (s *Service) runEditorialPass(ctx context.Context, force bool) error {
 			return err
 		}
 	}
-	return s.rebuildRetainedEditorial(ctx, es, folds, matcher, force)
+	// A reindex leaves a marker until a forced rebuild succeeds, so a failed
+	// forced pass is retried by the next pass, also after a restart.
+	force = force || editorial.RebuildPending(s.cfg.StateDir)
+	if err := s.rebuildRetainedEditorial(ctx, es, folds, matcher, force); err != nil {
+		return err
+	}
+	if force {
+		return editorial.ClearRebuildPending(s.cfg.StateDir)
+	}
+	return nil
+}
+
+// markEditorialRebuildPending records that every editorial representation
+// must be written again, because a reindex moved the vector index aside.
+func (s *Service) markEditorialRebuildPending() {
+	if strings.TrimSpace(s.cfg.StateDir) == "" {
+		return
+	}
+	if err := editorial.MarkRebuildPending(s.cfg.StateDir); err != nil {
+		s.getLogger().Printf("editorial import: mark rebuild pending: %v", err)
+	}
 }
 
 // editorialRun carries what one apply needs about the import and the corpus.
@@ -551,7 +577,8 @@ func (s *Service) editorialMetaJSON(r editorial.Retained, rec editorial.Record, 
 // A failed probe is an unknown duration, never an error.
 func (s *Service) editorialDuration(ctx context.Context, doc store.EditorialDocument) editorial.Duration {
 	s.editorial.memoMu.Lock()
-	if memo, ok := s.editorial.durations[doc.RelPath]; ok && memo.contentHash == doc.ContentHash {
+	if memo, ok := s.editorial.durations[doc.RelPath]; ok && memo.contentHash == doc.ContentHash &&
+		(memo.duration.Known || time.Since(memo.probedAt) < editorialUnknownDurationRetry) {
 		s.editorial.memoMu.Unlock()
 		return memo.duration
 	}
@@ -562,7 +589,7 @@ func (s *Service) editorialDuration(ctx context.Context, doc store.EditorialDocu
 	if s.editorial.durations == nil {
 		s.editorial.durations = map[string]editorialDurationMemo{}
 	}
-	s.editorial.durations[doc.RelPath] = editorialDurationMemo{contentHash: doc.ContentHash, duration: duration}
+	s.editorial.durations[doc.RelPath] = editorialDurationMemo{contentHash: doc.ContentHash, duration: duration, probedAt: time.Now()}
 	s.editorial.memoMu.Unlock()
 	return duration
 }

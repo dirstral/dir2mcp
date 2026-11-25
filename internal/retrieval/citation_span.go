@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -82,6 +83,7 @@ func clampCitationTagSpans(answer string, citations []model.Citation) (string, i
 		if !ok {
 			return match
 		}
+		shown = narrowByProvenance(match, shown)
 		block, inside := resolveTagToBlock(tag, shown)
 		if inside {
 			return match
@@ -93,6 +95,24 @@ func clampCitationTagSpans(answer string, citations []model.Citation) (string, i
 		return lead + FormatHitCitation(block.citation.RelPath, block.citation.RepType, clampedSpan(tag, block))
 	})
 	return out, clamped
+}
+
+// narrowByProvenance keeps the shown blocks whose provenance the tag names: an
+// editor annotation tag (SPEC §9.3) resolves only to editorial blocks, and any
+// other tag only to non-editorial blocks. When no block has that provenance the
+// list is returned unchanged, so a tag still resolves to its document.
+func narrowByProvenance(match string, shown []shownBlock) []shownBlock {
+	wantEditorial := strings.Contains(match, " › editor annotation (")
+	var out []shownBlock
+	for _, b := range shown {
+		if editorial.IsRepType(strings.TrimSpace(b.citation.RepType)) == wantEditorial {
+			out = append(out, b)
+		}
+	}
+	if len(out) == 0 {
+		return shown
+	}
+	return out
 }
 
 // shownBlocksFor returns the in-context citations a tag path names, by full

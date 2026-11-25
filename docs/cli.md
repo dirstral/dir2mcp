@@ -73,6 +73,9 @@ dir2mcp annotate import catalogue.jsonl --source example-catalogue
 dir2mcp annotate import catalogue.jsonl --source example-catalogue --key rel_path
 ```
 
+The source name is 1 to 128 characters, with no control characters and no
+white space at its start or end. The `sources` filter matches it literally.
+
 The file has one JSON object per line. A record names its document with the
 field that `--key` selects:
 

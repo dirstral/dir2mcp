@@ -60,6 +60,11 @@ func ValidateSource(source string) error {
 			return errors.New("--source contains a control character")
 		}
 	}
+	// A span stores its sources trimmed, so a name with surrounding white
+	// space could never be selected by the literal source filter (SPEC §9.11).
+	if strings.TrimSpace(source) != source {
+		return errors.New("--source must not start or end with white space")
+	}
 	return nil
 }
 
@@ -215,11 +220,16 @@ func (rec *Record) readDefined(obj map[string]any, keyKind, source string, ignor
 
 // checkSource enforces that an optional `source` equals `--source`.
 func checkSource(obj map[string]any, source string) error {
-	value, err := optionalString(obj, "source")
-	if err != nil {
-		return err
+	raw, present := obj["source"]
+	if !present || raw == nil {
+		return nil
 	}
-	if _, present := obj["source"]; present && obj["source"] != nil && value != source {
+	value, ok := raw.(string)
+	if !ok {
+		return errors.New("source is not a string")
+	}
+	// Compared as written: a source name is matched literally (SPEC §9.11).
+	if value != source {
 		return errors.New("source differs from --source")
 	}
 	return nil
@@ -292,6 +302,9 @@ func readMatch(value any, ignored map[string]struct{}) (*Match, error) {
 	}
 	return m, nil
 }
+
+// integerLiteralRe is a JSON number with no fraction and no exponent.
+var integerLiteralRe = regexp.MustCompile(`^-?\d+$`)
 
 // externalDateRe is the `YYYY-MM-DD` shape of match.external_date.
 var externalDateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
@@ -534,6 +547,15 @@ func scalarString(value any) (string, bool) {
 
 // formatNumber renders a JSON number in its shortest decimal form.
 func formatNumber(n json.Number) string {
+	// An integer literal is kept exactly as written: a float64 round trip
+	// would change an identifier above 2^53. JSON has no leading zeros, so the
+	// literal is already its shortest form.
+	if s := n.String(); integerLiteralRe.MatchString(s) {
+		if s == "-0" {
+			return "0"
+		}
+		return s
+	}
 	f, err := n.Float64()
 	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
 		return n.String()

@@ -65,6 +65,7 @@ func TestParseRecord_InvalidRecords(t *testing.T) {
 		"reserved defined name":    `{"stem": "a", "role": "x"}`,
 		"reserved dir2mcp: prefix": `{"stem": "a", "dir2mcp:x": "y"}`,
 		"source differs":           `{"stem": "a", "source": "other"}`,
+		"source differs by spaces": `{"stem": "a", "source": " example-catalogue"}`,
 		"wrong type":               `{"stem": "a", "header": 7}`,
 		"missing key":              `{"rel_path": "a.mp4"}`,
 		"empty key":                `{"stem": "  "}`,
@@ -138,6 +139,12 @@ func TestScalarAttributeFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{"n": "1", "big": "1000000000000000000000", "f": "false", "s": " as written "}
+	if err == nil {
+		exact, _ := editorial.ParseRecord([]byte(`{"stem": "a", "asset": 9007199254740993}`), editorial.KeyStem, "s")
+		if exact.Extra["asset"] != "9007199254740993" {
+			t.Fatalf("an integer above 2^53 changed: %q", exact.Extra["asset"])
+		}
+	}
 	if !reflect.DeepEqual(rec.Extra, want) {
 		t.Fatalf("extra = %v, want %v", rec.Extra, want)
 	}
@@ -152,6 +159,9 @@ func TestValidateSourceAndKey(t *testing.T) {
 	}
 	if err := editorial.ValidateSource("a\tb"); err == nil {
 		t.Error("a source with a control character was accepted")
+	}
+	if err := editorial.ValidateSource(" wire "); err == nil {
+		t.Error("a source with surrounding white space was accepted")
 	}
 	if err := editorial.ValidateSource(strings.Repeat("я", 128)); err != nil {
 		t.Errorf("a 128-character source was refused: %v", err)

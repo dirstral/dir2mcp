@@ -757,7 +757,7 @@ func (f Filter) MatchesAnnotation(span Span) bool {
 	}
 	// SPEC §9.11: literal, OR within the field. A span with no sources (every
 	// non-annotation chunk) never matches a non-empty filter.
-	if len(f.Sources) > 0 && !MatchesAnyLiteral(f.Sources, span.Sources) {
+	if len(f.Sources) > 0 && !matchesAnyExact(f.Sources, span.Sources) {
 		return false
 	}
 	for key, values := range f.Attributes {
@@ -777,6 +777,19 @@ func (f Filter) MatchesAnnotation(span Span) bool {
 		}
 	}
 	return true
+}
+
+// matchesAnyExact reports whether any requested value equals any candidate,
+// byte for byte, with no trimming (SPEC §9.11: values match literally).
+func matchesAnyExact(requested, candidate []string) bool {
+	for _, r := range requested {
+		for _, c := range candidate {
+			if r == c {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasAttributeConstraint reports whether the attributes filter actually

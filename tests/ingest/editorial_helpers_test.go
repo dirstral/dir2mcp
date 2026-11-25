@@ -197,6 +197,48 @@ func (e *editorialEnv) chunks(relPath, repPredicate string) []edAnnotation {
 	return out
 }
 
+// markAllEmbedded marks every live chunk embedded, as the embed worker would.
+func (e *editorialEnv) markAllEmbedded() {
+	e.t.Helper()
+	db, err := e.st.EnsureDB(e.ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	rows, err := db.QueryContext(e.ctx, `SELECT chunk_id FROM chunks WHERE deleted = 0`)
+	if err != nil {
+		e.st.ReleaseDB()
+		e.t.Fatal(err)
+	}
+	var labels []uint64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			e.t.Fatal(err)
+		}
+		labels = append(labels, uint64(id))
+	}
+	_ = rows.Close()
+	e.st.ReleaseDB()
+	if err := e.st.MarkEmbedded(e.ctx, labels); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// pendingChunks counts the live chunks that wait for an embedding.
+func (e *editorialEnv) pendingChunks() int {
+	e.t.Helper()
+	db, err := e.st.EnsureDB(e.ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer e.st.ReleaseDB()
+	var n int
+	if err := db.QueryRowContext(e.ctx, `SELECT COUNT(*) FROM chunks WHERE deleted = 0 AND embedding_status = 'pending'`).Scan(&n); err != nil {
+		e.t.Fatal(err)
+	}
+	return n
+}
+
 // editorialMeta reads the meta_json and rep_hash of the source's editorial
 // representation on a document.
 func (e *editorialEnv) editorialMeta(relPath, source string) (map[string]any, string) {

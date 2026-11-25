@@ -2710,16 +2710,28 @@ type scopeFilters struct {
 // non-empty strings matched literally against a span's `sources`. A source name
 // is free text, so no vocabulary is checked; an unknown value matches nothing.
 func parseSourcesArg(args map[string]interface{}) ([]string, *toolExecutionError) {
-	sources, err := parseOptionalStringSlice(args, "sources")
-	if err != nil {
-		return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	raw, ok := args["sources"]
+	if !ok || raw == nil {
+		return nil, nil
 	}
-	for _, v := range sources {
-		if strings.TrimSpace(v) == "" {
-			return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: "sources contains an empty value", Retryable: false}
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: "sources must be an array of strings", Retryable: false}
+	}
+	// Values are kept as sent: the filter matches literally (SPEC 9.11), so a
+	// value is never trimmed into another source name.
+	out := make([]string, 0, len(items))
+	for idx, item := range items {
+		v, ok := item.(string)
+		if !ok {
+			return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: fmt.Sprintf("sources[%d] must be a string", idx), Retryable: false}
 		}
+		if strings.TrimSpace(v) == "" {
+			return nil, &toolExecutionError{Code: "INVALID_FIELD", Message: fmt.Sprintf("sources[%d] must be a non-empty string", idx), Retryable: false}
+		}
+		out = append(out, v)
 	}
-	return sources, nil
+	return out, nil
 }
 
 // parseAttributesArg parses the optional §9.10 attributes filter: an object
