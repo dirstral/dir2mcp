@@ -66,9 +66,7 @@ func (e *editorialEnv) newService(folds, secretPatterns []string) {
 	}
 	e.svc = mustNewIngestService(e.t, cfg, e.st)
 	e.svc.ProbeDurationFunc = func(_ context.Context, path string) (time.Duration, error) {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		return e.duration[filepath.Base(path)], nil
+		return e.durationFor(path), nil
 	}
 	e.svc.SetOnEditorialImport(func(_ string, r editorial.Report) {
 		e.mu.Lock()
@@ -98,8 +96,24 @@ func (e *editorialEnv) addDoc(relPath, docType, status string, duration time.Dur
 
 func (e *editorialEnv) setDuration(relPath string, d time.Duration) {
 	e.mu.Lock()
-	e.duration[filepath.Base(relPath)] = d
+	e.duration[relPath] = d
 	e.mu.Unlock()
+}
+
+// durationFor maps the absolute path the probe receives back to the longest
+// corpus-relative path it ends with, so two files with one base name in
+// different directories keep their own durations.
+func (e *editorialEnv) durationFor(absPath string) time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	slashed := filepath.ToSlash(absPath)
+	best, bestLen := time.Duration(0), -1
+	for rel, d := range e.duration {
+		if strings.HasSuffix(slashed, "/"+rel) && len(rel) > bestLen {
+			best, bestLen = d, len(rel)
+		}
+	}
+	return best
 }
 
 // stage validates and stages an import file the way `annotate import` does.
