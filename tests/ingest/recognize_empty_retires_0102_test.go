@@ -2,10 +2,12 @@ package tests
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +119,55 @@ func TestRecognition0102_ServeClientDropsInvalidRawSeconds(t *testing.T) {
 	}
 	if len(res.Annotations) != 1 || res.Annotations[0].Text != "instantaneous and valid" {
 		t.Fatalf("want only the valid zero-length annotation, got %+v", res.Annotations)
+	}
+}
+
+// TestRecognition0102_EmptyAnswerForUnchangedMediaKeepsTheStatements: the other
+// half of §8.9.4. A forced reindex of the SAME media against a backend that now
+// answers with nothing (a fault, most probably) must keep the earlier
+// statements and log a warning, or one faulty backend could erase the
+// annotations of a whole corpus.
+func TestRecognition0102_EmptyAnswerForUnchangedMediaKeepsTheStatements(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "broadcast.mp4"), "fake-video-bytes-v1")
+
+	st := store.NewSQLiteStore(filepath.Join(testutil.TempDir(t), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	logs := &syncBuffer{}
+	rec := &scriptedRecognizer{results: []model.RecognizeResult{
+		{Name: "test", Version: "1", Annotations: []model.RecognizedAnnotation{
+			{StartMS: 0, EndMS: 1000, Text: "Webb throws a curveball", Event: "pitch"},
+		}},
+		{Name: "test", Version: "1"},
+	}}
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = testutil.TempDir(t)
+	cfg.RecognizeProvider = "serve"
+	cfg.STTProvider = "off"
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetRecognizer(rec)
+	svc.SetLogger(log.New(logs, "", 0))
+	svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, os.ErrNotExist }
+
+	f := ingest.DiscoveredFile{RelPath: "broadcast.mp4", SizeBytes: 19, MTimeUnix: time.Now().Unix()}
+	for pass := 1; pass <= 2; pass++ {
+		if err := svc.ProcessDocument(ctx, f, nil, true); err != nil {
+			t.Fatalf("ProcessDocument pass %d: %v", pass, err)
+		}
+	}
+	if rec.calls != 2 {
+		t.Fatalf("recognizer calls = %d, want 2 (the second pass is a forced reindex)", rec.calls)
+	}
+	if hits, _ := st.SearchBM25(ctx, "curveball", 5, ""); len(hits) == 0 {
+		t.Fatal("an empty answer for unchanged media erased the earlier statements")
+	}
+	if !strings.Contains(logs.String(), "returned no annotation for unchanged media") {
+		t.Fatalf("no warning names the empty answer; logs:\n%s", logs.String())
 	}
 }

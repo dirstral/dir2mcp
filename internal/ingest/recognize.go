@@ -782,10 +782,9 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 	segments, hashInput := recognitionSegments(result.Annotations)
 	if len(segments) == 0 {
 		// A successful call with nothing to persist is an ANSWER, not a failure
-		// (SPEC §8.9.4): the backend no longer makes the statements it made on
-		// an earlier run, so those statements must stop answering queries. A
-		// failed call never reaches here (§8.9.6 keeps them).
-		return false, s.retireRecognition(ctx, doc)
+		// (SPEC §8.9.4). A failed call never reaches here (§8.9.6 keeps the
+		// earlier statements).
+		return false, s.settleEmptyRecognition(ctx, doc)
 	}
 	dictionary, dictionaryHash := recognitionEntityDictionary(result.Entities, segments)
 	hashInput += dictionaryHash
@@ -832,11 +831,51 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 	return true, nil
 }
 
+// settleEmptyRecognition decides what a successful recognition call that left
+// no annotation does to the document's earlier recognition (SPEC §8.9.4).
+//
+// When the media CHANGED, the earlier statements describe content that is gone,
+// so they are retired. When the media is the same, or the daemon cannot tell
+// (no stored content_hash, an archive member), they are KEPT with a warning: for
+// unchanged media an empty answer is more probably a backend fault than a real
+// change, and a reindex against a faulty backend must not erase the
+// annotations of a whole corpus.
+func (s *Service) settleEmptyRecognition(ctx context.Context, doc model.Document) error {
+	if s.contentChangedThisDoc && !s.archiveMemberThisDoc {
+		return s.retireRecognition(ctx, doc)
+	}
+	if s.hasActiveRecognition(ctx, doc.RelPath) {
+		s.getLogger().Printf("warning: recognition of %s returned no annotation for unchanged media; "+
+			"keeping its earlier recognition (SPEC §8.9.4). Check the recognition backend if this repeats", doc.RelPath)
+	}
+	return nil
+}
+
+// hasActiveRecognition reports whether the document has an active recognition
+// representation. A store without the optional capability, or a read error,
+// answers false: it only decides whether a warning is worth logging.
+func (s *Service) hasActiveRecognition(ctx context.Context, relPath string) bool {
+	lister, ok := s.store.(activeRepresentationLister)
+	if !ok {
+		return false
+	}
+	reps, err := lister.ActiveRepresentations(ctx, relPath)
+	if err != nil {
+		return false
+	}
+	for _, rep := range reps {
+		if rep.RepType == RepTypeRecognition {
+			return true
+		}
+	}
+	return false
+}
+
 // retireRecognition soft-deletes the document's active recognition
 // representations, and the summaries derived from them (§8.6.7), after a
-// successful recognition call that left no annotation (SPEC §8.9.4). A store
-// without the optional list/retire capability, or a document with nothing
-// stored yet, has nothing to retire.
+// successful recognition call that left no annotation for CHANGED media (SPEC
+// §8.9.4). A store without the optional list/retire capability, or a document
+// with nothing stored yet, has nothing to retire.
 func (s *Service) retireRecognition(ctx context.Context, doc model.Document) error {
 	lister, listOK := s.store.(activeRepresentationLister)
 	retirer, retireOK := s.store.(representationRetirer)
@@ -864,7 +903,7 @@ func (s *Service) retireRecognition(ctx context.Context, doc model.Document) err
 	if err != nil {
 		return fmt.Errorf("retire recognition of %s: %w", doc.RelPath, err)
 	}
-	s.getLogger().Printf("recognition of %s returned no annotation; retired %d representation(s) so its earlier statements stop answering queries (SPEC §8.9.4)",
+	s.getLogger().Printf("recognition of changed media %s returned no annotation; retired %d representation(s) so its earlier statements stop answering queries (SPEC §8.9.4)",
 		doc.RelPath, retired)
 	return nil
 }

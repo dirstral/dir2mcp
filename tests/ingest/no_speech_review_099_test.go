@@ -109,11 +109,9 @@ func TestNoSpeech_CandidateWithNoSpeechIsADecodedWindow(t *testing.T) {
 }
 
 // TestNoSpeech_EarlierRecognitionKeepsTheDocumentOK: recognition indexed the
-// video on an earlier run. On a forced reindex recognition does not run (the
-// provider is now off), so this run produces nothing new, but the earlier
-// recognition representation is still active and searchable. The document
-// stays ok. (Before spec 0.102.0 this test made the backend answer with no
-// annotations; §8.9.4 now retires the earlier representation in that case.)
+// video on an earlier run. On a forced reindex the backend returns no
+// annotations, so this run produces nothing new, but the earlier recognition
+// representation is still active and searchable. The document stays ok.
 //
 // Mutant killed: deciding on this run's recognition result alone, which
 // records no_speech and hides the earlier recognition chunks.
@@ -128,26 +126,20 @@ func TestNoSpeech_EarlierRecognitionKeepsTheDocumentOK(t *testing.T) {
 	f := ingest.DiscoveredFile{RelPath: "match.mp4", SizeBytes: 16, MTimeUnix: time.Now().Unix()}
 
 	run := func(rec *fakeRecognizer) {
-		provider := "serve"
-		if rec == nil {
-			provider = "off"
-		}
-		cfg := config.Config{RootDir: root, StateDir: stateDir, STTProvider: "off", RecognizeProvider: provider}
+		cfg := config.Config{RootDir: root, StateDir: stateDir, STTProvider: "off", RecognizeProvider: "serve"}
 		svc := mustNewIngestService(t, cfg, st)
 		svc.SetIndexingState(appstate.NewIndexingState(appstate.ModeIncremental))
 		svc.SetLogger(log.New(&syncBuffer{}, "", 0))
 		svc.SetTranscriber(client)
 		svc.ProbeDurationFunc = func(context.Context, string) (time.Duration, error) { return 0, errors.New("no duration") }
 		svc.ExtractAudioTrackFunc = func(context.Context, string) ([]byte, error) { return []byte("audio-track"), nil }
-		if rec != nil {
-			svc.SetRecognizer(rec)
-		}
+		svc.SetRecognizer(rec)
 		if err := svc.ProcessDocument(ctx, f, nil, true); err != nil {
 			t.Fatalf("ProcessDocument: %v", err)
 		}
 	}
 	run(&fakeRecognizer{result: recognizeTestResult()})
-	run(nil)
+	run(&fakeRecognizer{result: model.RecognizeResult{Name: "dirstral-annotator", Version: "0.2.0"}})
 
 	doc := mustGetDoc(t, st, "match.mp4")
 	if doc.Status != "ok" || doc.SkipReason != "" {

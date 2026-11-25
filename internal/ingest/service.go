@@ -517,6 +517,14 @@ type Service struct {
 	// re-scoped per archive member in generateRepresentations.
 	recognizeIncompleteThisDoc bool
 
+	// contentChangedThisDoc records that the document being processed has a
+	// stored content_hash and that it differs from the content this run reads
+	// (SPEC §8.9.4). An empty recognition answer retires the earlier recognition
+	// only then: for the same media, or when the stored hash is empty, the
+	// earlier statements are kept. Set in processDocument, reset at its entry;
+	// an archive member never counts as changed (archiveMemberThisDoc).
+	contentChangedThisDoc bool
+
 	// trackRetryPendingThisDoc records that a selected audio track of the
 	// document currently being processed failed with a transport or provider
 	// error while the document stays ok through another track (SPEC §8.6.13,
@@ -2862,6 +2870,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	// flag, which withholds the done marker for one document only.
 	s.recognizeIncompleteThisDoc = false
 	s.trackRetryPendingThisDoc = false
+	s.contentChangedThisDoc = false
 	// Open the per-document secret scope (#681) at the same authoritative point,
 	// and before any branch below can produce a derived text. It captures the
 	// pattern set this call was given, so the derived-text scan always uses the
@@ -2912,6 +2921,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 	s.carryNoSpeechSkip(&doc, existingDoc, forceReindex)
 
 	needsProcessing := s.resolveNeedsProcessing(ctx, existingDoc, doc, forceReindex)
+	s.contentChangedThisDoc = contentChanged(existingDoc, doc)
 	finalContentHash, willGenerateReps := withholdContentHash(&doc, needsProcessing)
 	// #502: also withhold the marker for an archive container this run will
 	// (re)extract; finalContentHash still carries the original hash for the deferred
@@ -3071,6 +3081,14 @@ func withholdContentHash(doc *model.Document, needsProcessing bool) (finalConten
 		doc.ContentHash = ""
 	}
 	return finalContentHash, willGenerateReps
+}
+
+// contentChanged reports whether a stored document's content differs from the
+// content this run reads (SPEC §8.9.4). An empty hash on either side means the
+// daemon cannot tell, which counts as NOT changed: the safe direction keeps
+// earlier statements rather than erasing them.
+func contentChanged(existing, doc model.Document) bool {
+	return existing.ContentHash != "" && doc.ContentHash != "" && existing.ContentHash != doc.ContentHash
 }
 
 // withholdArchiveContentHash withholds the content_hash done marker for an archive
@@ -5018,12 +5036,7 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	if recognized {
 		return transcriptSoftFailed, nil
 	}
-	// SPEC §8.6.13 (spec 0.99.0): no_speech applies only when the document has
-	// no other searchable representation. A recognition representation from an
-	// earlier run that is still active keeps the document ok (the transcripts
-	// of this derivation were retired before this point).
-	if verdict == mediaVerdictNoSpeech && s.hasIndexedRepresentations(ctx, doc.RelPath) {
-		s.getLogger().Printf("stt: %s holds no speech but keeps another searchable representation; it stays indexed (SPEC §8.6.13)", doc.RelPath)
+	if s.keptSearchableByEarlierRun(ctx, doc.RelPath, verdict) {
 		return transcriptSoftFailed, nil
 	}
 	settled, err := s.settleUnrepresentedMedia(ctx, doc, secretPatterns, verdict)
@@ -5031,6 +5044,32 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 		return transcriptSoftFailed, err
 	}
 	return settled || transcriptSoftFailed, nil
+}
+
+// keptSearchableByEarlierRun reports whether a media document that produced
+// nothing this run is still searchable through a representation an earlier run
+// left active, so its verdict must not be settled as unsearchable.
+//
+//   - no_speech (SPEC §8.6.13, spec 0.99.0) applies only when the document has
+//     no other searchable representation; the transcripts of this derivation
+//     were retired before this point.
+//   - The no-representation error (#398) must not hide a recognition that
+//     §8.9.4 kept: an empty answer for unchanged media keeps the earlier
+//     statements, and a status="error" stamp would hide exactly those.
+func (s *Service) keptSearchableByEarlierRun(ctx context.Context, relPath string, verdict mediaVerdict) bool {
+	switch verdict {
+	case mediaVerdictNoSpeech:
+		if s.hasIndexedRepresentations(ctx, relPath) {
+			s.getLogger().Printf("stt: %s holds no speech but keeps another searchable representation; it stays indexed (SPEC §8.6.13)", relPath)
+			return true
+		}
+	case mediaVerdictNoRepresentation:
+		if s.hasActiveRecognition(ctx, relPath) {
+			s.getLogger().Printf("%s produced no new representation but keeps its earlier recognition; it stays indexed (SPEC §8.9.4)", relPath)
+			return true
+		}
+	}
+	return false
 }
 
 // degradeIncompleteRecognition settles a document whose recognition FAILED (it ran
