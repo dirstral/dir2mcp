@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dirstral/dir2mcp/internal/editorial"
 	"github.com/dirstral/dir2mcp/internal/model"
 )
 
@@ -69,7 +70,20 @@ func momentKey(h model.SearchHit) (string, bool) {
 	if h.Span.EndMS <= 0 || h.Span.EndMS < h.Span.StartMS {
 		return "", false
 	}
-	return h.RelPath + "\x00" + strconv.Itoa(h.Span.StartMS) + "\x00" + strconv.Itoa(h.Span.EndMS), true
+	return h.RelPath + "\x00" + momentProvenance(h) + "\x00" + strconv.Itoa(h.Span.StartMS) + "\x00" + strconv.Itoa(h.Span.EndMS), true
+}
+
+// momentProvenance is the provenance part of a moment key: the rep_type, and
+// for an editorial hit also its source names. A moment block has one header,
+// so hits of different provenance never share one: editor text must stay
+// apart from transcript text and from a recognizer's reading (SPEC §7.11.4,
+// §9.3), and two import sources must not be cited under one label.
+func momentProvenance(h model.SearchHit) string {
+	repType := strings.TrimSpace(h.RepType)
+	if !editorial.IsRepType(repType) {
+		return repType
+	}
+	return editorial.RepType + "\x00" + strings.Join(model.NormalizeSources(h.Span.Sources), "\x01")
 }
 
 // groupMoments collects the hits that report one event into one moment each.
