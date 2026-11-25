@@ -266,7 +266,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}()
 	startIngestWorker(runCtx, opts.readOnly, ing, indexingState, ingestErrCh, &bgWG)
 	startWatchWorker(runCtx, opts.readOnly, cfg.IngestWatch, cfg.Source.Kind, ing, logSink, &bgWG)
-	startEditorialImportPoller(runCtx, opts.readOnly, ing, indexingState, logSink, &bgWG)
+	startEditorialImportPoller(runCtx, opts.readOnly, ing, &bgWG)
 	startEvidenceBaselineWarmer(runCtx, ret, indexingState, logSink, &bgWG)
 
 	// The server is now serving. A signal-triggered shutdown from here on is

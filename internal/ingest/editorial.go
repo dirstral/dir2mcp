@@ -58,6 +58,13 @@ type editorialState struct {
 	durations map[string]editorialDurationMemo
 	onReport  func(level string, report editorial.Report)
 	reportMu  sync.RWMutex
+	// writeMu separates document writers from the staged-import poller. A
+	// scan and a watch job hold it shared; the poller takes it exclusively
+	// with TryLock, so it checks and applies only while no writer runs.
+	writeMu sync.RWMutex
+	// scansDone counts finished scans. The poller waits for the first one,
+	// because the initial scan applies the staged imports itself.
+	scansDone atomic.Int64
 	// reindexing is set while Reindex runs.
 	reindexing atomic.Bool
 }
@@ -110,10 +117,66 @@ func (s *Service) HasStagedEditorialImports() bool {
 }
 
 // ApplyEditorialImports applies every staged import and rebuilds the retained
-// records whose inputs changed. A running daemon calls it when an import is
-// staged between scans; every scan calls it at its end.
+// records whose inputs changed. It waits until no scan or watch job writes
+// documents. Every scan also applies at its end.
 func (s *Service) ApplyEditorialImports(ctx context.Context) error {
+	s.editorial.writeMu.Lock()
+	defer s.editorial.writeMu.Unlock()
 	return s.runEditorialPass(ctx, false)
+}
+
+// HasPendingEditorialWork reports whether the poller has work: a staged
+// import, or a forced rebuild that a reindex left pending.
+func (s *Service) HasPendingEditorialWork() bool {
+	if strings.TrimSpace(s.cfg.StateDir) == "" {
+		return false
+	}
+	return s.HasStagedEditorialImports() || editorial.RebuildPending(s.cfg.StateDir)
+}
+
+// PollEditorialOnce is one tick of the staged-import poller (SPEC §7.11.1: a
+// running daemon applies a staged import without a restart). It does nothing
+// before the first scan has finished, and nothing while a scan or a watch job
+// writes documents: the exclusive lock is taken before the check, so a scan
+// cannot start between the check and the apply. It reports whether it ran a
+// pass.
+func (s *Service) PollEditorialOnce(ctx context.Context) (bool, error) {
+	if s.editorial.scansDone.Load() == 0 {
+		return false, nil
+	}
+	if !s.editorial.writeMu.TryLock() {
+		return false, nil
+	}
+	defer s.editorial.writeMu.Unlock()
+	if !s.HasPendingEditorialWork() {
+		return false, nil
+	}
+	return true, s.runEditorialPass(ctx, false)
+}
+
+// RunEditorialPoller polls for staged imports and pending rebuilds until ctx
+// ends. A daemon with ingest.watch off has no later scan pass, so this is what
+// applies an import staged while it runs.
+func (s *Service) RunEditorialPoller(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if _, err := s.PollEditorialOnce(ctx); err != nil && ctx.Err() == nil {
+			s.getLogger().Printf("editorial import: %v", err)
+		}
+	}
+}
+
+// HoldIndexWriteForTest holds the index write lock the way a running scan
+// does, until release is called. Tests use it to show that the poller waits.
+func (s *Service) HoldIndexWriteForTest() (release func()) {
+	s.editorial.writeMu.RLock()
+	return s.editorial.writeMu.RUnlock
 }
 
 // isFullReindex reports whether this scan is a full reindex. A reindex moves
@@ -197,6 +260,10 @@ type editorialRun struct {
 func (s *Service) applyStagedImport(ctx context.Context, es editorialStore, path string, folds editorial.Folds, matcher *secretmatch.Matcher) error {
 	staged, records, err := readStagedRecords(path)
 	if err != nil {
+		if !errors.Is(err, editorial.ErrInvalidStaged) {
+			// A read error leaves the file staged for the next pass.
+			return fmt.Errorf("read staged import %s: %w", filepath.Base(path), err)
+		}
 		s.getLogger().Printf("editorial import: %v; the file is set aside as %s.invalid", err, filepath.Base(path))
 		_ = os.Rename(path, path+".invalid")
 		return nil
@@ -239,7 +306,7 @@ func readStagedRecords(path string) (editorial.Staged, []editorial.Record, error
 	for i, raw := range staged.Records {
 		rec, perr := editorial.ParseRecord(raw, staged.Key, staged.Source)
 		if perr != nil {
-			return editorial.Staged{}, nil, fmt.Errorf("staged import %s: record %d: %w", filepath.Base(path), i+1, perr)
+			return editorial.Staged{}, nil, fmt.Errorf("%w: %s: record %d: %v", editorial.ErrInvalidStaged, filepath.Base(path), i+1, perr)
 		}
 		records = append(records, rec)
 	}

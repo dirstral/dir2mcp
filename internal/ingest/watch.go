@@ -565,6 +565,10 @@ type watchSkip struct {
 // process applies a debounced job: index the file, reconcile it, or mark it
 // deleted.
 func (w *fsWatchLoop) process(ctx context.Context, job watchJob) {
+	// A watch job writes a document, so the staged-import poller waits for it
+	// (see runScan).
+	w.svc.editorial.writeMu.RLock()
+	defer w.svc.editorial.writeMu.RUnlock()
 	rel, ok := w.relPath(job.absPath)
 	if !ok {
 		return

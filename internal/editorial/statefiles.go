@@ -198,6 +198,11 @@ func ListStaged(stateDir string) ([]string, error) {
 	return out, nil
 }
 
+// ErrInvalidStaged marks a staged import whose content does not decode or
+// validate. Only such a file is set aside; a read error is returned as is, so
+// the file stays staged and the next pass tries again.
+var ErrInvalidStaged = errors.New("invalid staged import")
+
 // ReadStaged reads one staged import file.
 func ReadStaged(path string) (Staged, error) {
 	data, err := os.ReadFile(path)
@@ -206,13 +211,13 @@ func ReadStaged(path string) (Staged, error) {
 	}
 	var staged Staged
 	if err := json.Unmarshal(data, &staged); err != nil {
-		return Staged{}, fmt.Errorf("decode staged import %s: %w", filepath.Base(path), err)
+		return Staged{}, fmt.Errorf("%w: decode %s: %v", ErrInvalidStaged, filepath.Base(path), err)
 	}
 	if staged.Format != stateFormat {
-		return Staged{}, fmt.Errorf("staged import %s has unknown format %d", filepath.Base(path), staged.Format)
+		return Staged{}, fmt.Errorf("%w: %s has unknown format %d", ErrInvalidStaged, filepath.Base(path), staged.Format)
 	}
 	if _, err := ParseKeyKind(staged.Key); err != nil {
-		return Staged{}, fmt.Errorf("staged import %s: %w", filepath.Base(path), err)
+		return Staged{}, fmt.Errorf("%w: %s: %v", ErrInvalidStaged, filepath.Base(path), err)
 	}
 	return staged, nil
 }

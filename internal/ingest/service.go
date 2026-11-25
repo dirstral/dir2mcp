@@ -2107,6 +2107,12 @@ func (s *Service) runScan(ctx context.Context) error {
 	if s.store == nil {
 		return errors.New("ingest store is not configured")
 	}
+	// A scan writes documents. The staged-import poller takes this lock
+	// exclusively, so it never applies an import while a scan (initial,
+	// reindex, watch rescan) writes (SPEC §7.11.1, one writer).
+	s.editorial.writeMu.RLock()
+	defer s.editorial.writeMu.RUnlock()
+	defer s.editorial.scansDone.Add(1)
 	// SPEC §8.2.4: the route-fallback gate reads one index per scan.
 	s.loadRouteFallbackIndex(ctx)
 	defer s.clearRouteFallbackIndex()

@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dirstral/dir2mcp/internal/appstate"
 	"github.com/dirstral/dir2mcp/internal/editorial"
 )
 
@@ -29,11 +28,10 @@ type editorialImportNotifier interface {
 	SetOnEditorialImport(fn func(level string, report editorial.Report))
 }
 
-// editorialImportApplier is the ingestor capability that applies staged
-// editorial imports outside a scan.
-type editorialImportApplier interface {
-	HasStagedEditorialImports() bool
-	ApplyEditorialImports(ctx context.Context) error
+// editorialImportPoller is the ingestor capability that applies staged
+// editorial imports, and pending rebuilds, between scans.
+type editorialImportPoller interface {
+	RunEditorialPoller(ctx context.Context, interval time.Duration)
 }
 
 // newEditorialImportEmitter emits each applied import's report as the
@@ -56,10 +54,11 @@ func (a *App) wireReindexEditorialEvents(global globalOptions, ing interface{}) 
 }
 
 // startEditorialImportPoller applies imports that are staged while the daemon
-// runs. A scan applies staged imports at its end, so the poller skips while a
-// scan runs; the ingestor's own lock keeps one apply at a time.
-func startEditorialImportPoller(ctx context.Context, readOnly bool, ing interface{}, indexingState *appstate.IndexingState, stderr io.Writer, wg *sync.WaitGroup) {
-	applier, ok := ing.(editorialImportApplier)
+// runs, and rebuilds a reindex left pending. The ingestor owns the writer
+// exclusion: a tick applies only after the first scan, and never while a scan
+// or a watch job writes documents.
+func startEditorialImportPoller(ctx context.Context, readOnly bool, ing interface{}, wg *sync.WaitGroup) {
+	poller, ok := ing.(editorialImportPoller)
 	if readOnly || !ok {
 		return
 	}
@@ -70,24 +69,7 @@ func startEditorialImportPoller(ctx context.Context, readOnly bool, ing interfac
 		if wg != nil {
 			defer wg.Done()
 		}
-		ticker := time.NewTicker(editorialImportPollInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			if indexingState != nil && indexingState.Snapshot().Running {
-				continue
-			}
-			if !applier.HasStagedEditorialImports() {
-				continue
-			}
-			if err := applier.ApplyEditorialImports(ctx); err != nil && ctx.Err() == nil {
-				writef(stderr, "editorial import: %v\n", err)
-			}
-		}
+		poller.RunEditorialPoller(ctx, editorialImportPollInterval)
 	}()
 }
 
