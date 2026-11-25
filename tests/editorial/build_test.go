@@ -3,6 +3,7 @@ package tests
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/dirstral/dir2mcp/internal/editorial"
 )
@@ -52,6 +53,37 @@ func TestBuild_UnknownDurationLastSegmentIsZeroLength(t *testing.T) {
 	}
 	if last := segs[2]; last.StartMS != 30000 || last.EndMS != 30000 {
 		t.Fatalf("last segment = [%d, %d], want the zero-length [30000, 30000]", last.StartMS, last.EndMS)
+	}
+}
+
+// Many segments with one start share one end and cost linear time: 100,000
+// equal starts would take billions of steps with a forward scan per segment.
+func TestBuild_ManyEqualStarts(t *testing.T) {
+	const n = 100000
+	segs := make([]editorial.Segment, 0, n+1)
+	for i := 0; i < n; i++ {
+		segs = append(segs, editorial.Segment{StartMS: 0, Text: "x"})
+	}
+	segs = append(segs, editorial.Segment{StartMS: 5000, Text: "y"})
+	rec := editorial.Record{Key: "a", Segments: segs}
+	start := time.Now()
+	built := editorial.Build(rec, editorial.Duration{MS: 9000, Known: true}, editorial.Folds{})
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Build took %s for %d equal starts", elapsed, n)
+	}
+	for i, a := range built.Annotations[:n] {
+		if a.EndMS != 5000 {
+			t.Fatalf("segment %d ends at %d, want 5000", i, a.EndMS)
+		}
+	}
+	if last := built.Annotations[n]; last.EndMS != 9000 {
+		t.Fatalf("the last segment ends at %d, want the duration 9000", last.EndMS)
+	}
+	unknown := editorial.Build(editorial.Record{Key: "a", Segments: segs[:3]}, editorial.Duration{}, editorial.Folds{})
+	for _, a := range unknown.Annotations {
+		if a.EndMS != 0 {
+			t.Fatalf("an equal-start last group with no duration ends at %d, want its own start 0", a.EndMS)
+		}
 	}
 }
 

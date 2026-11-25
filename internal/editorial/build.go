@@ -232,24 +232,36 @@ func buildSegments(segments []Segment, duration Duration, provenance map[string]
 		sorted = append(sorted, s)
 	}
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].StartMS < sorted[j].StartMS })
+	ends := segmentEnds(sorted, duration)
 	out := make([]Annotation, 0, len(sorted))
 	for i, s := range sorted {
-		end := s.StartMS
-		if duration.Known {
-			end = duration.MS
-		}
-		for _, next := range sorted[i+1:] {
-			if next.StartMS > s.StartMS {
-				end = next.StartMS
-				break
-			}
-		}
 		out = append(out, Annotation{
-			Text: strings.TrimSpace(s.Text), SpanKind: SpanTime, StartMS: s.StartMS, EndMS: end,
+			Text: strings.TrimSpace(s.Text), SpanKind: SpanTime, StartMS: s.StartMS, EndMS: ends[i],
 			Event: EventSegment, Attributes: copyAttrs(provenance),
 		})
 	}
 	return out, dropped
+}
+
+// segmentEnds computes the end of each sorted segment in one backward pass: the
+// start of the next segment with a greater offset. Segments that share a start
+// share an end, so many equal starts cost linear time. The last group ends at
+// the known duration, or at its own start when the duration is unknown.
+func segmentEnds(sorted []Segment, duration Duration) []int64 {
+	ends := make([]int64, len(sorted))
+	for i := len(sorted) - 1; i >= 0; i-- {
+		switch {
+		case i == len(sorted)-1 && duration.Known:
+			ends[i] = duration.MS
+		case i == len(sorted)-1:
+			ends[i] = sorted[i].StartMS
+		case sorted[i+1].StartMS > sorted[i].StartMS:
+			ends[i] = sorted[i+1].StartMS
+		default:
+			ends[i] = ends[i+1]
+		}
+	}
+	return ends
 }
 
 func setIfNotEmpty(attrs map[string]string, key, value string) {
