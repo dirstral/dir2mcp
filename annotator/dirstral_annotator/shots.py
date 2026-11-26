@@ -19,6 +19,7 @@ TransNetV2 was trained on. A three-hour broadcast is 270,000 such frames, about
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 
@@ -44,22 +45,27 @@ def iter_frames(path: str, ffmpeg: str = "ffmpeg") -> Iterator[bytes]:
     cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
            "-an", "-sn", "-dn", "-vf", f"fps={FPS:g},scale={WIDTH}:{HEIGHT}",
            "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        assert proc.stdout is not None
-        while True:
-            frame = proc.stdout.read(FRAME_BYTES)
-            if len(frame) < FRAME_BYTES:
-                break
-            yield frame
-    finally:
-        if proc.stdout is not None:
-            proc.stdout.close()
-        stderr = proc.stderr.read() if proc.stderr is not None else b""
-        if proc.wait() != 0:
-            # Only the last line: the full text can name local paths.
-            last = stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
-            raise RuntimeError(f"ffmpeg exited with status {proc.returncode}: {last[0][:300]}")
+    # stderr goes to a file, not a pipe: damaged media can write enough
+    # decoder errors to fill a pipe, and then ffmpeg would block before it
+    # writes more frames or exits, and so would this reader.
+    with tempfile.TemporaryFile() as errfile:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfile)
+        try:
+            assert proc.stdout is not None
+            while True:
+                frame = proc.stdout.read(FRAME_BYTES)
+                if len(frame) < FRAME_BYTES:
+                    break
+                yield frame
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.wait() != 0:
+                errfile.seek(0)
+                # Only the last line: the full text can name local paths.
+                lines = errfile.read().decode("utf-8", "replace").strip().splitlines()
+                last = lines[-1] if lines else ""
+                raise RuntimeError(f"ffmpeg exited with status {proc.returncode}: {last[:300]}")
 
 
 def predict_stream(frames: Iterable[bytes], predict: Predictor) -> list[float]:
