@@ -99,6 +99,17 @@ const (
 	DefaultRecognizeTimeoutPerMediaSecond = 2.0
 )
 
+// Shot detection defaults (SPEC §8.10.1). The threshold is the measured one
+// (design 0007): F1 0.947 against a learned detector on 50.6 hours of video.
+const (
+	DefaultShotsDetector              = "off"
+	DefaultShotsThreshold             = 0.2
+	DefaultShotsMinShotS              = 0.5
+	DefaultShotsTimeout               = 10 * time.Minute
+	DefaultShotsTimeoutPerMediaSecond = 1.0
+	DefaultShotsMaxKeyframeGapS       = 60.0
+)
+
 // defaultRetrievalMinScore is the shipped default for `retrieval.min_score`,
 // the RELATIVE pruning floor of SPEC §9.4.3, which requires the floor to ship
 // enabled. The floor compares each score as a RATIO to the best score of the
@@ -886,6 +897,16 @@ type Config struct {
 	// a thirty-second clip for hours (#894). 0 disables the scaling and leaves
 	// RecognizeTimeout as the only bound.
 	RecognizeTimeoutPerMediaSecond float64
+
+	// Shot detection and keyframes (SPEC §8.10, `media.shots.*`). Off by
+	// default. Shots are structure, not text: they produce no chunk.
+	ShotsDetector              string        // off | ffmpeg | serve
+	ShotsThreshold             float64       // ffmpeg: scene score that starts a shot
+	ShotsMinShotS              float64       // the shortest shot, in seconds
+	ShotsBaseURL               string        // serve: the backend's http(s) root
+	ShotsTimeout               time.Duration // serve: floor of the bound on one call
+	ShotsTimeoutPerMediaSecond float64       // serve: seconds of bound per second of media
+	ShotsMaxKeyframeGapS       float64       // longest time between two keyframes of a shot
 
 	// MediaSidecarsDisabled opts OUT of subtitle sidecar ingestion (spec
 	// §8.6.4). Sidecar ingestion is enabled by default (spec default
@@ -1693,6 +1714,13 @@ type fileConfig struct {
 	RecognizeServeCommand               *string
 	RecognizeTimeout                    *time.Duration
 	RecognizeTimeoutPerMediaSecond      *float64
+	ShotsDetector                       *string
+	ShotsThreshold                      *float64
+	ShotsMinShotS                       *float64
+	ShotsBaseURL                        *string
+	ShotsTimeout                        *time.Duration
+	ShotsTimeoutPerMediaSecond          *float64
+	ShotsMaxKeyframeGapS                *float64
 	QualityGatesEnabled                 *bool
 	LanguageDetectionEnabled            *bool
 	MediaSidecarsDisabled               *bool
@@ -1895,6 +1923,13 @@ type persistedConfig struct {
 	RecognizeServeCommand               string        `yaml:"recognize_serve_command"`
 	RecognizeTimeout                    time.Duration `yaml:"recognize_timeout"`
 	RecognizeTimeoutPerMediaSecond      float64       `yaml:"recognize_timeout_per_media_second"`
+	ShotsDetector                       string        `yaml:"media_shots_detector"`
+	ShotsThreshold                      float64       `yaml:"media_shots_threshold"`
+	ShotsMinShotS                       float64       `yaml:"media_shots_min_shot_s"`
+	ShotsBaseURL                        string        `yaml:"media_shots_base_url"`
+	ShotsTimeout                        time.Duration `yaml:"media_shots_timeout"`
+	ShotsTimeoutPerMediaSecond          float64       `yaml:"media_shots_timeout_per_media_second"`
+	ShotsMaxKeyframeGapS                float64       `yaml:"media_shots_max_keyframe_gap_s"`
 	QualityGatesEnabled                 bool          `yaml:"quality_gates_enabled"`
 	LanguageDetectionEnabled            bool          `yaml:"language_detection_enabled"`
 	MediaSidecarsDisabled               bool          `yaml:"media_sidecars_disabled"`
@@ -2211,6 +2246,12 @@ func Default() Config {
 		RecognizeProvider:              "off",
 		RecognizeTimeout:               DefaultRecognizeTimeout,
 		RecognizeTimeoutPerMediaSecond: DefaultRecognizeTimeoutPerMediaSecond,
+		ShotsDetector:                  DefaultShotsDetector,
+		ShotsThreshold:                 DefaultShotsThreshold,
+		ShotsMinShotS:                  DefaultShotsMinShotS,
+		ShotsTimeout:                   DefaultShotsTimeout,
+		ShotsTimeoutPerMediaSecond:     DefaultShotsTimeoutPerMediaSecond,
+		ShotsMaxKeyframeGapS:           DefaultShotsMaxKeyframeGapS,
 		STTMistralModel:                "voxtral-mini-latest",
 		STTElevenLabsModel:             "scribe_v1",
 		STTElevenLabsLanguageCode:      "",
@@ -2426,6 +2467,13 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		RecognizeServeCommand:               cfg.RecognizeServeCommand,
 		RecognizeTimeout:                    cfg.RecognizeTimeout,
 		RecognizeTimeoutPerMediaSecond:      cfg.RecognizeTimeoutPerMediaSecond,
+		ShotsDetector:                       cfg.ShotsDetector,
+		ShotsThreshold:                      cfg.ShotsThreshold,
+		ShotsMinShotS:                       cfg.ShotsMinShotS,
+		ShotsBaseURL:                        cfg.ShotsBaseURL,
+		ShotsTimeout:                        cfg.ShotsTimeout,
+		ShotsTimeoutPerMediaSecond:          cfg.ShotsTimeoutPerMediaSecond,
+		ShotsMaxKeyframeGapS:                cfg.ShotsMaxKeyframeGapS,
 		QualityGatesEnabled:                 cfg.QualityGatesEnabled,
 		LanguageDetectionEnabled:            cfg.LanguageDetectionEnabled,
 		MediaSidecarsDisabled:               cfg.MediaSidecarsDisabled,
@@ -2940,6 +2988,26 @@ func applyParsedFileOverrides(cfg *Config, fileCfg fileConfig) {
 	applyIngestFileParsed(cfg, fileCfg)
 	applyX402FileParsed(cfg, fileCfg)
 	applySourceFileParsed(cfg, fileCfg)
+	applyShotsFileParsed(cfg, fileCfg)
+}
+
+// applyShotsFileParsed copies the set media.shots file fields (SPEC §8.10.1)
+// onto cfg.
+func applyShotsFileParsed(cfg *Config, fc fileConfig) {
+	setIfPresent(&cfg.ShotsDetector, fc.ShotsDetector)
+	setIfPresent(&cfg.ShotsThreshold, fc.ShotsThreshold)
+	setIfPresent(&cfg.ShotsMinShotS, fc.ShotsMinShotS)
+	setIfPresent(&cfg.ShotsBaseURL, fc.ShotsBaseURL)
+	setIfPresent(&cfg.ShotsTimeout, fc.ShotsTimeout)
+	setIfPresent(&cfg.ShotsTimeoutPerMediaSecond, fc.ShotsTimeoutPerMediaSecond)
+	setIfPresent(&cfg.ShotsMaxKeyframeGapS, fc.ShotsMaxKeyframeGapS)
+}
+
+// setIfPresent assigns *src to *dst when the file set the key.
+func setIfPresent[T any](dst *T, src *T) {
+	if src != nil {
+		*dst = *src
+	}
 }
 
 // applySourceFileParsed overlays parsed corpus-source file fields onto
@@ -4332,6 +4400,14 @@ var configKeyAliases = map[string]string{
 	"recognize_serve_command":            "recognize.serve_command",
 	"recognize_timeout":                  "recognize.timeout",
 	"recognize_timeout_per_media_second": "recognize.timeout_per_media_second",
+	// media.shots (SPEC §8.10.1): the snapshot writer's flat spellings.
+	"media_shots_detector":                 "media.shots.detector",
+	"media_shots_threshold":                "media.shots.threshold",
+	"media_shots_min_shot_s":               "media.shots.min_shot_s",
+	"media_shots_base_url":                 "media.shots.base_url",
+	"media_shots_timeout":                  "media.shots.timeout",
+	"media_shots_timeout_per_media_second": "media.shots.timeout_per_media_second",
+	"media_shots_max_keyframe_gap_s":       "media.shots.max_keyframe_gap_s",
 }
 
 // canonicalizeConfigKey lower-cases and trims key and maps it through
@@ -4369,7 +4445,7 @@ func isMapSectionKey(key string) bool {
 		return true
 	case "source", "source.s3":
 		return true
-	case "media", "media.variants", "media.translate", "media.clip", "media.stt", "media.diarize", "media.batch":
+	case "media", "media.variants", "media.translate", "media.clip", "media.stt", "media.diarize", "media.batch", "media.shots":
 		return true
 	case "media.subtitles", "media.subtitles.ttml", "media.subtitles.smil", "media.subtitles.emit":
 		return true
@@ -4598,6 +4674,9 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.MediaSTTRedecodeBelow
 	case "recognize.timeout_per_media_second":
 		target = &cfg.RecognizeTimeoutPerMediaSecond
+	case "media.shots.threshold", "media.shots.min_shot_s",
+		"media.shots.timeout_per_media_second", "media.shots.max_keyframe_gap_s":
+		target = shotsFloatTarget(cfg, key)
 	default:
 		return nil
 	}
@@ -4610,6 +4689,16 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 	}
 	*target = floatPtr(parsed)
 	return nil
+}
+
+// shotsFloatTarget selects the media.shots float field for key (SPEC §8.10.1).
+func shotsFloatTarget(cfg *fileConfig, key string) **float64 {
+	return map[string]**float64{
+		"media.shots.threshold":                &cfg.ShotsThreshold,
+		"media.shots.min_shot_s":               &cfg.ShotsMinShotS,
+		"media.shots.timeout_per_media_second": &cfg.ShotsTimeoutPerMediaSecond,
+		"media.shots.max_keyframe_gap_s":       &cfg.ShotsMaxKeyframeGapS,
+	}[key]
 }
 
 // setDurationFileScalar parses value as a time.Duration and assigns it
@@ -4630,6 +4719,8 @@ func setDurationFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.RetrievalRecencyHalfLife
 	case "recognize.timeout":
 		target = &cfg.RecognizeTimeout
+	case "media.shots.timeout":
+		target = &cfg.ShotsTimeout
 	case "media.stt.route_retry_after":
 		target = &cfg.MediaSTTRouteRetryAfter
 	default:
@@ -4657,6 +4748,17 @@ func setStringFileScalar(cfg *fileConfig, key, value string) {
 	setIngestStringFileScalar(cfg, key, value)
 	setX402StringFileScalar(cfg, key, value)
 	setSourceStringFileScalar(cfg, key, value)
+	setShotsStringFileScalar(cfg, key, value)
+}
+
+// setShotsStringFileScalar assigns the media.shots string keys (SPEC §8.10.1).
+func setShotsStringFileScalar(cfg *fileConfig, key, value string) {
+	switch key {
+	case "media.shots.detector":
+		cfg.ShotsDetector = strPtr(value)
+	case "media.shots.base_url":
+		cfg.ShotsBaseURL = strPtr(value)
+	}
 }
 
 // setSourceStringFileScalar assigns corpus-source string keys onto the
@@ -5210,6 +5312,13 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("recognize_timeout", cfg.RecognizeTimeout.String())
 	writeScalar("recognize_timeout_per_media_second",
 		strconv.FormatFloat(cfg.RecognizeTimeoutPerMediaSecond, 'f', -1, 64))
+	writeScalar("media_shots_detector", cfg.ShotsDetector)
+	writeScalar("media_shots_threshold", strconv.FormatFloat(cfg.ShotsThreshold, 'f', -1, 64))
+	writeScalar("media_shots_min_shot_s", strconv.FormatFloat(cfg.ShotsMinShotS, 'f', -1, 64))
+	writeScalar("media_shots_base_url", cfg.ShotsBaseURL)
+	writeScalar("media_shots_timeout", cfg.ShotsTimeout.String())
+	writeScalar("media_shots_timeout_per_media_second", strconv.FormatFloat(cfg.ShotsTimeoutPerMediaSecond, 'f', -1, 64))
+	writeScalar("media_shots_max_keyframe_gap_s", strconv.FormatFloat(cfg.ShotsMaxKeyframeGapS, 'f', -1, 64))
 	writeScalar("stt_mistral_model", cfg.STTMistralModel)
 	writeScalar("stt_elevenlabs_model", cfg.STTElevenLabsModel)
 	writeScalar("stt_elevenlabs_language_code", cfg.STTElevenLabsLanguageCode)
@@ -5998,6 +6107,7 @@ func (c *Config) Validate() error {
 		c.validateMediaSTTRedecodeBelow,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
+		c.validateShots,
 		c.validateMediaTranslate,
 		c.validateAnnotationsNameFolds,
 		c.validateMediaSubtitles,
@@ -6199,6 +6309,44 @@ func (c *Config) validateRecognizeProvider() error {
 	}
 	return fmt.Errorf("CONFIG_INVALID: recognize.provider %q is not a recognized recognition backend; "+
 		"use serve or off", c.RecognizeProvider)
+}
+
+// validateShots applies the CONFIG_INVALID rules of SPEC §8.10.1.
+func (c *Config) validateShots() error {
+	detector := strings.ToLower(strings.TrimSpace(c.ShotsDetector))
+	switch detector {
+	case "", "off", "ffmpeg":
+	case "serve":
+		if err := validateShotsBaseURL(c.ShotsBaseURL); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("CONFIG_INVALID: media.shots.detector %q is not a shot detector; use off, ffmpeg or serve", c.ShotsDetector)
+	}
+	if math.IsNaN(c.ShotsThreshold) || c.ShotsThreshold <= 0 || c.ShotsThreshold > 1 {
+		return fmt.Errorf("CONFIG_INVALID: media.shots.threshold must be in (0, 1], got %v", c.ShotsThreshold)
+	}
+	if c.ShotsMinShotS < 0 || c.ShotsTimeout < 0 || c.ShotsTimeoutPerMediaSecond < 0 {
+		return fmt.Errorf("CONFIG_INVALID: media.shots.min_shot_s, media.shots.timeout and " +
+			"media.shots.timeout_per_media_second must be non-negative")
+	}
+	if math.IsNaN(c.ShotsMaxKeyframeGapS) || c.ShotsMaxKeyframeGapS < 1 {
+		return fmt.Errorf("CONFIG_INVALID: media.shots.max_keyframe_gap_s must be at least 1, got %v", c.ShotsMaxKeyframeGapS)
+	}
+	return nil
+}
+
+// validateShotsBaseURL requires an absolute http(s) URL with a host and no
+// user information. The error never repeats the URL (SPEC §8.10.1).
+func validateShotsBaseURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("CONFIG_INVALID: media.shots.detector \"serve\" requires media.shots.base_url to be an http(s) URL with a host")
+	}
+	if u.User != nil {
+		return fmt.Errorf("CONFIG_INVALID: media.shots.base_url must not embed credentials (user:password@host)")
+	}
+	return nil
 }
 
 // validateRecognizeTimeouts rejects a /recognize bound that cannot express a

@@ -942,6 +942,25 @@ CREATE TABLE IF NOT EXISTS emitted_artifacts (
 );
 CREATE INDEX IF NOT EXISTS emitted_artifacts_doc_idx ON emitted_artifacts(doc_id);
 
+CREATE TABLE IF NOT EXISTS media_shot_sets (
+  doc_id INTEGER PRIMARY KEY,
+  detector TEXT NOT NULL DEFAULT '',
+  identity_json TEXT NOT NULL DEFAULT '',
+  content_hash TEXT NOT NULL DEFAULT '',
+  created_unix INTEGER NOT NULL DEFAULT 0,
+  failed_unix INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_shots (
+  doc_id INTEGER NOT NULL,
+  shot_index INTEGER NOT NULL,
+  start_ms INTEGER NOT NULL,
+  end_ms INTEGER NOT NULL,
+  PRIMARY KEY (doc_id, shot_index),
+  FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS mcp_sessions (
   session_id TEXT PRIMARY KEY,
   created_unix INTEGER NOT NULL,
@@ -2486,6 +2505,10 @@ func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) e
 	// rename or move reaches here for the old path, so the record never
 	// outlives the path it was written for.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, NoSpeechIdentitySettingKey(normalizedPath)); err != nil {
+		return err
+	}
+	// A tombstoned document's shots are deleted with it (SPEC §8.10.6).
+	if err := deleteShotsForPath(ctx, tx, normalizedPath); err != nil {
 		return err
 	}
 
