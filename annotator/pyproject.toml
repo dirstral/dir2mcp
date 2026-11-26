@@ -26,6 +26,9 @@ jersey = ["ultralytics>=8.2", "pytesseract>=0.3", "Pillow>=10"]
 caption = ["torch>=2.4", "transformers>=4.57", "accelerate>=1.0", "Pillow>=10"]
 # Test runner + the schema-agreement contract test's validator. The tested
 # code is stdlib-only; the runner and jsonschema are external test tooling.
+# Served shot detection (SPEC 8.10.3, `serve --shots`). TransNetV2 runs on
+# torch, so like `caption` this extra is not part of `all`.
+shots = ["torch>=2.4", "transnetv2-pytorch>=1.0.5"]
 test = ["pytest>=8", "jsonschema>=4"]
 all = ["dirstral-annotator[ocr,face,jersey]"]
 

@@ -17,6 +17,10 @@
     # It is on by default. This turns it off and returns every cue:
     dirstral-annotate serve --news --news-min-chars 0 --news-min-agreement 0
 
+    # Also answer POST /shots with TransNetV2 cut times (dir2mcp
+    # media.shots.detector: serve). Needs the `shots` extra:
+    dirstral-annotate serve --news --shots
+
     # Phase-1 accuracy gate against Statcast ground truth
     dirstral-annotate eval game7.mp4 --roster roster.json \
         (--game-pk 745123 | --feed saved-gumbo.json) --anchor "EPOCH=VIDEO_S" \
@@ -109,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--games", type=Path, help="games.json: media basename -> play-by-play binding")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--shots", action="store_true",
+                   help="also answer POST /shots with TransNetV2 cut times (SPEC 8.10.3); needs the shots extra")
+    s.add_argument("--shots-device", default=None, metavar="DEV",
+                   help="torch device for --shots (default: cuda when available, else cpu)")
     vision_flags(s)
 
     e = sub.add_parser("eval", help="score recognition against Statcast ground truth")
@@ -267,7 +275,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         games = load_games(args.games) if args.games else {}
-        server = serve(_pipeline(args, roster, games), host=args.host, port=args.port)
+        shots = None
+        if args.shots:
+            from .shots import TransNetV2Shots  # torch is loaded only on request
+
+            shots = TransNetV2Shots(device=args.shots_device)  # fails loudly without the extra
+        server = serve(_pipeline(args, roster, games), host=args.host, port=args.port, shots=shots)
         print(f"recognition backend listening on http://{args.host}:{server.server_address[1]} "
               f"({len(games)} game binding(s))")
         try:

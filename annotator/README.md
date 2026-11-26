@@ -355,6 +355,31 @@ timeline on the video file. One suffices; several detect splices.
 Face bank layout: `bank/player_webb-logan/*.jpg` (10–20 images per player;
 `:` → `_` in dir names).
 
+### Shot detection (`--shots`)
+
+With `--shots`, the same server also answers `POST /shots` (dirstral-spec SPEC
+§8.10.3) with TransNetV2 cut times, for dir2mcp's `media.shots.detector: serve`.
+It needs the `shots` extra (torch), and it uses the GPU when there is one.
+
+```bash
+pip install -e '.[shots]'
+dirstral-annotate serve --news --shots --port 8765
+```
+
+```yaml
+media:
+  shots:
+    detector: serve
+    base_url: http://127.0.0.1:8765
+```
+
+Frames stream from ffmpeg at a fixed 25 fps and 48x27 pixels, so memory stays
+at one 100-frame window also for a long broadcast. On three 12-minute archive
+films it gave the same 217 cuts as the reference TransNetV2 run (all within
+0.1 s), at about 60 times real time on one GPU, decode included. TransNetV2
+finds cuts that ffmpeg's scene score misses: cuts inside an inset or
+split-screen picture, and cuts between dark shots (design 0007).
+
 ## Evaluate (the phase-1 gate)
 
 ```bash

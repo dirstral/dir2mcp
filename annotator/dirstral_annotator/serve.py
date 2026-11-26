@@ -27,7 +27,11 @@ log = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 1 << 20
 
 
-def make_handler(pipeline: Pipeline):
+def make_handler(pipeline: Pipeline, shots=None):
+    """Build the request handler. `shots` is an optional shot detector with
+    `identity()` and `cuts(path)` (see `shots.TransNetV2Shots`); without one,
+    `/shots` answers 404 like any unknown path."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 (http.server API)
             if self.path == "/health":
@@ -36,7 +40,7 @@ def make_handler(pipeline: Pipeline):
                 self._reply(404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802
-            if self.path != "/recognize":
+            if self.path != "/recognize" and not (self.path == "/shots" and shots is not None):
                 self._reply(404, {"error": "not found"})
                 return
             try:
@@ -53,6 +57,9 @@ def make_handler(pipeline: Pipeline):
                 return
             if not media.is_file():
                 self._reply(404, {"error": "media file not found"})
+                return
+            if self.path == "/shots":
+                self._shots(media)
                 return
             try:
                 annotations = pipeline.annotations_for(media)
@@ -76,6 +83,17 @@ def make_handler(pipeline: Pipeline):
             doc = Document(media=media.name, annotations=annotations)
             self._reply(200, build_response(doc, pipeline.roster))
 
+        def _shots(self, media: Path) -> None:
+            """SPEC §8.10.3: the cut times of one video. A failure is a 502 with
+            a stable code and no exception text, as for /recognize."""
+            try:
+                cuts = shots.cuts(str(media))
+            except Exception as exc:
+                log.error("shots %s failed\n%s", media.name, scrubbed_traceback(exc))
+                self._reply(502, {"error": "shot detection failed", "code": "SHOTS_FAILED"})
+                return
+            self._reply(200, {"detector": shots.identity(), "cuts": cuts})
+
         def _reply(self, status: int, payload: dict) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -90,6 +108,7 @@ def make_handler(pipeline: Pipeline):
     return Handler
 
 
-def serve(pipeline: Pipeline, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    """Build the server (caller runs serve_forever; tests use ephemeral ports)."""
-    return ThreadingHTTPServer((host, port), make_handler(pipeline))
+def serve(pipeline: Pipeline, host: str = "127.0.0.1", port: int = 8765, shots=None) -> ThreadingHTTPServer:
+    """Build the server (caller runs serve_forever; tests use ephemeral ports).
+    With a `shots` detector the server also answers POST /shots."""
+    return ThreadingHTTPServer((host, port), make_handler(pipeline, shots))
