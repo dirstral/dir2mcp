@@ -1250,8 +1250,9 @@ media:
 - The `ffmpeg` detector decodes several videos at once (a quarter of the CPUs;
   each decode is itself multi-threaded). It ran at about 133 times real time on 4
   threads, so the first scan of a large archive takes a long time: plan for it,
-  or detect on a box with more cores. A served detector gets one request at a
-  time; the backend sets its own throughput.
+  or detect on a box with more cores. A served detector gets 4 requests at
+  once: the reference TransNetV2 backend decodes them in parallel and shares
+  one GPU for the model.
 
 ### Fully local / no-egress setup
 

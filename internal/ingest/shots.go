@@ -120,16 +120,26 @@ type shotOutcome struct {
 	err        error
 }
 
-// ShotWorkers is how many videos the shots pass decodes at once. ffmpeg
-// already uses several threads for one decode, so a quarter of the CPUs keeps
-// the host responsive. A served detector gets one worker: the backend sets its
-// own throughput (one GPU), and parallel requests would only queue there.
+// ShotWorkers is how many videos the shots pass works on at once.
+//
+//   - ffmpeg decodes on this host and already uses several threads for one
+//     decode, so a quarter of the CPUs keeps the host responsive.
+//   - A served detector gets ServeShotWorkers requests at once. The backend
+//     decodes in parallel and takes turns only for the model: the reference
+//     TransNetV2 backend did three 12-minute films 2.2 times faster at once
+//     than one after another, on one GPU. One request at a time would leave
+//     that capacity unused and make a 30,000-hour archive take weeks.
 func ShotWorkers(detector shots.Detector, cpus int) int {
 	if _, ok := detector.(*shots.FFmpeg); ok {
 		return max(1, cpus/4)
 	}
-	return 1
+	return ServeShotWorkers
 }
+
+// ServeShotWorkers is the number of /shots requests in flight at once. The
+// backend's own GPU and decode capacity is the real limit, so it is a small
+// fixed number, not a share of this host's CPUs.
+const ServeShotWorkers = 4
 
 // detectShotsParallel runs the detector over todo with ShotWorkers workers and
 // streams the outcomes. A cancelled context stops the workers from starting a

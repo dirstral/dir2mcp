@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,13 +23,18 @@ import (
 // and a failure never holds back the done marker. Recognition is the step
 // that would be expensive to repeat, so these tests count its calls.
 
+// fakeShotDetector is called from the pass's worker pool, so its counter is
+// guarded.
 type fakeShotDetector struct {
+	mu    sync.Mutex
 	cuts  []int
 	fail  int // fail this many calls first
 	calls int
 }
 
 func (d *fakeShotDetector) Detect(_ context.Context, _ string) (shots.Result, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.calls++
 	if d.calls <= d.fail {
 		return shots.Result{}, errors.New("shots backend returned status 502")
@@ -261,8 +267,8 @@ func TestShots0103_ShotWorkers(t *testing.T) {
 			t.Fatalf("ffmpeg on 2 CPUs: %d workers, want at least 1", got)
 		}
 	}
-	if got := ingest.ShotWorkers(shots.NewServe("http://127.0.0.1:1", 0.5), 64); got != 1 {
-		t.Fatalf("served detector: %d workers, want 1 (the backend sets its own throughput)", got)
+	if got := ingest.ShotWorkers(shots.NewServe("http://127.0.0.1:1", 0.5), 64); got != ingest.ServeShotWorkers {
+		t.Fatalf("served detector: %d workers, want %d", got, ingest.ServeShotWorkers)
 	}
 }
 
