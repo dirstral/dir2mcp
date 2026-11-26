@@ -156,6 +156,10 @@ type recognizeWireResponse struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"recognizer"`
+	// Entities is the dictionary that names the ids annotations reference
+	// (SPEC §8.9.3). Kept, not dropped: §8.9.4 requires the referenced entries
+	// in the representation's meta_json.
+	Entities    []model.RecognizedEntity `json:"entities"`
 	Annotations []struct {
 		StartS     float64           `json:"start_s"`
 		EndS       float64           `json:"end_s"`
@@ -165,6 +169,7 @@ type recognizeWireResponse struct {
 		Confidence float64           `json:"confidence"`
 		Sources    []string          `json:"sources"`
 		Attributes map[string]string `json:"attributes"`
+		Derivation string            `json:"derivation"`
 	} `json:"annotations"`
 }
 
@@ -221,8 +226,16 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 	if err := json.NewDecoder(io.LimitReader(resp.Body, recognizeMaxResponseBytes)).Decode(&wire); err != nil {
 		return model.RecognizeResult{}, fmt.Errorf("decode recognize response: %w", err)
 	}
-	out := model.RecognizeResult{Name: wire.Recognizer.Name, Version: wire.Recognizer.Version}
+	out := model.RecognizeResult{Name: wire.Recognizer.Name, Version: wire.Recognizer.Version, Entities: wire.Entities}
 	for _, a := range wire.Annotations {
+		// SPEC §8.9.4: the sign and order checks use the RAW seconds. After
+		// rounding, start_s=1.0004/end_s=1.0001 would both be 1000 ms and pass
+		// as an instantaneous event, and start_s=-0.0001 would pass as 0.
+		// recognitionSegments repeats the checks on milliseconds for a
+		// recognizer that is not this client.
+		if a.StartS < 0 || a.EndS < a.StartS {
+			continue
+		}
 		out.Annotations = append(out.Annotations, model.RecognizedAnnotation{
 			StartMS:    int(math.Round(a.StartS * 1000)),
 			EndMS:      int(math.Round(a.EndS * 1000)),
@@ -232,6 +245,7 @@ func (c *RecognizeServeClient) Recognize(ctx context.Context, absPath string) (m
 			Confidence: a.Confidence,
 			Sources:    a.Sources,
 			Attributes: a.Attributes,
+			Derivation: a.Derivation,
 		})
 	}
 	return out, nil
@@ -372,6 +386,9 @@ type recognitionMeta struct {
 	Provider     string `json:"provider,omitempty"`
 	Model        string `json:"model,omitempty"`
 	ModelVersion string `json:"model_version,omitempty"`
+	// Entities is the dictionary entries that a persisted annotation
+	// references (SPEC §5.2, §8.9.4). Absent when there are none.
+	Entities []model.RecognizedEntity `json:"entities,omitempty"`
 }
 
 // RecognitionSegments is the exported counterpart of recognitionSegments,
@@ -389,6 +406,132 @@ func RecognitionSegments(anns []model.RecognizedAnnotation) ([]ChunkSegment, str
 	return out, hashInput
 }
 
+// validAnnotation is one well-formed annotation, normalized for storage and
+// hashing (SPEC §8.9.4).
+type validAnnotation struct {
+	startMS  int
+	endMS    int
+	text     string
+	entities []string
+	event    string
+	sources  []string
+	// attrKeys is the SORTED key list, computed once: maps iterate in
+	// random order, and both the canonical hash line and the stored span
+	// must see one deterministic order or identical annotations would hash
+	// differently run to run.
+	attrs    map[string]string
+	attrKeys []string
+	// derivation is the stored form: "generated" or "" (observed).
+	derivation string
+	// hashLine is this annotation's whole contribution to the derivation
+	// hash input, and also the final sort tie-break in recognitionSegments.
+	hashLine string
+}
+
+// canonicalLine renders one annotation as the line the rep_hash covers.
+//
+// The attribution joins the derivation hash: a backend that changes which
+// entities an annotation names, or which recognizer produced it, has
+// produced different content, and the representation must be re-derived
+// rather than kept because the prose happens to match (§8.6.7).
+//
+// Every variable-length field is LENGTH-PREFIXED rather than delimited.
+// Entity ids and recognizer tags are opaque backend-declared tokens, so any
+// delimiter can legitimately appear inside one: joining with commas would
+// encode ["a,b", "c"] and ["a", "b,c"] identically, and two genuinely
+// different attributions that hash the same would silently NOT re-derive.
+// That is the exact failure this input exists to prevent.
+//
+// The source group is APPENDED ONLY WHEN PRESENT, unlike the entity count.
+// The entity list ends at a known count, so a line either stops there or
+// continues with the source count: both readings are unambiguous. Emitting
+// "|0" instead would change the hash input of every annotation that carries
+// no sources, and that re-runs the recognition backend over a whole corpus
+// of video to store a field those annotations do not have.
+func (v validAnnotation) canonicalLine() string {
+	var line strings.Builder
+	fmt.Fprintf(&line, "%d|%d|%d:%s|%d:%s|%d",
+		v.startMS, v.endMS, len(v.text), v.text, len(v.event), v.event, len(v.entities))
+	for _, id := range v.entities {
+		fmt.Fprintf(&line, "|%d:%s", len(id), id)
+	}
+	if len(v.sources) > 0 {
+		fmt.Fprintf(&line, "|%d", len(v.sources))
+		for _, source := range v.sources {
+			fmt.Fprintf(&line, "|%d:%s", len(source), source)
+		}
+	}
+	// Attributes join the derivation hash the same way sources did (#9.10):
+	// APPENDED ONLY WHEN PRESENT, so every existing annotation's hash input
+	// is byte-identical and no corpus re-derives just because the field now
+	// exists. The group is tagged "A" because it must never be confusable
+	// with a sources group under any count: both are append-only optional
+	// suffixes, and a bare count could make {2 sources} and {2 attributes}
+	// collide. Keys are length-prefixed like every other opaque token, and
+	// iterated in sorted order because map order is random per run.
+	if len(v.attrKeys) > 0 {
+		fmt.Fprintf(&line, "|A%d", len(v.attrKeys))
+		for _, k := range v.attrKeys {
+			fmt.Fprintf(&line, "|%d:%s|%d:%s", len(k), k, len(v.attrs[k]), v.attrs[k])
+		}
+	}
+	// A generated derivation joins the hash the same way (SPEC §8.9.4):
+	// APPENDED ONLY WHEN PRESENT, so an observed annotation keeps the hash
+	// input it had before the field was read, and no corpus re-derives.
+	// The "D" tag keeps the group apart from the sources and "A" groups.
+	if v.derivation != "" {
+		fmt.Fprintf(&line, "|D%d:%s", len(v.derivation), v.derivation)
+	}
+	return line.String()
+}
+
+// newValidAnnotation normalizes one wire annotation and reports whether it is
+// well-formed. A malformed one (SPEC §8.9.4) is dropped by the caller while
+// its siblings proceed.
+func newValidAnnotation(ann model.RecognizedAnnotation) (validAnnotation, bool) {
+	text := strings.TrimSpace(ann.Text)
+	if text == "" || ann.StartMS < 0 || ann.EndMS < ann.StartMS {
+		return validAnnotation{}, false
+	}
+	v := validAnnotation{
+		startMS: ann.StartMS, endMS: ann.EndMS, text: text,
+		// Carried, not dropped: these are what an entity filter selects on
+		// (design 0004 §7). The backend is required to compute them, and
+		// persisting only the text made the filter unimplementable.
+		entities: model.NormalizeEntityIDs(ann.Entities),
+		event:    strings.TrimSpace(ann.Event),
+		// Carried for the same reason, but for a different question
+		// (df-005 0.3.0 `sources`): entities and event say WHAT the
+		// annotation is about, sources says WHICH recognizer said it. The
+		// backend has always sent it and this function used to drop it, so
+		// no client could tell a scorebug reading from a face match (#861).
+		// Provenance only: nothing downstream ranks or filters on it.
+		sources: model.NormalizeSources(ann.Sources),
+		attrs:   model.NormalizeAttributes(ann.Attributes),
+	}
+	// A reserved dir2mcp: key or two keys trimming to the same name with
+	// different values both make the annotation malformed (SPEC §9.10),
+	// and the established malformed-annotation behaviour is to DROP it
+	// while its siblings proceed (design 0004 §5, same as a reversed
+	// span), not to repair it: a stripped key would store an annotation
+	// the producer never sent, and a picked collision winner would store
+	// a value the producer may not have meant.
+	if malformedAttributes(ann.Attributes, v.attrs) {
+		return validAnnotation{}, false
+	}
+	// A derivation outside {observed, generated} is malformed in the same
+	// way (SPEC §8.9.4): the annotation is dropped, not stored as observed,
+	// because a guess could present a model's description as a record.
+	derivation, ok := model.NormalizeDerivation(ann.Derivation)
+	if !ok {
+		return validAnnotation{}, false
+	}
+	v.derivation = derivation
+	v.attrKeys = sortedAttributeKeys(v.attrs)
+	v.hashLine = v.canonicalLine()
+	return v, true
+}
+
 // recognitionSegments filters a backend's annotations to the well-formed ones,
 // sorts them deterministically, and returns the time-spanned chunk segments plus
 // the canonical string the derivation rep_hash is computed over.
@@ -404,107 +547,11 @@ func RecognitionSegments(anns []model.RecognizedAnnotation) ([]ChunkSegment, str
 // the last key because bounds and text alone do not identify an annotation: two
 // annotations can share all three and differ in their attribution.
 func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, string) {
-	type validAnnotation struct {
-		startMS  int
-		endMS    int
-		text     string
-		entities []string
-		event    string
-		sources  []string
-		// attrKeys is the SORTED key list, computed once: maps iterate in
-		// random order, and both the canonical hash line and the stored span
-		// must see one deterministic order or identical annotations would hash
-		// differently run to run.
-		attrs    map[string]string
-		attrKeys []string
-		// hashLine is this annotation's whole contribution to the derivation
-		// hash input, and also the final sort tie-break below.
-		hashLine string
-	}
-	// canonicalLine renders one annotation as the line the rep_hash covers.
-	//
-	// The attribution joins the derivation hash: a backend that changes which
-	// entities an annotation names, or which recognizer produced it, has
-	// produced different content, and the representation must be re-derived
-	// rather than kept because the prose happens to match (§8.6.7).
-	//
-	// Every variable-length field is LENGTH-PREFIXED rather than delimited.
-	// Entity ids and recognizer tags are opaque backend-declared tokens, so any
-	// delimiter can legitimately appear inside one: joining with commas would
-	// encode ["a,b", "c"] and ["a", "b,c"] identically, and two genuinely
-	// different attributions that hash the same would silently NOT re-derive.
-	// That is the exact failure this input exists to prevent.
-	//
-	// The source group is APPENDED ONLY WHEN PRESENT, unlike the entity count.
-	// The entity list ends at a known count, so a line either stops there or
-	// continues with the source count: both readings are unambiguous. Emitting
-	// "|0" instead would change the hash input of every annotation that carries
-	// no sources, and that re-runs the recognition backend over a whole corpus
-	// of video to store a field those annotations do not have.
-	canonicalLine := func(v validAnnotation) string {
-		var line strings.Builder
-		fmt.Fprintf(&line, "%d|%d|%d:%s|%d:%s|%d",
-			v.startMS, v.endMS, len(v.text), v.text, len(v.event), v.event, len(v.entities))
-		for _, id := range v.entities {
-			fmt.Fprintf(&line, "|%d:%s", len(id), id)
-		}
-		if len(v.sources) > 0 {
-			fmt.Fprintf(&line, "|%d", len(v.sources))
-			for _, source := range v.sources {
-				fmt.Fprintf(&line, "|%d:%s", len(source), source)
-			}
-		}
-		// Attributes join the derivation hash the same way sources did (#9.10):
-		// APPENDED ONLY WHEN PRESENT, so every existing annotation's hash input
-		// is byte-identical and no corpus re-derives just because the field now
-		// exists. The group is tagged "A" because it must never be confusable
-		// with a sources group under any count: both are append-only optional
-		// suffixes, and a bare count could make {2 sources} and {2 attributes}
-		// collide. Keys are length-prefixed like every other opaque token, and
-		// iterated in sorted order because map order is random per run.
-		if len(v.attrKeys) > 0 {
-			fmt.Fprintf(&line, "|A%d", len(v.attrKeys))
-			for _, k := range v.attrKeys {
-				fmt.Fprintf(&line, "|%d:%s|%d:%s", len(k), k, len(v.attrs[k]), v.attrs[k])
-			}
-		}
-		return line.String()
-	}
 	valid := make([]validAnnotation, 0, len(anns))
 	for _, ann := range anns {
-		text := strings.TrimSpace(ann.Text)
-		if text == "" || ann.StartMS < 0 || ann.EndMS < ann.StartMS {
-			continue
+		if v, ok := newValidAnnotation(ann); ok {
+			valid = append(valid, v)
 		}
-		v := validAnnotation{
-			startMS: ann.StartMS, endMS: ann.EndMS, text: text,
-			// Carried, not dropped: these are what an entity filter selects on
-			// (design 0004 §7). The backend is required to compute them, and
-			// persisting only the text made the filter unimplementable.
-			entities: model.NormalizeEntityIDs(ann.Entities),
-			event:    strings.TrimSpace(ann.Event),
-			// Carried for the same reason, but for a different question
-			// (df-005 0.3.0 `sources`): entities and event say WHAT the
-			// annotation is about, sources says WHICH recognizer said it. The
-			// backend has always sent it and this function used to drop it, so
-			// no client could tell a scorebug reading from a face match (#861).
-			// Provenance only: nothing downstream ranks or filters on it.
-			sources: model.NormalizeSources(ann.Sources),
-			attrs:   model.NormalizeAttributes(ann.Attributes),
-		}
-		// A reserved dir2mcp: key or two keys trimming to the same name with
-		// different values both make the annotation malformed (SPEC §9.10),
-		// and the established malformed-annotation behaviour is to DROP it
-		// while its siblings proceed (design 0004 §5, same as a reversed
-		// span), not to repair it: a stripped key would store an annotation
-		// the producer never sent, and a picked collision winner would store
-		// a value the producer may not have meant.
-		if malformedAttributes(ann.Attributes, v.attrs) {
-			continue
-		}
-		v.attrKeys = sortedAttributeKeys(v.attrs)
-		v.hashLine = canonicalLine(v)
-		valid = append(valid, v)
 	}
 	sort.Slice(valid, func(i, j int) bool {
 		if valid[i].startMS != valid[j].startMS {
@@ -534,13 +581,82 @@ func recognitionSegments(anns []model.RecognizedAnnotation) ([]chunkSegment, str
 			Span: model.Span{
 				Kind: "time", StartMS: v.startMS, EndMS: v.endMS,
 				Entities: v.entities, Event: v.event, Sources: v.sources,
-				Attributes: v.attrs,
+				Attributes: v.attrs, Derivation: v.derivation,
 			},
 		})
 		hashInput.WriteString(v.hashLine)
 		hashInput.WriteByte('\n')
 	}
 	return segments, hashInput.String()
+}
+
+// RecognitionEntityDictionary is the exported counterpart of
+// recognitionEntityDictionary, so the tests/ tree can pin which entries are
+// kept and that they join the derivation hash.
+func RecognitionEntityDictionary(defs []model.RecognizedEntity, segments []ChunkSegment) ([]model.RecognizedEntity, string) {
+	raw := make([]chunkSegment, 0, len(segments))
+	for _, seg := range segments {
+		raw = append(raw, chunkSegment(seg))
+	}
+	return recognitionEntityDictionary(defs, raw)
+}
+
+// recognitionEntityDictionary keeps the dictionary entries that a persisted
+// annotation references (SPEC §8.9.4) and returns them with their contribution
+// to the derivation hash input.
+//
+// An entry with an empty id or label is dropped. When an id is defined more
+// than once the first definition applies, so a repeated entry cannot change
+// the result by its position. An id that an annotation references but the
+// dictionary does not define stays on the span and is simply not named here.
+// The kept entries are sorted by id, so the response order cannot change the
+// stored meta or the hash.
+//
+// The hash input is EMPTY when nothing is kept, so a corpus recognized before
+// the dictionary was read keeps its rep_hash (the append-only rule of §8.9.4).
+// Otherwise it is one line tagged "E", which no annotation line can start
+// with (those start with a digit), every token length-prefixed for the reason
+// canonicalLine gives.
+func recognitionEntityDictionary(defs []model.RecognizedEntity, segments []chunkSegment) ([]model.RecognizedEntity, string) {
+	referenced := map[string]struct{}{}
+	for _, seg := range segments {
+		for _, id := range seg.Span.Entities {
+			referenced[id] = struct{}{}
+		}
+	}
+	if len(referenced) == 0 || len(defs) == 0 {
+		return nil, ""
+	}
+	seen := map[string]struct{}{}
+	kept := make([]model.RecognizedEntity, 0, len(referenced))
+	for _, def := range defs {
+		id, label := strings.TrimSpace(def.ID), strings.TrimSpace(def.Label)
+		if id == "" || label == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, ok := referenced[id]; !ok {
+			continue
+		}
+		kept = append(kept, model.RecognizedEntity{ID: id, Label: label, Aliases: model.NormalizeSources(def.Aliases)})
+	}
+	if len(kept) == 0 {
+		return nil, ""
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].ID < kept[j].ID })
+	var line strings.Builder
+	fmt.Fprintf(&line, "E|%d", len(kept))
+	for _, e := range kept {
+		fmt.Fprintf(&line, "|%d:%s|%d:%s|%d", len(e.ID), e.ID, len(e.Label), e.Label, len(e.Aliases))
+		for _, alias := range e.Aliases {
+			fmt.Fprintf(&line, "|%d:%s", len(alias), alias)
+		}
+	}
+	line.WriteByte('\n')
+	return kept, line.String()
 }
 
 // malformedAttributes reports whether the annotation's attributes disqualify
@@ -665,8 +781,13 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 
 	segments, hashInput := recognitionSegments(result.Annotations)
 	if len(segments) == 0 {
-		return false, nil
+		// A successful call with nothing to persist is an ANSWER, not a failure
+		// (SPEC §8.9.4). A failed call never reaches here (§8.9.6 keeps the
+		// earlier statements).
+		return false, s.settleEmptyRecognition(ctx, doc)
 	}
+	dictionary, dictionaryHash := recognitionEntityDictionary(result.Entities, segments)
+	hashInput += dictionaryHash
 
 	// #681: recognition statements are text this daemon derives from the media and
 	// then indexes, so they are screened before persistence. The scan runs over the
@@ -682,6 +803,7 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 		Provider:     s.cfg.RecognizeProvider,
 		Model:        result.Name,
 		ModelVersion: result.Version,
+		Entities:     dictionary,
 	})
 	if err != nil {
 		return false, fmt.Errorf("marshal recognition meta: %w", err)
@@ -707,6 +829,83 @@ func (s *Service) generateRecognitionRepresentation(ctx context.Context, doc mod
 	}
 	s.addRepresentations(1)
 	return true, nil
+}
+
+// settleEmptyRecognition decides what a successful recognition call that left
+// no annotation does to the document's earlier recognition (SPEC §8.9.4).
+//
+// When the media CHANGED, the earlier statements describe content that is gone,
+// so they are retired. When the media is the same, or the daemon cannot tell
+// (no stored content_hash, an archive member), they are KEPT with a warning: for
+// unchanged media an empty answer is more probably a backend fault than a real
+// change, and a reindex against a faulty backend must not erase the
+// annotations of a whole corpus.
+func (s *Service) settleEmptyRecognition(ctx context.Context, doc model.Document) error {
+	if s.contentChangedThisDoc && !s.archiveMemberThisDoc {
+		return s.retireRecognition(ctx, doc)
+	}
+	if s.hasActiveRecognition(ctx, doc.RelPath) {
+		s.getLogger().Printf("warning: recognition of %s returned no annotation for unchanged media; "+
+			"keeping its earlier recognition (SPEC §8.9.4). Check the recognition backend if this repeats", doc.RelPath)
+	}
+	return nil
+}
+
+// hasActiveRecognition reports whether the document has an active recognition
+// representation. A store without the optional capability, or a read error,
+// answers false: it only decides whether a warning is worth logging.
+func (s *Service) hasActiveRecognition(ctx context.Context, relPath string) bool {
+	lister, ok := s.store.(activeRepresentationLister)
+	if !ok {
+		return false
+	}
+	reps, err := lister.ActiveRepresentations(ctx, relPath)
+	if err != nil {
+		return false
+	}
+	for _, rep := range reps {
+		if rep.RepType == RepTypeRecognition {
+			return true
+		}
+	}
+	return false
+}
+
+// retireRecognition soft-deletes the document's active recognition
+// representations, and the summaries derived from them (§8.6.7), after a
+// successful recognition call that left no annotation for CHANGED media (SPEC
+// §8.9.4). A store without the optional list/retire capability, or a document
+// with nothing stored yet, has nothing to retire.
+func (s *Service) retireRecognition(ctx context.Context, doc model.Document) error {
+	lister, listOK := s.store.(activeRepresentationLister)
+	retirer, retireOK := s.store.(representationRetirer)
+	if !listOK || !retireOK {
+		return nil
+	}
+	reps, err := lister.ActiveRepresentations(ctx, doc.RelPath)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("list representations for %s: %w", doc.RelPath, err)
+	}
+	var ids []int64
+	for _, rep := range reps {
+		if rep.RepType == RepTypeRecognition {
+			ids = append(ids, rep.RepID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	ids = append(ids, summariesOfRepresentations(reps, ids)...)
+	retired, err := retirer.SoftDeleteRepresentations(ctx, doc.RelPath, ids)
+	if err != nil {
+		return fmt.Errorf("retire recognition of %s: %w", doc.RelPath, err)
+	}
+	s.getLogger().Printf("recognition of changed media %s returned no annotation; retired %d representation(s) so its earlier statements stop answering queries (SPEC §8.9.4)",
+		doc.RelPath, retired)
+	return nil
 }
 
 // recognizeMediaDuration resolves the media's duration for the duration-scaled

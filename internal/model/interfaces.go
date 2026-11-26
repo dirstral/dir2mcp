@@ -431,6 +431,18 @@ type RecognizedAnnotation struct {
 	// the producer MUST NOT emit; ingestion drops such an annotation as
 	// malformed while its siblings proceed (design 0004 §5).
 	Attributes map[string]string
+	// Derivation is the wire's `derivation`: "observed", "generated" or empty
+	// (SPEC §8.9.4, df-005). It is kept raw here; ingestion validates it and
+	// drops an annotation with any other value.
+	Derivation string
+}
+
+// RecognizedEntity is one entry of the backend's entity dictionary (SPEC
+// §8.9.3): the label and aliases that give an entity id a readable name.
+type RecognizedEntity struct {
+	ID      string   `json:"id"`
+	Label   string   `json:"label"`
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // RecognizeResult is a recognition backend's full response for one media
@@ -440,6 +452,9 @@ type RecognizeResult struct {
 	Name        string
 	Version     string
 	Annotations []RecognizedAnnotation
+	// Entities is the response's entity dictionary, as sent. Ingestion keeps
+	// the entries that a persisted annotation references (SPEC §8.9.4).
+	Entities []RecognizedEntity
 }
 
 // Recognizer runs content recognition over a media file (design 0004): given

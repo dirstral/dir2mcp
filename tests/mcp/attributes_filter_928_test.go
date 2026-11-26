@@ -162,3 +162,38 @@ func TestAttributes928_HitSpanSurfacesTheAttributes(t *testing.T) {
 		t.Fatalf("span attributes wrong: %s err=%v", raw, err)
 	}
 }
+
+// TestDerivation0102_GeneratedSpanIsServedAndObservedIsNot: spec 0.102.0 (SPEC
+// 8.9.4, df-005). A generated annotation must reach the client marked as such,
+// and an observed one carries no field, because absent means observed.
+func TestDerivation0102_GeneratedSpanIsServedAndObservedIsNot(t *testing.T) {
+	ret := &attrRecordingRetriever{hits: []model.SearchHit{
+		{ChunkID: 1, RelPath: "a.mp4", Snippet: "a presenter at a desk",
+			Span: model.Span{Kind: "time", StartMS: 0, EndMS: 1000, Event: "caption", Derivation: model.DerivationGenerated}},
+		{ChunkID: 2, RelPath: "a.mp4", Snippet: "ticker text",
+			Span: model.Span{Kind: "time", StartMS: 1000, EndMS: 2000, Event: "ocr"}},
+	}}
+	_, body := attrCall(t, ret, "dir2mcp_search", `{"query":"q"}`)
+	var env struct {
+		Result struct {
+			StructuredContent struct {
+				Hits []struct {
+					Span map[string]json.RawMessage `json:"span"`
+				} `json:"hits"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	hits := env.Result.StructuredContent.Hits
+	if len(hits) != 2 {
+		t.Fatalf("expected 2 hits, body: %s", body)
+	}
+	if string(hits[0].Span["derivation"]) != `"generated"` {
+		t.Fatalf("generated span served without its derivation: %s", body)
+	}
+	if _, ok := hits[1].Span["derivation"]; ok {
+		t.Fatalf("observed span carries a derivation field: %s", body)
+	}
+}
