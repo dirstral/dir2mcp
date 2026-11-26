@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/dirstral/dir2mcp/internal/shots"
@@ -67,6 +68,12 @@ func (s *SQLiteStore) ReplaceShots(ctx context.Context, docID int64, identity sh
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The pass detects outside any transaction, so a watch-driven delete can
+	// tombstone the document meanwhile. The check runs in the write
+	// transaction: a tombstoned document gets no shots back.
+	if active, err := documentActive(ctx, tx, docID); err != nil || !active {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO media_shot_sets (doc_id, detector, identity_json, content_hash, created_unix, failed_unix)
 		VALUES (?, ?, ?, ?, ?, 0)
@@ -102,11 +109,24 @@ func (s *SQLiteStore) MarkShotsFailed(ctx context.Context, docID int64, nowUnix 
 		return err
 	}
 	defer s.ReleaseDB()
+	// One statement, so the active-document check and the write are atomic:
+	// a tombstoned document gets no failure mark.
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO media_shot_sets (doc_id, failed_unix) VALUES (?, ?)
+		INSERT INTO media_shot_sets (doc_id, failed_unix)
+		SELECT ?, ? WHERE EXISTS (SELECT 1 FROM documents WHERE doc_id = ? AND deleted = 0)
 		ON CONFLICT(doc_id) DO UPDATE SET failed_unix = excluded.failed_unix`,
-		docID, nowUnix)
+		docID, nowUnix, docID)
 	return err
+}
+
+// documentActive reports whether the document exists and is not tombstoned.
+func documentActive(ctx context.Context, tx *sql.Tx, docID int64) (bool, error) {
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM documents WHERE doc_id = ? AND deleted = 0`, docID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Shots returns the stored shots of a document in index order. A document

@@ -297,3 +297,40 @@ func TestShots0103_ManyVideosAllGetShots(t *testing.T) {
 		}
 	}
 }
+
+// TestShots0103_NoWritesForATombstonedDocument: detection runs outside any
+// transaction, so a delete can land between the detection and the write. The
+// write then stores nothing for the deleted document.
+func TestShots0103_NoWritesForATombstonedDocument(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	writeFile(t, filepath.Join(root, "news.mp4"), "fake-video-bytes")
+	st := newShotsStore(t)
+	svc := newShotsService(t, root, st, &countingRecognizer{})
+	svc.SetShotDetector(nil)
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	doc := documentByPath(t, st, "news.mp4")
+	if err := st.MarkDocumentDeleted(ctx, "news.mp4"); err != nil {
+		t.Fatalf("MarkDocumentDeleted: %v", err)
+	}
+	id := shots.Identity{Detector: "serve", Name: "x", Version: "1", MinShotS: 0.5}
+	if err := st.ReplaceShots(ctx, doc.DocID, id, "c1", 1, []shots.Shot{{Index: 0, StartMS: 0, EndMS: 1000}}); err != nil {
+		t.Fatalf("ReplaceShots: %v", err)
+	}
+	if err := st.MarkShotsFailed(ctx, doc.DocID, 1); err != nil {
+		t.Fatalf("MarkShotsFailed: %v", err)
+	}
+	if got, err := st.Shots(ctx, doc.DocID); err != nil || len(got) != 0 {
+		t.Fatalf("a tombstoned document got shots: %v (err %v)", got, err)
+	}
+	states, err := st.VideoShotStates(ctx)
+	if err != nil {
+		t.Fatalf("VideoShotStates: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("a tombstoned document is still listed: %+v", states)
+	}
+}

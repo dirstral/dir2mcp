@@ -2470,7 +2470,7 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		ShotsDetector:                       cfg.ShotsDetector,
 		ShotsThreshold:                      cfg.ShotsThreshold,
 		ShotsMinShotS:                       cfg.ShotsMinShotS,
-		ShotsBaseURL:                        cfg.ShotsBaseURL,
+		ShotsBaseURL:                        persistableShotsBaseURL(cfg.ShotsBaseURL),
 		ShotsTimeout:                        cfg.ShotsTimeout,
 		ShotsTimeoutPerMediaSecond:          cfg.ShotsTimeoutPerMediaSecond,
 		ShotsMaxKeyframeGapS:                cfg.ShotsMaxKeyframeGapS,
@@ -5315,7 +5315,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("media_shots_detector", cfg.ShotsDetector)
 	writeScalar("media_shots_threshold", strconv.FormatFloat(cfg.ShotsThreshold, 'f', -1, 64))
 	writeScalar("media_shots_min_shot_s", strconv.FormatFloat(cfg.ShotsMinShotS, 'f', -1, 64))
-	writeScalar("media_shots_base_url", cfg.ShotsBaseURL)
+	writeScalar("media_shots_base_url", persistableShotsBaseURL(cfg.ShotsBaseURL))
 	writeScalar("media_shots_timeout", cfg.ShotsTimeout.String())
 	writeScalar("media_shots_timeout_per_media_second", strconv.FormatFloat(cfg.ShotsTimeoutPerMediaSecond, 'f', -1, 64))
 	writeScalar("media_shots_max_keyframe_gap_s", strconv.FormatFloat(cfg.ShotsMaxKeyframeGapS, 'f', -1, 64))
@@ -6334,6 +6334,20 @@ func (c *Config) validateShots() error {
 		return fmt.Errorf("CONFIG_INVALID: media.shots.max_keyframe_gap_s must be at least 1, got %v", c.ShotsMaxKeyframeGapS)
 	}
 	return nil
+}
+
+// persistableShotsBaseURL is media.shots.base_url as it may be written to a
+// file: without query, fragment or user information. A token in the query is
+// accepted at runtime (shots.ShotsEndpoint keeps it), but a persisted config
+// or snapshot must not store it in plain text. A value that does not parse is
+// written as is; validation rejects it at startup anyway.
+func persistableShotsBaseURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.User, u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment = nil, "", false, "", ""
+	return u.String()
 }
 
 // validateShotsBaseURL requires an absolute http(s) URL with a host and no

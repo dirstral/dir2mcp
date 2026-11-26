@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,5 +110,31 @@ func TestMediaShots0103_SnapshotRoundTrips(t *testing.T) {
 	}
 	if got.ShotsDetector != "ffmpeg" || got.ShotsThreshold != 0.25 || got.ShotsMaxKeyframeGapS != 45 {
 		t.Fatalf("round trip lost the shots keys: %q %v %v", got.ShotsDetector, got.ShotsThreshold, got.ShotsMaxKeyframeGapS)
+	}
+}
+
+// TestMediaShots0103_PersistedURLDropsTheQuery: a token in the base_url query
+// works at runtime but must not be written to a config file or snapshot.
+func TestMediaShots0103_PersistedURLDropsTheQuery(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShotsDetector = "serve"
+	cfg.ShotsBaseURL = "http://127.0.0.1:8766/api?token=SECRET123#frag"
+	path := filepath.Join(t.TempDir(), ".dir2mcp.yaml")
+	if err := config.SaveFile(path, cfg); err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "SECRET123") {
+		t.Fatalf("the saved config stores the query token:\n%s", raw)
+	}
+	got, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if got.ShotsBaseURL != "http://127.0.0.1:8766/api" {
+		t.Fatalf("persisted base_url = %q, want the host and path only", got.ShotsBaseURL)
 	}
 }
