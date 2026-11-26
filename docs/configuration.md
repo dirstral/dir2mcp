@@ -1219,6 +1219,41 @@ If the file is the same, the earlier annotations stay and a warning names the
 file: for unchanged media an empty answer is more probably a backend fault, and
 a reindex against a faulty backend must not erase a whole corpus (SPEC §8.9.4).
 
+### Shot detection and keyframes
+
+Shot detection (SPEC §8.10) finds where a video cuts from one camera take to the
+next. It is off by default. Shots are structure, not text: they add no search
+results of their own. Later per-shot steps (captions, on-screen text) read them.
+
+```yaml
+media:
+  shots:
+    detector: ffmpeg          # off (default) | ffmpeg | serve
+    threshold: 0.2            # ffmpeg: scene score that starts a new shot
+    min_shot_s: 0.5           # a cut nearer than this to the previous one is dropped
+    max_keyframe_gap_s: 60    # a long shot gets one keyframe per 60 s
+    # serve only:
+    # base_url: http://127.0.0.1:8766   # POST /shots returns cut times
+    # timeout: 10m
+    # timeout_per_media_second: 1.0
+```
+
+- **`ffmpeg`** needs only the `ffmpeg` tool: no model, no GPU. On a 50-hour news
+  sample it agreed with a learned detector at F1 0.947, but it misses cuts inside
+  an inset or split-screen picture and between dark shots (design 0007).
+- **`serve`** calls a backend that runs a learned detector (for example
+  TransNetV2). Use it when those cuts matter.
+- Detection runs at the end of each scan, as its own step. Turning it on for an
+  indexed corpus detects the shots of every video without reprocessing anything
+  else, and a failure never marks a document as an error: the next scan retries
+  only the shot detection.
+- The `ffmpeg` detector decodes several videos at once (a quarter of the CPUs;
+  each decode is itself multi-threaded). It ran at about 133 times real time on 4
+  threads, so the first scan of a large archive takes a long time: plan for it,
+  or detect on a box with more cores. A served detector gets 4 requests at
+  once: the reference TransNetV2 backend decodes them in parallel and shares
+  one GPU for the model.
+
 ### Fully local / no-egress setup
 
 The default quickstart (and `.env.example`) configures **cloud** providers, so a corpus is processed by third-party APIs (Mistral for embeddings/OCR/STT/generation, ElevenLabs for voice). If your data must **not leave the host** (data-residency / compliance / on-prem archives), configure every capability against endpoints you run — dir2mcp treats a self-hosted provider as first-class (SPEC §8.5) and needs no cloud key.

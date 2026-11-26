@@ -398,6 +398,23 @@ func (b *batchRun) recordSkippedWithCode(relPath, code string) {
 	})
 }
 
+// recordStepFailure writes a manifest record for a step that failed on its own
+// without failing the asset (SPEC §8.10.7: a shot detection). The record names
+// the step as its pass, so it never reads as the asset's own outcome. It does
+// not advance progress. No-op on nil or when the manifest is disabled.
+func (b *batchRun) recordStepFailure(relPath, step, code, message string) {
+	if b == nil {
+		return
+	}
+	b.write(batchManifestRecord{
+		RelPath:      relPath,
+		Status:       batchStatusError,
+		ErrorCode:    code,
+		ErrorMessage: message,
+		Pass:         step,
+	})
+}
+
 // close flushes and closes the manifest file. Safe to call on nil.
 func (b *batchRun) close() {
 	if b == nil {

@@ -28,6 +28,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/quality"
 	"github.com/dirstral/dir2mcp/internal/scancache"
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
+	"github.com/dirstral/dir2mcp/internal/shots"
 	"github.com/dirstral/dir2mcp/internal/statefs"
 	"github.com/dirstral/dir2mcp/internal/store"
 	"github.com/dirstral/dir2mcp/internal/subexport"
@@ -75,6 +76,11 @@ type Service struct {
 	// that turns video into time-ranged annotation statements. Nil when
 	// recognize.provider is off (the default).
 	recognizer model.Recognizer
+	// shotDetector is the shot detector (SPEC §8.10), resolved once on the
+	// first shots pass; nil when detection is off or ffmpeg is missing.
+	shotDetector shots.Detector
+	shotsMu      sync.Mutex
+	shotsDone    bool // the detector is resolved (also when the result is nil)
 	// recognizeBackendPID is the managed backend child's pid (0 when dir2mcp
 	// did not launch one); recognizeHealthWait overrides the startup health
 	// deadline (tests).
@@ -2334,6 +2340,9 @@ func (s *Service) finishScan(ctx context.Context, existing, seen map[string]stru
 	// rebuilds the retained ones (SPEC §7.11.1, §7.11.3). Never fatal: an
 	// editorial failure must not fail the scan that indexed the corpus.
 	s.runEditorialPassLogged(ctx, s.isFullReindex())
+	// Shot detection is its own step (SPEC §8.10.6): it runs after the
+	// documents, reads only the shot sets, and never fails the scan.
+	s.runShotsPassLogged(ctx, s.isFullReindex())
 	s.commitOutputReconciliation(ctx)
 	return nil
 }
