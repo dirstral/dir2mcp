@@ -1,6 +1,6 @@
 """Pin backend ↔ spec agreement: the response `serve` returns must validate
-against the draft wire-contract schema shipped with dirstral-spec design
-0004. Skipped only when the schema (submodule) isn't checked out; a missing
+against the normative wire-contract schema in dirstral-spec
+(spec/recognize/response.schema.json, SPEC §8.9.3). Skipped only when the schema (submodule) isn't checked out; a missing
 `jsonschema` is a hard error (install the `test` extra), not a silent skip —
 otherwise this contract test would pass without validating anything.
 
@@ -21,7 +21,9 @@ from dirstral_annotator.model import Annotation, Document, Player, slug_entity_i
 from dirstral_annotator.recognizers.playbyplay import NOTABILITY_EVENTS, PlayByPlayRecognizer
 from dirstral_annotator.roster import Roster
 
-SCHEMA_REL = "docs/design/0004-recognize-response.schema.json"
+# The normative copy since spec 0.102.0 (SPEC §8.9.3); the design-folder
+# draft is kept only for history and marked superseded.
+SCHEMA_REL = "spec/recognize/response.schema.json"
 
 
 def find_schema() -> Path | None:
@@ -37,7 +39,7 @@ def find_schema() -> Path | None:
 def test_serve_response_validates_against_design_0004_draft_schema():
     schema_path = find_schema()
     if schema_path is None:
-        pytest.skip("dirstral-spec design-0004 draft schema not available")
+        pytest.skip("dirstral-spec recognize response schema not available")
     import json
 
     doc = Document(
@@ -68,7 +70,7 @@ def test_the_notability_cues_are_legal_wire():
     """
     schema_path = find_schema()
     if schema_path is None:
-        pytest.skip("dirstral-spec design-0004 draft schema not available")
+        pytest.skip("dirstral-spec recognize response schema not available")
     import json
 
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
