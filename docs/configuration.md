@@ -1212,6 +1212,13 @@ only when dir2mcp cannot prove the request never reached the backend (a route th
 drops packets also hangs until the clock runs out, and that is a misconfiguration,
 not a slow recognizer).
 
+**When the backend answers with no annotation.** A successful answer with no
+annotation is not a failure. If the media file changed since the earlier run,
+its earlier annotations are retired, because they describe content that is gone.
+If the file is the same, the earlier annotations stay and a warning names the
+file: for unchanged media an empty answer is more probably a backend fault, and
+a reindex against a faulty backend must not erase a whole corpus (SPEC §8.9.4).
+
 ### Fully local / no-egress setup
 
 The default quickstart (and `.env.example`) configures **cloud** providers, so a corpus is processed by third-party APIs (Mistral for embeddings/OCR/STT/generation, ElevenLabs for voice). If your data must **not leave the host** (data-residency / compliance / on-prem archives), configure every capability against endpoints you run — dir2mcp treats a self-hosted provider as first-class (SPEC §8.5) and needs no cloud key.
