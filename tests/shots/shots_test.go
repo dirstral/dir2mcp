@@ -279,3 +279,17 @@ func TestServeDetector_TransportErrorHidesTheURL(t *testing.T) {
 		t.Fatalf("the transport error repeats the URL: %v", err)
 	}
 }
+
+func TestShotsEndpoint_KeepsTheQuery(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://127.0.0.1:8766":           "http://127.0.0.1:8766/shots",
+		"http://127.0.0.1:8766/":          "http://127.0.0.1:8766/shots",
+		"http://host/api/":                "http://host/api/shots",
+		"http://127.0.0.1:8766?token=abc": "http://127.0.0.1:8766/shots?token=abc",
+		"http://host/api/?token=abc&x=1":  "http://host/api/shots?token=abc&x=1",
+	} {
+		if got := shots.ShotsEndpoint(in); got != want {
+			t.Errorf("ShotsEndpoint(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -157,7 +157,7 @@ func lastLine(s string) string {
 
 // Serve is the served detector (SPEC §8.10.3): POST {base_url}/shots.
 type Serve struct {
-	baseURL  string
+	endpoint string
 	minShotS float64
 	client   *http.Client
 }
@@ -166,7 +166,20 @@ type Serve struct {
 // client-level timeout: the per-document bound arrives on the context (SPEC
 // §8.10.3, the same rules as §8.9.5).
 func NewServe(baseURL string, minShotS float64) *Serve {
-	return &Serve{baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"), minShotS: minShotS, client: &http.Client{}}
+	return &Serve{endpoint: ShotsEndpoint(baseURL), minShotS: minShotS, client: &http.Client{}}
+}
+
+// ShotsEndpoint appends /shots to the PATH of base_url and keeps its query, so
+// http://host:8766?token=abc becomes http://host:8766/shots?token=abc. A
+// string join would put "/shots" inside the query. A base_url that does not
+// parse (config validation rejects it) falls back to the plain join.
+func ShotsEndpoint(baseURL string) string {
+	raw := strings.TrimSpace(baseURL)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return strings.TrimRight(raw, "/") + "/shots"
+	}
+	return u.JoinPath("shots").String()
 }
 
 // LocalIdentity returns the fields of a served identity that the
@@ -192,7 +205,7 @@ func (s *Serve) Detect(ctx context.Context, absPath string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("shots: marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/shots", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return Result{}, fmt.Errorf("shots: build request: %w", err)
 	}
