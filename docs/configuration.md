@@ -1247,6 +1247,11 @@ media:
   indexed corpus detects the shots of every video without reprocessing anything
   else, and a failure never marks a document as an error: the next scan retries
   only the shot detection.
+- The `ffmpeg` detector decodes several videos at once (a quarter of the CPUs;
+  each decode is itself multi-threaded). It ran at about 133 times real time on 4
+  threads, so the first scan of a large archive takes a long time: plan for it,
+  or detect on a box with more cores. A served detector gets one request at a
+  time; the backend sets its own throughput.
 
 ### Fully local / no-egress setup
 

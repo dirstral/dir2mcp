@@ -247,3 +247,47 @@ func TestShots0103_CancelledResolutionIsRetried(t *testing.T) {
 		t.Fatal("the resolution after a cancelled one must build the detector")
 	}
 }
+
+func TestShots0103_ShotWorkers(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		ff, err := shots.NewFFmpeg(context.Background(), 0.2, 0.5)
+		if err != nil {
+			t.Fatalf("NewFFmpeg: %v", err)
+		}
+		if got := ingest.ShotWorkers(ff, 16); got != 4 {
+			t.Fatalf("ffmpeg on 16 CPUs: %d workers, want 4", got)
+		}
+		if got := ingest.ShotWorkers(ff, 2); got != 1 {
+			t.Fatalf("ffmpeg on 2 CPUs: %d workers, want at least 1", got)
+		}
+	}
+	if got := ingest.ShotWorkers(shots.NewServe("http://127.0.0.1:1", 0.5), 64); got != 1 {
+		t.Fatalf("served detector: %d workers, want 1 (the backend sets its own throughput)", got)
+	}
+}
+
+// TestShots0103_ManyVideosAllGetShots runs the pass over several videos, so
+// the pool hands out every job and the single writer stores every outcome.
+func TestShots0103_ManyVideosAllGetShots(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := testutil.TempDir(t)
+	names := []string{"a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4", "f.mp4"}
+	for _, n := range names {
+		writeFile(t, filepath.Join(root, n), "fake-video-bytes-"+n)
+	}
+	st := newShotsStore(t)
+	det := &fakeShotDetector{cuts: []int{5000}}
+	svc := newShotsService(t, root, st, &countingRecognizer{})
+	svc.SetShotDetector(det)
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, n := range names {
+		doc := documentByPath(t, st, n)
+		got, err := st.Shots(ctx, doc.DocID)
+		if err != nil || len(got) != 2 {
+			t.Fatalf("%s: shots = %v (err %v), want 2", n, got, err)
+		}
+	}
+}

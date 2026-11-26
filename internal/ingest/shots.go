@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/secretmatch"
@@ -94,16 +96,71 @@ func (s *Service) runShotsPass(ctx context.Context, force bool) error {
 		return fmt.Errorf("compile secret patterns: %w", err)
 	}
 	want := detector.LocalIdentity()
+	var todo []store.VideoShotState
 	for _, state := range states {
-		if err := ctx.Err(); err != nil {
-			return err
+		if needsShotDetection(state, want, force) {
+			todo = append(todo, state)
 		}
-		if !needsShotDetection(state, want, force) {
-			continue
-		}
-		s.detectShotsForDocument(ctx, st, detector, state, secrets)
+	}
+	// Detection runs in a bounded pool, so the first scan of a large archive
+	// does not decode one video at a time. The store writes stay on this
+	// goroutine: one writer, no concurrent SQLite transactions.
+	for outcome := range s.detectShotsParallel(ctx, detector, todo) {
+		s.settleShotOutcome(ctx, st, outcome, secrets)
 	}
 	return ctx.Err()
+}
+
+// shotOutcome is the result of one detection, carried from a worker to the
+// single writer.
+type shotOutcome struct {
+	state      store.VideoShotState
+	result     shots.Result
+	durationMS int
+	err        error
+}
+
+// ShotWorkers is how many videos the shots pass decodes at once. ffmpeg
+// already uses several threads for one decode, so a quarter of the CPUs keeps
+// the host responsive. A served detector gets one worker: the backend sets its
+// own throughput (one GPU), and parallel requests would only queue there.
+func ShotWorkers(detector shots.Detector, cpus int) int {
+	if _, ok := detector.(*shots.FFmpeg); ok {
+		return max(1, cpus/4)
+	}
+	return 1
+}
+
+// detectShotsParallel runs the detector over todo with ShotWorkers workers and
+// streams the outcomes. A cancelled context stops the workers from starting a
+// new video; the channel closes when every started detection has returned.
+func (s *Service) detectShotsParallel(ctx context.Context, detector shots.Detector, todo []store.VideoShotState) <-chan shotOutcome {
+	jobs := make(chan store.VideoShotState)
+	out := make(chan shotOutcome)
+	var wg sync.WaitGroup
+	for range ShotWorkers(detector, runtime.NumCPU()) {
+		wg.Go(func() {
+			for state := range jobs {
+				result, durationMS, err := s.detectShots(ctx, detector, state.RelPath)
+				out <- shotOutcome{state: state, result: result, durationMS: durationMS, err: err}
+			}
+		})
+	}
+	go func() {
+		defer close(jobs)
+		for _, state := range todo {
+			select {
+			case jobs <- state:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
 }
 
 // needsShotDetection applies the re-detection rules of SPEC §8.10.6. A
@@ -125,12 +182,12 @@ func NeedsShotDetection(state store.VideoShotState, want shots.Identity, force b
 	return needsShotDetection(state, want, force)
 }
 
-// detectShotsForDocument detects and stores the shots of one video. Every
-// failure is soft (SPEC §8.10.7): a warning, the run's error count, a
-// SHOTS_FAILED manifest record and a failure mark on the shot set. The done
-// marker and every representation of the document stay as they are.
-func (s *Service) detectShotsForDocument(ctx context.Context, st shotStore, detector shots.Detector, state store.VideoShotState, secrets *secretmatch.Matcher) {
-	result, durationMS, err := s.detectShots(ctx, detector, state.RelPath)
+// settleShotOutcome stores one detection. Every failure is soft (SPEC
+// §8.10.7): a warning, the run's error count, a SHOTS_FAILED manifest record
+// and a failure mark on the shot set. The done marker and every
+// representation of the document stay as they are.
+func (s *Service) settleShotOutcome(ctx context.Context, st shotStore, o shotOutcome, secrets *secretmatch.Matcher) {
+	state, result, durationMS, err := o.state, o.result, o.durationMS, o.err
 	if err != nil {
 		if ctx.Err() != nil {
 			return // the daemon stops; this says nothing about the document
