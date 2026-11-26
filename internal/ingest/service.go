@@ -79,7 +79,8 @@ type Service struct {
 	// shotDetector is the shot detector (SPEC §8.10), resolved once on the
 	// first shots pass; nil when detection is off or ffmpeg is missing.
 	shotDetector shots.Detector
-	shotsResolve sync.Once
+	shotsMu      sync.Mutex
+	shotsDone    bool // the detector is resolved (also when the result is nil)
 	// recognizeBackendPID is the managed backend child's pid (0 when dir2mcp
 	// did not launch one); recognizeHealthWait overrides the startup health
 	// deadline (tests).

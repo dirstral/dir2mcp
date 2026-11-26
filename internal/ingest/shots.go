@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/secretmatch"
 	"github.com/dirstral/dir2mcp/internal/shots"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -27,28 +28,37 @@ type shotStore interface {
 // SetShotDetector overrides the shot detector (tests). A nil detector turns
 // detection off for this service.
 func (s *Service) SetShotDetector(d shots.Detector) {
-	s.shotsResolve.Do(func() {})
-	s.shotDetector = d
+	s.shotsMu.Lock()
+	defer s.shotsMu.Unlock()
+	s.shotDetector, s.shotsDone = d, true
 }
 
 // resolveShotDetector builds the configured detector once (SPEC §8.10.1). A
-// host without ffmpeg gets one warning and no detection for the run; that is
-// not a per-document failure.
+// host without ffmpeg gets one warning and no detection; that is not a
+// per-document failure. A resolution cut short by a cancelled context is NOT
+// cached, so the next scan tries again instead of running with no detector.
 func (s *Service) resolveShotDetector(ctx context.Context) shots.Detector {
-	s.shotsResolve.Do(func() {
-		minShotS := s.cfg.ShotsMinShotS
-		switch strings.ToLower(strings.TrimSpace(s.cfg.ShotsDetector)) {
-		case shots.DetectorFFmpeg:
-			d, err := shots.NewFFmpeg(ctx, s.cfg.ShotsThreshold, minShotS)
-			if err != nil {
-				s.getLogger().Printf("warning: media.shots.detector is ffmpeg but %v; no shots are detected (SPEC §8.10.1)", err)
-				return
+	s.shotsMu.Lock()
+	defer s.shotsMu.Unlock()
+	if s.shotsDone || ctx.Err() != nil {
+		return s.shotDetector
+	}
+	minShotS := s.cfg.ShotsMinShotS
+	switch strings.ToLower(strings.TrimSpace(s.cfg.ShotsDetector)) {
+	case shots.DetectorFFmpeg:
+		d, err := shots.NewFFmpeg(ctx, s.cfg.ShotsThreshold, minShotS)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
 			}
+			s.getLogger().Printf("warning: media.shots.detector is ffmpeg but %v; no shots are detected (SPEC §8.10.1)", err)
+		} else {
 			s.shotDetector = d
-		case shots.DetectorServe:
-			s.shotDetector = shots.NewServe(s.cfg.ShotsBaseURL, minShotS)
 		}
-	})
+	case shots.DetectorServe:
+		s.shotDetector = shots.NewServe(s.cfg.ShotsBaseURL, minShotS)
+	}
+	s.shotsDone = true
 	return s.shotDetector
 }
 
@@ -77,6 +87,12 @@ func (s *Service) runShotsPass(ctx context.Context, force bool) error {
 	if err != nil {
 		return fmt.Errorf("list video shot states: %w", err)
 	}
+	// Failure messages reach the log and the run manifest, which must carry a
+	// redacted message (SPEC §8.6.11), so they pass the secret patterns.
+	secrets, err := compileSecretMatcher(s.cfg)
+	if err != nil {
+		return fmt.Errorf("compile secret patterns: %w", err)
+	}
 	want := detector.LocalIdentity()
 	for _, state := range states {
 		if err := ctx.Err(); err != nil {
@@ -85,7 +101,7 @@ func (s *Service) runShotsPass(ctx context.Context, force bool) error {
 		if !needsShotDetection(state, want, force) {
 			continue
 		}
-		s.detectShotsForDocument(ctx, st, detector, state)
+		s.detectShotsForDocument(ctx, st, detector, state, secrets)
 	}
 	return ctx.Err()
 }
@@ -113,7 +129,7 @@ func NeedsShotDetection(state store.VideoShotState, want shots.Identity, force b
 // failure is soft (SPEC §8.10.7): a warning, the run's error count, a
 // SHOTS_FAILED manifest record and a failure mark on the shot set. The done
 // marker and every representation of the document stay as they are.
-func (s *Service) detectShotsForDocument(ctx context.Context, st shotStore, detector shots.Detector, state store.VideoShotState) {
+func (s *Service) detectShotsForDocument(ctx context.Context, st shotStore, detector shots.Detector, state store.VideoShotState, secrets *secretmatch.Matcher) {
 	result, durationMS, err := s.detectShots(ctx, detector, state.RelPath)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -123,12 +139,12 @@ func (s *Service) detectShotsForDocument(ctx context.Context, st shotStore, dete
 			s.getLogger().Printf("warning: shots: %s: media duration unknown; no shots detected (SPEC §8.10.4)", state.RelPath)
 			return
 		}
-		s.recordShotsFailure(ctx, st, state, err)
+		s.recordShotsFailure(ctx, st, state, err, secrets)
 		return
 	}
 	list := shots.CutsToShots(result.CutsMS, durationMS, int(s.cfg.ShotsMinShotS*1000+0.5))
 	if err := st.ReplaceShots(ctx, state.DocID, result.Identity, state.ContentHash, time.Now().Unix(), list); err != nil {
-		s.recordShotsFailure(ctx, st, state, err)
+		s.recordShotsFailure(ctx, st, state, err, secrets)
 	}
 }
 
@@ -168,8 +184,8 @@ func (s *Service) detectShots(ctx context.Context, detector shots.Detector, relP
 }
 
 // recordShotsFailure applies the soft-failure rules of SPEC §8.10.7.
-func (s *Service) recordShotsFailure(ctx context.Context, st shotStore, state store.VideoShotState, cause error) {
-	message := cause.Error()
+func (s *Service) recordShotsFailure(ctx context.Context, st shotStore, state store.VideoShotState, cause error, secrets *secretmatch.Matcher) {
+	message := RedactSecretsInMessage(cause.Error(), secrets)
 	s.getLogger().Printf("warning: shot detection failed for %s: %s; its earlier shots and representations stay, and the next scan retries shot detection alone (SPEC §8.10.7)",
 		state.RelPath, message)
 	s.addErrors(1)
@@ -177,4 +193,10 @@ func (s *Service) recordShotsFailure(ctx context.Context, st shotStore, state st
 	if err := st.MarkShotsFailed(ctx, state.DocID, time.Now().Unix()); err != nil {
 		s.getLogger().Printf("warning: record shot failure for %s: %v", state.RelPath, err)
 	}
+}
+
+// ResolveShotDetector is the exported counterpart of resolveShotDetector, so
+// the tests/ tree can pin that a cancelled resolution is retried.
+func (s *Service) ResolveShotDetector(ctx context.Context) shots.Detector {
+	return s.resolveShotDetector(ctx)
 }

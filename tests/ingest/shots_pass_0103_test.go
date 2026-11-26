@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -145,8 +146,8 @@ func TestShots0103_AFailureRetriesOnlyShotDetection(t *testing.T) {
 		t.Fatalf("status=%q content_hash=%q: a shot failure must not fail the document or hold back its done marker",
 			doc.Status, doc.ContentHash)
 	}
-	if got, _ := st.Shots(ctx, doc.DocID); len(got) != 0 {
-		t.Fatalf("a failed detection stored shots: %v", got)
+	if got, err := st.Shots(ctx, doc.DocID); err != nil || len(got) != 0 {
+		t.Fatalf("a failed detection stored shots: %v (err %v)", got, err)
 	}
 
 	if err := svc.Run(ctx); err != nil {
@@ -158,8 +159,8 @@ func TestShots0103_AFailureRetriesOnlyShotDetection(t *testing.T) {
 	if rec.calls != 1 {
 		t.Fatalf("recognition calls = %d, want 1: a shot failure must not rerun recognition", rec.calls)
 	}
-	if got, _ := st.Shots(ctx, doc.DocID); len(got) != 2 {
-		t.Fatalf("shots after the retry = %v, want 2", got)
+	if got, err := st.Shots(ctx, doc.DocID); err != nil || len(got) != 2 {
+		t.Fatalf("shots after the retry = %v (err %v), want 2", got, err)
 	}
 }
 
@@ -211,8 +212,8 @@ func TestShots0103_TombstoneDeletesShots(t *testing.T) {
 		t.Fatalf("Run 1: %v", err)
 	}
 	doc := documentByPath(t, st, "news.mp4")
-	if got, _ := st.Shots(ctx, doc.DocID); len(got) != 2 {
-		t.Fatalf("shots = %v, want 2", got)
+	if got, err := st.Shots(ctx, doc.DocID); err != nil || len(got) != 2 {
+		t.Fatalf("shots = %v (err %v), want 2", got, err)
 	}
 	if err := os.Remove(video); err != nil {
 		t.Fatal(err)
@@ -220,7 +221,29 @@ func TestShots0103_TombstoneDeletesShots(t *testing.T) {
 	if err := svc.Run(ctx); err != nil {
 		t.Fatalf("Run 2: %v", err)
 	}
-	if got, _ := st.Shots(ctx, doc.DocID); len(got) != 0 {
-		t.Fatalf("a tombstoned document kept its shots: %v", got)
+	if got, err := st.Shots(ctx, doc.DocID); err != nil || len(got) != 0 {
+		t.Fatalf("a tombstoned document kept its shots: %v (err %v)", got, err)
+	}
+}
+
+// TestShots0103_CancelledResolutionIsRetried: a scan cancelled while the
+// detector is resolved must not leave the service without a detector for
+// every later scan.
+func TestShots0103_CancelledResolutionIsRetried(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	cfg := config.Default()
+	cfg.RootDir = testutil.TempDir(t)
+	cfg.StateDir = testutil.TempDir(t)
+	cfg.ShotsDetector = "ffmpeg"
+	svc := mustNewIngestService(t, cfg, newShotsStore(t))
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if d := svc.ResolveShotDetector(cancelled); d != nil {
+		t.Fatalf("a cancelled resolution returned a detector: %T", d)
+	}
+	if d := svc.ResolveShotDetector(context.Background()); d == nil {
+		t.Fatal("the resolution after a cancelled one must build the detector")
 	}
 }

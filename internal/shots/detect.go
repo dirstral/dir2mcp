@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -174,12 +175,15 @@ func (s *Serve) LocalIdentity() Identity {
 	return Identity{Detector: DetectorServe, MinShotS: s.minShotS}
 }
 
+// serveResponse is the wire shape (spec/shots/response.schema.json). The
+// pointers tell an absent or null field from an empty one: `cuts: []` is a
+// valid answer (one shot), a missing `cuts` is not.
 type serveResponse struct {
-	Detector struct {
+	Detector *struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"detector"`
-	Cuts []float64 `json:"cuts"`
+	Cuts *[]float64 `json:"cuts"`
 }
 
 // Detect asks the backend for the cuts of the video at absPath.
@@ -195,6 +199,12 @@ func (s *Serve) Detect(ctx context.Context, absPath string) (Result, error) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// A *url.Error repeats the request URL, and a base_url can carry a
+		// token in its query. Report the operation and the cause only.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			return Result{}, fmt.Errorf("shots: backend request: %s: %w", uerr.Op, uerr.Err)
+		}
 		return Result{}, fmt.Errorf("shots: backend request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -213,8 +223,18 @@ func (s *Serve) Detect(ctx context.Context, absPath string) (Result, error) {
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return Result{}, fmt.Errorf("shots: decode response: %w", err)
 	}
+	// A 200 that is null, or that lacks the detector identity or the cuts, is
+	// a malformed answer, not "no cuts": storing it as one shot would record a
+	// current identity, and no later scan would retry it.
+	if wire.Detector == nil || strings.TrimSpace(wire.Detector.Name) == "" ||
+		strings.TrimSpace(wire.Detector.Version) == "" {
+		return Result{}, errors.New("shots: response has no detector name and version")
+	}
+	if wire.Cuts == nil {
+		return Result{}, errors.New("shots: response has no cuts array")
+	}
 	id := s.LocalIdentity()
 	id.Name = strings.TrimSpace(wire.Detector.Name)
 	id.Version = strings.TrimSpace(wire.Detector.Version)
-	return Result{Identity: id, CutsMS: SecondsToMS(wire.Cuts)}, nil
+	return Result{Identity: id, CutsMS: SecondsToMS(*wire.Cuts)}, nil
 }

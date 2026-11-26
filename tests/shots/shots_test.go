@@ -232,3 +232,50 @@ func TestNewFFmpeg_MissingToolIsDistinct(t *testing.T) {
 		t.Fatalf("err = %v, want ErrToolNotFound", err)
 	}
 }
+
+// TestServeDetector_MalformedAnswersFail: a 200 without the detector identity
+// or the cuts is not "no cuts" (it would be stored as one current shot and
+// never retried); `cuts: []` stays a valid answer.
+func TestServeDetector_MalformedAnswersFail(t *testing.T) {
+	for name, body := range map[string]string{
+		"null":        `null`,
+		"empty":       `{}`,
+		"no detector": `{"cuts":[1.0]}`,
+		"no version":  `{"detector":{"name":"x"},"cuts":[1.0]}`,
+		"no cuts":     `{"detector":{"name":"x","version":"1"}}`,
+		"null cuts":   `{"detector":{"name":"x","version":"1"},"cuts":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			if _, err := shots.NewServe(srv.URL, 0.5).Detect(context.Background(), "/abs/a.mp4"); err == nil {
+				t.Fatalf("%s: want an error", body)
+			}
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"detector":{"name":"x","version":"1"},"cuts":[]}`))
+	}))
+	defer srv.Close()
+	res, err := shots.NewServe(srv.URL, 0.5).Detect(context.Background(), "/abs/a.mp4")
+	if err != nil || len(res.CutsMS) != 0 {
+		t.Fatalf("cuts: [] must be a valid answer: %+v, %v", res, err)
+	}
+}
+
+// TestServeDetector_TransportErrorHidesTheURL: a base_url can carry a token
+// in its query, and the error reaches the log and the run manifest.
+func TestServeDetector_TransportErrorHidesTheURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := srv.URL
+	srv.Close() // nothing listens now: the request fails in transport
+	_, err := shots.NewServe(base+"/?token=SECRET123", 0.5).Detect(context.Background(), "/abs/a.mp4")
+	if err == nil {
+		t.Fatal("want a transport error")
+	}
+	if strings.Contains(err.Error(), "SECRET123") || strings.Contains(err.Error(), base) {
+		t.Fatalf("the transport error repeats the URL: %v", err)
+	}
+}
